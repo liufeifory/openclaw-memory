@@ -73,7 +73,20 @@
       "Bash(chmod +x /Users/liufei/.openclaw/plugins/openclaw-memory/services.sh)",
       "Bash(/Users/liufei/.openclaw/plugins/openclaw-memory/services.sh status:*)",
       "Bash(git init:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git config:*)",
+      "Bash(gh repo:*)",
+      "Bash(gh --version 2>&1 || echo \"需要安装 gh\")",
+      "Bash(echo \"feifei!411A\" | gh auth login --hostname github.com --login liufei411 --with-token 2>&1 || gh auth login --hostname github.com --login liufei411 2>&1)",
+      "Bash(gh auth:*)",
+      "Bash(python3 profile.py 2>&1)",
+      "Bash(python3 profile.py)",
+      "Bash(./services.sh status:*)",
+      "Bash(echo \"=== 测试 memory-server 响应时间 ===\" \nfor i in 1 2 3 4 5; do\n  echo \"请求 $i:\"\n  time curl -s -X POST http://localhost:8082/memory/search \\\\\n    -H \"Content-Type: application/json\" \\\\\n    -d '{\"query\": \"用户想学什么编程语言\", \"top_k\": 5, \"threshold\": 0.6}' | jq '.count'\n  echo \"\"\ndone)",
+      "Bash(echo \"=== 两个 openclaw-memory 目录对比 ===\" \necho \"\"\necho \"1. /Users/liufei/.openclaw/plugins/openclaw-memory\"\nls -la /Users/liufei/.openclaw/plugins/openclaw-memory/*.py 2>/dev/null | head -10\necho \"\"\necho \"2. /Users/liufei/.openclaw/extensions/openclaw-memory\"\nls -la /Users/liufei/.openclaw/extensions/openclaw-memory/*.py 2>/dev/null | head -10)",
+      "Bash(diff -r /Users/liufei/.openclaw/plugins/openclaw-memory /Users/liufei/.openclaw/extensions/openclaw-memory --exclude=\"*.swp\" --exclude=\".git\" --exclude=\"logs\" --exclude=\"__pycache__\" 2>/dev/null | head -50)",
+      "Bash(git push:*)",
+      "Bash(git pull:*)"
     ]
   }
 }
