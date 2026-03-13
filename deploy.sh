@@ -417,17 +417,15 @@ setup_openclaw_config() {
     },
     "entries": {
       "${PLUGIN_NAME}": {
-        "enabled": true
-      }
-    },
-    "configs": {
-      "${PLUGIN_NAME}": {
-        "backend": "qdrant",
-        "qdrant": {
-          "url": "http://localhost:${QDRANT_PORT}"
-        },
-        "embedding": {
-          "endpoint": "http://localhost:${LLAMA_SERVER_PORT}"
+        "enabled": true,
+        "config": {
+          "backend": "qdrant",
+          "qdrant": {
+            "url": "http://localhost:${QDRANT_PORT}"
+          },
+          "embedding": {
+            "endpoint": "http://localhost:${LLAMA_SERVER_PORT}"
+          }
         }
       }
     }
@@ -444,16 +442,17 @@ EOF
 const fs = require('fs');
 const config = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf8'));
 if (!config.plugins) config.plugins = {};
-if (!config.plugins.configs) config.plugins.configs = {};
-config.plugins.configs['${PLUGIN_NAME}'] = {
-  backend: 'qdrant',
-  qdrant: { url: 'http://localhost:${QDRANT_PORT}' },
-  embedding: { endpoint: 'http://localhost:${LLAMA_SERVER_PORT}' }
+if (!config.plugins.entries) config.plugins.entries = {};
+config.plugins.entries['${PLUGIN_NAME}'] = {
+  enabled: true,
+  config: {
+    backend: 'qdrant',
+    qdrant: { url: 'http://localhost:${QDRANT_PORT}' },
+    embedding: { endpoint: 'http://localhost:${LLAMA_SERVER_PORT}' }
+  }
 };
 if (!config.plugins.slots) config.plugins.slots = {};
 config.plugins.slots.memory = '${PLUGIN_NAME}';
-if (!config.plugins.entries) config.plugins.entries = {};
-config.plugins.entries['${PLUGIN_NAME}'] = { enabled: true };
 fs.writeFileSync('$CONFIG_FILE', JSON.stringify(config, null, 2) + '\n');
 console.log('Config updated');
 "
@@ -631,9 +630,8 @@ uninstall() {
         node -e "
 const fs = require('fs');
 const config = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf8'));
-if (config.plugins && config.plugins.configs) delete config.plugins.configs['${PLUGIN_NAME}'];
-if (config.plugins && config.plugins.slots && config.plugins.slots.memory === '${PLUGIN_NAME}') delete config.plugins.slots.memory;
 if (config.plugins && config.plugins.entries) delete config.plugins.entries['${PLUGIN_NAME}'];
+if (config.plugins && config.plugins.slots && config.plugins.slots.memory === '${PLUGIN_NAME}') delete config.plugins.slots.memory;
 fs.writeFileSync('$CONFIG_FILE', JSON.stringify(config, null, 2) + '\n');
 "
     fi
