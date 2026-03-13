@@ -72,6 +72,44 @@ export class QdrantDatabase {
             payload: r.payload,
         }));
     }
+    /**
+     * Get a single memory by ID.
+     */
+    async get(id) {
+        const result = await this.client.retrieve(COLLECTION_NAME, {
+            ids: [id],
+            with_payload: true,
+        });
+        return result.length > 0
+            ? { id: result[0].id, payload: result[0].payload }
+            : null;
+    }
+    /**
+     * Update payload for an existing memory.
+     */
+    async updatePayload(id, payload) {
+        await this.client.setPayload(COLLECTION_NAME, {
+            points: [id],
+            payload: payload,
+        });
+    }
+    /**
+     * Scroll through memories with optional filter.
+     * Use limit: 100 for each batch, use offset for pagination.
+     */
+    async scroll(filter, limit = 100, offset) {
+        const result = await this.client.scroll(COLLECTION_NAME, {
+            limit,
+            offset,
+            filter: filter ? this.buildFilter(filter) : undefined,
+            with_payload: true,
+            with_vector: false,
+        });
+        return result.points.map(p => ({
+            id: p.id,
+            payload: p.payload,
+        }));
+    }
     buildFilter(filter) {
         const conditions = [];
         if (filter.type) {

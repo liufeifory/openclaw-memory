@@ -6,7 +6,7 @@
  * - Memory promotion: episodic -> semantic when access_count > 10
  * - Reflection generation: every 50 episodic memories
  */
-import type { QdrantDatabase } from './qdrant-client.js';
+import { QdrantDatabase } from './qdrant-client.js';
 export interface MemoryMaintenanceConfig {
     decayFactor?: number;
     promotionThreshold?: number;

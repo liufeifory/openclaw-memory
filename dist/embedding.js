@@ -17,15 +17,27 @@ export class EmbeddingService {
         if (Array.isArray(result)) {
             let emb = result[0]?.embedding;
             if (Array.isArray(emb) && Array.isArray(emb[0])) {
-                return emb[0]; // Unwrap nested array
+                emb = emb[0]; // Unwrap nested array
             }
-            return emb;
+            else if (Array.isArray(emb)) {
+                // Already flat array
+            }
+            return this.normalize(emb);
         }
         let emb = result.embedding;
         if (Array.isArray(emb) && Array.isArray(emb[0])) {
-            return emb[0];
+            emb = emb[0];
         }
-        return emb;
+        return this.normalize(emb);
+    }
+    /**
+     * Normalize embedding vector to unit length for cosine similarity.
+     */
+    normalize(vector) {
+        const magnitude = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));
+        if (magnitude === 0)
+            return vector;
+        return vector.map(v => v / magnitude);
     }
 }
 //# sourceMappingURL=embedding.js.map

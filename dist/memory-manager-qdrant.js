@@ -29,32 +29,18 @@ export class MemoryManager {
     async retrieveRelevant(query, topK = 10, threshold = 0.6) {
         // Generate embedding for query
         const embedding = await this.embedding.embed(query);
-        // Search all memories (no type filter)
+        // Search all memories including reflections
         const searchResults = await this.memoryStore.search(embedding, topK, threshold);
-        // Get reflection memories (highest priority)
-        const reflectionMemories = await this.memoryStore.getReflection(5);
-        // Combine results
-        const results = [];
-        // Add reflection memories first (highest importance)
-        for (const ref of reflectionMemories) {
-            results.push({
-                id: ref.id,
-                type: 'reflection',
-                content: ref.summary,
-                importance: ref.importance,
-                similarity: 1.0,
-                created_at: ref.created_at,
-                access_count: ref.access_count,
-            });
-        }
-        // Add search results
-        for (const m of searchResults) {
-            results.push(m);
+        // Increment access count for retrieved memories (for importance learning)
+        for (const mem of searchResults) {
+            if (mem.type === 'episodic' || mem.type === 'semantic') {
+                await this.memoryStore.incrementAccess(mem.id, mem.type);
+            }
         }
         // Sort by combined score (similarity × importance)
-        results.sort((a, b) => (b.similarity * b.importance) - (a.similarity * a.importance));
-        // Filter by threshold and limit
-        return results
+        searchResults.sort((a, b) => (b.similarity * b.importance) - (a.similarity * a.importance));
+        // Apply threshold and limit
+        return searchResults
             .filter(r => r.similarity >= threshold)
             .slice(0, 5);
     }
@@ -67,11 +53,12 @@ export class MemoryManager {
     }
     /**
      * Store memory asynchronously (non-blocking).
+     * Uses internal queue to avoid blocking the conversation flow.
      */
     async storeMemory(sessionId, content, importance = 0.5) {
-        // Fire and forget
-        this.memoryStore.storeEpisodic(sessionId, content, importance).catch(err => {
-            console.error('[MemoryManager] Failed to store memory:', err);
+        // Add to async queue - returns immediately
+        this.memoryStore.enqueueStorage(async () => {
+            await this.memoryStore.storeEpisodic(sessionId, content, importance);
         });
     }
     /**

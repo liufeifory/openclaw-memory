@@ -32,6 +32,7 @@ export declare class MemoryManager {
     buildContext(sessionId: string, memories: MemoryWithSimilarity[], recentConversation?: string): string;
     /**
      * Store memory asynchronously (non-blocking).
+     * Uses internal queue to avoid blocking the conversation flow.
      */
     storeMemory(sessionId: string, content: string, importance?: number): Promise<void>;
     /**

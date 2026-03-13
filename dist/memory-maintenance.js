@@ -31,17 +31,40 @@ export class MemoryMaintenance {
     async runDecay() {
         const cutoff = new Date();
         cutoff.setDate(cutoff.getDate() - this.config.olderThanDays);
-        // Get stats first
-        const stats = await this.db.getStats();
-        console.log(`[MemoryMaintenance] Running decay on ${stats.total_points} memories`);
-        // Note: Qdrant doesn't support bulk updates efficiently
-        // In production, you would:
-        // 1. Query all memories with created_at < cutoff
-        // 2. Apply decay to each
-        // 3. Upsert back to Qdrant
-        // For now, we just log that decay should be applied
-        console.log(`[MemoryMaintenance] Decay factor: ${this.config.decayFactor}`);
-        return { episodicDecayed: 0, semanticDecayed: 0 };
+        const cutoffStr = cutoff.toISOString();
+        console.log(`[MemoryMaintenance] Running decay on memories older than ${this.config.olderThanDays} days`);
+        let episodicDecayed = 0;
+        let semanticDecayed = 0;
+        // Scroll through all memories and apply decay
+        for (const type of ['episodic', 'semantic']) {
+            let offset = 0;
+            while (true) {
+                const memories = await this.db.scroll({ type }, 100, offset);
+                if (memories.length === 0)
+                    break;
+                for (const mem of memories) {
+                    const createdAt = new Date(mem.payload.created_at);
+                    if (createdAt < cutoff) {
+                        // Apply decay
+                        const oldImportance = mem.payload.importance || 0.5;
+                        const newImportance = Math.max(0.01, oldImportance * this.config.decayFactor);
+                        await this.db.updatePayload(mem.id, {
+                            ...mem.payload,
+                            importance: newImportance,
+                        });
+                        if (type === 'episodic')
+                            episodicDecayed++;
+                        else
+                            semanticDecayed++;
+                    }
+                }
+                offset += memories.length;
+                if (memories.length < 100)
+                    break;
+            }
+        }
+        console.log(`[MemoryMaintenance] Decayed ${episodicDecayed} episodic, ${semanticDecayed} semantic memories`);
+        return { episodicDecayed, semanticDecayed };
     }
     /**
      * Check for memories to promote (episodic -> semantic).
@@ -49,9 +72,34 @@ export class MemoryMaintenance {
      */
     async runPromotion() {
         console.log(`[MemoryMaintenance] Checking for memories to promote (threshold: ${this.config.promotionThreshold} accesses)`);
-        // Note: This requires querying memories by access_count
-        // Qdrant supports filtering by payload, but we need to implement the query
-        return 0;
+        let promoted = 0;
+        let offset = 0;
+        while (true) {
+            const memories = await this.db.scroll({ type: 'episodic' }, 100, offset);
+            if (memories.length === 0)
+                break;
+            for (const mem of memories) {
+                const accessCount = mem.payload.access_count || 0;
+                if (accessCount >= this.config.promotionThreshold) {
+                    // Promote to semantic
+                    const content = mem.payload.content || mem.payload.summary || '';
+                    await this.db.upsert(mem.id, [], {
+                        type: 'semantic',
+                        content: content,
+                        importance: mem.payload.importance,
+                        access_count: accessCount,
+                        created_at: mem.payload.created_at,
+                    });
+                    promoted++;
+                    console.log(`[MemoryMaintenance] Promoted memory ${mem.id} (access_count: ${accessCount})`);
+                }
+            }
+            offset += memories.length;
+            if (memories.length < 100)
+                break;
+        }
+        console.log(`[MemoryMaintenance] Promoted ${promoted} memories`);
+        return promoted;
     }
     /**
      * Generate reflection if enough episodic memories exist.

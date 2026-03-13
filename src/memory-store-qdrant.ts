@@ -45,6 +45,10 @@ export class MemoryStore {
   private reflectionMemories = new Map<number, ReflectionMemory>();
   private idCounter = 0;
 
+  // Async queue for non-blocking storage
+  private storageQueue: Array<() => Promise<void>> = [];
+  private processingQueue = false;
+
   constructor(db: QdrantDatabase, embedding: EmbeddingService) {
     this.db = db;
     this.embedding = embedding;
@@ -184,22 +188,45 @@ export class MemoryStore {
   }
 
   /**
-   * Increment access count for a memory.
+   * Increment access count for a memory (also updates Qdrant payload).
    */
-  async incrementAccess(memoryId: number, type: 'episodic' | 'semantic'): Promise<void> {
+  async incrementAccess(memoryId: number, type: 'episodic' | 'semantic' | 'reflection'): Promise<void> {
+    // Get current payload from Qdrant
+    const point = await this.db.get(memoryId);
+    if (point && point.payload) {
+      // Update access count in Qdrant
+      const newAccessCount = (point.payload.access_count || 0) + 1;
+      await this.db.updatePayload(memoryId, { ...point.payload, access_count: newAccessCount });
+    }
+
+    // Update in-memory cache
     if (type === 'episodic') {
       const memory = this.episodicMemories.get(memoryId);
       if (memory) {
         memory.access_count++;
         this.episodicMemories.set(memoryId, memory);
       }
-    } else {
+    } else if (type === 'semantic') {
       const memory = this.semanticMemories.get(memoryId);
       if (memory) {
         memory.access_count++;
         this.semanticMemories.set(memoryId, memory);
       }
+    } else if (type === 'reflection') {
+      const memory = this.reflectionMemories.get(memoryId);
+      if (memory) {
+        memory.access_count++;
+        this.reflectionMemories.set(memoryId, memory);
+      }
     }
+  }
+
+  /**
+   * Get payload for a memory from Qdrant.
+   */
+  private async getPayload(memoryId: number): Promise<Record<string, any> | null> {
+    const point = await this.db.get(memoryId);
+    return point?.payload || null;
   }
 
   /**
@@ -218,5 +245,48 @@ export class MemoryStore {
       reflection_count: this.reflectionMemories.size,
       total_count: qdrantCount,
     };
+  }
+
+  /**
+   * Add a storage task to the async queue.
+   * Returns immediately without waiting for completion.
+   */
+  enqueueStorage(task: () => Promise<void>): void {
+    this.storageQueue.push(task);
+    if (!this.processingQueue) {
+      this.processStorageQueue();
+    }
+  }
+
+  /**
+   * Process the storage queue asynchronously.
+   */
+  private async processStorageQueue(): Promise<void> {
+    if (this.storageQueue.length === 0) {
+      this.processingQueue = false;
+      return;
+    }
+
+    this.processingQueue = true;
+
+    while (this.storageQueue.length > 0) {
+      const task = this.storageQueue.shift();
+      if (task) {
+        try {
+          await task();
+        } catch (error: any) {
+          console.error('[MemoryStore] Queue task failed:', error.message);
+        }
+      }
+    }
+
+    this.processingQueue = false;
+  }
+
+  /**
+   * Get current queue length.
+   */
+  getQueueLength(): number {
+    return this.storageQueue.length;
   }
 }

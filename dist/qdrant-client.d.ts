@@ -17,6 +17,25 @@ export declare class QdrantDatabase {
         score: number;
         payload: Record<string, any>;
     }>>;
+    /**
+     * Get a single memory by ID.
+     */
+    get(id: number): Promise<{
+        id: number;
+        payload: Record<string, any>;
+    } | null>;
+    /**
+     * Update payload for an existing memory.
+     */
+    updatePayload(id: number, payload: Record<string, any>): Promise<void>;
+    /**
+     * Scroll through memories with optional filter.
+     * Use limit: 100 for each batch, use offset for pagination.
+     */
+    scroll(filter?: Record<string, any>, limit?: number, offset?: number): Promise<Array<{
+        id: number;
+        payload: Record<string, any>;
+    }>>;
     private buildFilter;
     delete(id: number): Promise<void>;
     count(): Promise<number>;

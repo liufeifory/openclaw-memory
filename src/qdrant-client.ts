@@ -96,6 +96,51 @@ export class QdrantDatabase {
     }));
   }
 
+  /**
+   * Get a single memory by ID.
+   */
+  async get(id: number): Promise<{ id: number; payload: Record<string, any> } | null> {
+    const result = await this.client.retrieve(COLLECTION_NAME, {
+      ids: [id],
+      with_payload: true,
+    });
+    return result.length > 0
+      ? { id: result[0].id as number, payload: result[0].payload as Record<string, any> }
+      : null;
+  }
+
+  /**
+   * Update payload for an existing memory.
+   */
+  async updatePayload(id: number, payload: Record<string, any>): Promise<void> {
+    await this.client.setPayload(COLLECTION_NAME, {
+      points: [id],
+      payload: payload,
+    });
+  }
+
+  /**
+   * Scroll through memories with optional filter.
+   * Use limit: 100 for each batch, use offset for pagination.
+   */
+  async scroll(
+    filter?: Record<string, any>,
+    limit: number = 100,
+    offset?: number
+  ): Promise<Array<{ id: number; payload: Record<string, any> }>> {
+    const result = await this.client.scroll(COLLECTION_NAME, {
+      limit,
+      offset,
+      filter: filter ? this.buildFilter(filter) : undefined,
+      with_payload: true,
+      with_vector: false,
+    });
+    return result.points.map(p => ({
+      id: p.id as number,
+      payload: p.payload as Record<string, any>,
+    }));
+  }
+
   private buildFilter(filter: Record<string, any>) {
     const conditions: any[] = [];
 

@@ -10,6 +10,9 @@ export class MemoryStore {
     semanticMemories = new Map();
     reflectionMemories = new Map();
     idCounter = 0;
+    // Async queue for non-blocking storage
+    storageQueue = [];
+    processingQueue = false;
     constructor(db, embedding) {
         this.db = db;
         this.embedding = embedding;
@@ -124,9 +127,17 @@ export class MemoryStore {
         return memoryId;
     }
     /**
-     * Increment access count for a memory.
+     * Increment access count for a memory (also updates Qdrant payload).
      */
     async incrementAccess(memoryId, type) {
+        // Get current payload from Qdrant
+        const point = await this.db.get(memoryId);
+        if (point && point.payload) {
+            // Update access count in Qdrant
+            const newAccessCount = (point.payload.access_count || 0) + 1;
+            await this.db.updatePayload(memoryId, { ...point.payload, access_count: newAccessCount });
+        }
+        // Update in-memory cache
         if (type === 'episodic') {
             const memory = this.episodicMemories.get(memoryId);
             if (memory) {
@@ -134,13 +145,27 @@ export class MemoryStore {
                 this.episodicMemories.set(memoryId, memory);
             }
         }
-        else {
+        else if (type === 'semantic') {
             const memory = this.semanticMemories.get(memoryId);
             if (memory) {
                 memory.access_count++;
                 this.semanticMemories.set(memoryId, memory);
             }
         }
+        else if (type === 'reflection') {
+            const memory = this.reflectionMemories.get(memoryId);
+            if (memory) {
+                memory.access_count++;
+                this.reflectionMemories.set(memoryId, memory);
+            }
+        }
+    }
+    /**
+     * Get payload for a memory from Qdrant.
+     */
+    async getPayload(memoryId) {
+        const point = await this.db.get(memoryId);
+        return point?.payload || null;
     }
     /**
      * Get memory statistics.
@@ -153,6 +178,44 @@ export class MemoryStore {
             reflection_count: this.reflectionMemories.size,
             total_count: qdrantCount,
         };
+    }
+    /**
+     * Add a storage task to the async queue.
+     * Returns immediately without waiting for completion.
+     */
+    enqueueStorage(task) {
+        this.storageQueue.push(task);
+        if (!this.processingQueue) {
+            this.processStorageQueue();
+        }
+    }
+    /**
+     * Process the storage queue asynchronously.
+     */
+    async processStorageQueue() {
+        if (this.storageQueue.length === 0) {
+            this.processingQueue = false;
+            return;
+        }
+        this.processingQueue = true;
+        while (this.storageQueue.length > 0) {
+            const task = this.storageQueue.shift();
+            if (task) {
+                try {
+                    await task();
+                }
+                catch (error) {
+                    console.error('[MemoryStore] Queue task failed:', error.message);
+                }
+            }
+        }
+        this.processingQueue = false;
+    }
+    /**
+     * Get current queue length.
+     */
+    getQueueLength() {
+        return this.storageQueue.length;
     }
 }
 //# sourceMappingURL=memory-store-qdrant.js.map

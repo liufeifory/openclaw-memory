@@ -35,6 +35,8 @@ export declare class MemoryStore {
     private semanticMemories;
     private reflectionMemories;
     private idCounter;
+    private storageQueue;
+    private processingQueue;
     constructor(db: QdrantDatabase, embedding: EmbeddingService);
     /**
      * Store episodic memory with embedding.
@@ -61,9 +63,13 @@ export declare class MemoryStore {
      */
     addReflection(summary: string, importance?: number): Promise<number>;
     /**
-     * Increment access count for a memory.
+     * Increment access count for a memory (also updates Qdrant payload).
      */
-    incrementAccess(memoryId: number, type: 'episodic' | 'semantic'): Promise<void>;
+    incrementAccess(memoryId: number, type: 'episodic' | 'semantic' | 'reflection'): Promise<void>;
+    /**
+     * Get payload for a memory from Qdrant.
+     */
+    private getPayload;
     /**
      * Get memory statistics.
      */
@@ -73,5 +79,18 @@ export declare class MemoryStore {
         reflection_count: number;
         total_count: number;
     }>;
+    /**
+     * Add a storage task to the async queue.
+     * Returns immediately without waiting for completion.
+     */
+    enqueueStorage(task: () => Promise<void>): void;
+    /**
+     * Process the storage queue asynchronously.
+     */
+    private processStorageQueue;
+    /**
+     * Get current queue length.
+     */
+    getQueueLength(): number;
 }
 //# sourceMappingURL=memory-store-qdrant.d.ts.map

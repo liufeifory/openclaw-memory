@@ -41,8 +41,7 @@ export class ContextBuilder {
       context.push('## Relevant Memories');
       const displayMemories = relevantMemories.slice(0, this.maxMemories);
       for (const mem of displayMemories) {
-        const score = (mem.similarity * mem.importance).toFixed(2);
-        context.push(`- [${mem.type}] ${mem.content} (score: ${score})`);
+        context.push(`- [${mem.type}] ${mem.content}`);
       }
       context.push('');
     }
