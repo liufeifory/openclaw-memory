@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.swp
+*.swo
+*~
+
+# Node
+node_modules/
+dist/
+*.log
+
+# Config
+.env
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Database
+*.sqlite3

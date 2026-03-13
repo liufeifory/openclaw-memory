@@ -1,0 +1,223 @@
+# OpenClaw Memory Plugin Specification
+
+## Goal
+
+Build a production-grade memory system plugin for OpenClaw.
+
+The system should support:
+
+- long-term memory
+- semantic retrieval
+- vector search
+- importance learning
+- reflection memory
+- asynchronous storage
+
+Technology stack:
+
+- Python
+- PostgreSQL
+- pgvector
+- BGE-M3 embedding model
+
+---
+
+# System Architecture
+
+OpenClaw
+  |
+MemoryPlugin
+  |
+MemoryManager
+  |
+├ ConversationBuffer
+├ EpisodicMemory
+├ SemanticMemory
+├ ReflectionMemory
+|
+├ RetrievalPipeline
+|      |
+|      └ VectorStore
+|
+├ ContextBuilder
+|
+├ ImportanceLearning
+|
+└ MemoryMaintenance
+
+MemoryManager orchestrates all memory operations.
+
+---
+
+# Memory Types
+
+## Episodic Memory
+
+Stores events and experiences.
+
+Example:
+
+"Today I installed PostgreSQL."
+
+Fields:
+
+session_id
+content
+importance
+access_count
+created_at
+last_accessed
+
+---
+
+## Semantic Memory
+
+Stores stable knowledge about the user.
+
+Example:
+
+"I am a database administrator."
+
+---
+
+## Reflection Memory
+
+Stores summarized insights from episodic memories.
+
+Generated automatically after enough episodic memories accumulate.
+
+---
+
+# Database Schema
+
+PostgreSQL tables:
+
+episodic_memory
+semantic_memory
+reflection_memory
+memory_embeddings
+
+Embedding dimension: 1024
+
+pgvector index type: HNSW
+
+---
+
+# Retrieval
+
+Vector similarity search using cosine similarity.
+
+score = similarity * importance
+
+Retrieval steps:
+
+1 embed query
+2 search vector index
+3 filter by threshold
+4 return top memories
+
+Parameters:
+
+top_k = 10
+threshold = 0.6
+final_results = 5
+
+---
+
+# Importance Learning
+
+Importance is dynamic.
+
+importance =
+
+0.5 * base_importance +
+0.3 * log(access_count + 1) +
+0.2 * recency_score
+
+recency_score:
+
+exp(-days_since_creation / 30)
+
+---
+
+# Memory Promotion
+
+If episodic memory access_count > 10:
+
+promote to semantic memory.
+
+---
+
+# Memory Decay
+
+Run daily.
+
+importance *= 0.98
+
+---
+
+# Reflection Memory
+
+Every 50 episodic memories:
+
+generate summary using LLM.
+
+Store as reflection memory.
+
+importance = 0.9
+
+---
+
+# Context Builder
+
+Output format:
+
+SYSTEM:
+
+Relevant memories:
+- memory1
+- memory2
+
+Recent conversation:
+User:
+Assistant:
+
+Memory injection limit:
+
+3–5 memories
+
+---
+
+# Embedding Model
+
+Use BGE-M3 via sentence-transformers.
+
+normalize_embeddings = True
+
+embedding dimension = 1024
+
+---
+
+# Async Processing
+
+Embedding and storage must run asynchronously.
+
+Use ThreadPoolExecutor.
+
+---
+
+# Code Requirements
+
+Python requirements:
+
+- type hints
+- logging
+- error handling
+- docstrings
+
+Do not change database schema.
+
+Do not change module structure.
+
+Generate full working implementation.
+
