@@ -53,7 +53,7 @@ async function test() {
     const stats = await mm.getStats();
     console.log(JSON.stringify(stats, null, 2));
 
-  } catch (error: any) {
+  } catch (error) {
     console.error('Test failed:', error.message);
     console.error('Make sure Qdrant is running: ./start-qdrant.sh');
   } finally {

@@ -55,29 +55,62 @@ async function migrate() {
 
     for (const row of episodic.rows) {
       try {
-        let embeddingVec = row.embedding;
+        let embeddingVec: number[];
 
         // If no embedding, generate it
-        if (!embeddingVec) {
+        if (!row.embedding) {
           console.log(`  Regenerating embedding for memory ${row.id}`);
           embeddingVec = await embedding.embed(row.content);
         } else {
           // Convert PostgreSQL vector format to array
-          embeddingVec = embeddingVec
+          embeddingVec = row.embedding
             .replace('[', '')
             .replace(']', '')
             .split(',')
-            .map(Number);
+            .map((s: string) => parseFloat(s));
         }
 
-        await qdrant.upsert(row.id, embeddingVec, {
+        // Validate embedding vector
+        if (!Array.isArray(embeddingVec) || embeddingVec.length !== 1024) {
+          console.error(`\n  ✗ Invalid embedding for memory ${row.id}: length=${Array.isArray(embeddingVec) ? embeddingVec.length : 'not an array'}`);
+          failed++;
+          continue;
+        }
+
+        // Ensure all values are numbers (not NaN)
+        const hasNaN = embeddingVec.some(v => isNaN(v));
+        if (hasNaN) {
+          console.error(`\n  ✗ Invalid embedding for memory ${row.id}: contains NaN values`);
+          failed++;
+          continue;
+        }
+
+        const payload = {
           type: 'episodic',
           session_id: row.session_id,
           content: row.content,
           importance: row.importance,
           access_count: row.access_count,
           created_at: row.created_at?.toISOString() || new Date().toISOString(),
+        };
+
+        // Use HTTP API directly instead of client library
+        const response = await fetch('http://localhost:6333/collections/openclaw_memories/points', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            points: [{
+              id: parseInt(row.id, 10),
+              vector: embeddingVec,
+              payload: { ...payload, memory_type: 'episodic' },
+            }],
+          }),
         });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`HTTP ${response.status}: ${errorText}`);
+        }
 
         migrated++;
         process.stdout.write(`\r  Migrated: ${migrated}`);
@@ -102,26 +135,50 @@ async function migrate() {
 
     for (const row of semantic.rows) {
       try {
-        let embeddingVec = row.embedding;
+        let embeddingVec: number[];
 
-        if (!embeddingVec) {
+        if (!row.embedding) {
           console.log(`  Regenerating embedding for memory ${row.id}`);
           embeddingVec = await embedding.embed(row.content);
         } else {
-          embeddingVec = embeddingVec
+          embeddingVec = row.embedding
             .replace('[', '')
             .replace(']', '')
             .split(',')
-            .map(Number);
+            .map((s: string) => parseFloat(s));
         }
 
-        await qdrant.upsert(row.id, embeddingVec, {
+        // Validate
+        if (!Array.isArray(embeddingVec) || embeddingVec.length !== 1024) {
+          console.error(`\n  ✗ Invalid embedding for memory ${row.id}`);
+          failed++;
+          continue;
+        }
+
+        const payload = {
           type: 'semantic',
           content: row.content,
           importance: row.importance,
           access_count: row.access_count,
           created_at: row.created_at?.toISOString() || new Date().toISOString(),
+        };
+
+        const response = await fetch('http://localhost:6333/collections/openclaw_memories/points', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            points: [{
+              id: parseInt(row.id, 10),
+              vector: embeddingVec,
+              payload: { ...payload, memory_type: 'semantic' },
+            }],
+          }),
         });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`HTTP ${response.status}: ${errorText}`);
+        }
 
         migrated++;
         process.stdout.write(`\r  Migrated: ${migrated}`);
@@ -146,13 +203,30 @@ async function migrate() {
       try {
         const embeddingVec = await embedding.embed(row.summary);
 
-        await qdrant.upsert(row.id, embeddingVec, {
+        const payload = {
           type: 'reflection',
           summary: row.summary,
           importance: row.importance,
           access_count: 0,
           created_at: row.created_at?.toISOString() || new Date().toISOString(),
+        };
+
+        const response = await fetch('http://localhost:6333/collections/openclaw_memories/points', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            points: [{
+              id: parseInt(row.id, 10),
+              vector: embeddingVec,
+              payload: { ...payload, memory_type: 'reflection' },
+            }],
+          }),
         });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`HTTP ${response.status}: ${errorText}`);
+        }
 
         migrated++;
         process.stdout.write(`\r  Migrated: ${migrated}`);

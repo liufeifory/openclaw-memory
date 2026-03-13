@@ -15,7 +15,42 @@
 
 ## 快速开始
 
-### 方案 A: Qdrant 后端 (推荐，便于分发)
+### 方案 A: 一键部署（推荐）
+
+**前置要求：**
+- macOS + Homebrew 或 Linux + systemd
+- Node.js 18+
+- 网络连接（用于下载 Qdrant 和模型）
+
+**使用部署脚本自动安装和配置所有服务：**
+
+```bash
+cd ~/.openclaw/plugins/openclaw-memory
+
+# 安装（自动安装 llama.cpp，下载 Qdrant，配置开机自启）
+./deploy.sh install
+```
+
+部署脚本会自动：
+- 通过 homebrew 安装 llama.cpp（如未安装）
+- 下载并配置 Qdrant 向量数据库
+- 创建系统服务（macOS launchd / Linux systemd）
+- 配置开机自启动
+- 更新 OpenClaw 配置文件
+
+**注意：** llama-server 首次启动时会自动下载 BGE-M3 向量模型（约 500MB），请耐心等待。
+
+**其他部署命令：**
+
+```bash
+./deploy.sh status      # 查看服务状态
+./deploy.sh start       # 启动服务
+./deploy.sh stop        # 停止服务
+./deploy.sh restart     # 重启服务
+./deploy.sh uninstall   # 卸载所有服务
+```
+
+### 方案 B: 手动启动（开发模式）
 
 **1. 启动 Qdrant**
 
@@ -146,6 +181,29 @@ OpenClaw → Node.js 插件 → PostgreSQL (pgvector)
 | v2.0 | pgvector | ~15-25ms | 10 万 + |
 | v1.0 | Python HTTP | ~60ms | 10 万 + |
 
+## 服务管理
+
+部署脚本创建的系统服务会开机自启。日常使用中使用 `services.sh` 管理：
+
+```bash
+# 查看服务状态
+./services.sh status
+
+# 启动所有服务
+./services.sh start
+
+# 停止所有服务
+./services.sh stop
+
+# 重启所有服务
+./services.sh restart
+
+# 查看日志
+./services.sh logs           # 同时查看两个日志
+./services.sh logs llama     # 只看 llama-server 日志
+./services.sh logs qdrant    # 只看 Qdrant 日志
+```
+
 ## 记忆类型
 
 | 类型 | 说明 | 重要性 | 提升条件 |
@@ -174,6 +232,27 @@ node dist/benchmark.js
 
 # 迁移数据 (pgvector → Qdrant)
 npm run migrate
+```
+
+## 部署脚本命令
+
+```bash
+# 完整安装（包含开机自启）
+./deploy.sh install
+
+# 卸载
+./deploy.sh uninstall
+
+# 查看状态
+./deploy.sh status
+
+# 启动/停止/重启
+./deploy.sh start
+./deploy.sh stop
+./deploy.sh restart
+
+# 查看日志
+./deploy.sh logs
 ```
 
 ## 从 pgvector 迁移到 Qdrant

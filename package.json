@@ -9,8 +9,10 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "node dist/test-full.js",
-    "test:quick": "node dist/test.js",
-    "migrate": "node dist/migrate.js"
+    "test:qdrant": "node dist/test-qdrant.js",
+    "migrate": "node dist/migrate.js",
+    "profile": "node dist/profile.js",
+    "clean": "rm -rf dist/"
   },
   "dependencies": {
     "@qdrant/js-client-rest": "^1.7.0",
