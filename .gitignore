@@ -10,6 +10,7 @@ ENV/
 *.swp
 *.swo
 *~
+*.py  # Python source files (Node.js implementation only)
 
 # Node
 node_modules/
