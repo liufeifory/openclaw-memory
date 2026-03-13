@@ -2,7 +2,7 @@
 
 一个生产级的长期记忆系统插件，为 OpenClaw 提供语义记忆检索功能。
 
-**v2.0** - 完全使用 Node.js/TypeScript 重写，直接集成 OpenClaw，无需 Python 服务。
+**v2.1** - 支持 PostgreSQL (pgvector) 和 Qdrant 两种后端。
 
 ## 核心功能
 
@@ -11,11 +11,54 @@
 - **自动记忆提升** - 高频 episodic 记忆自动转为 semantic
 - **自动反思生成** - 定期生成总结性洞察
 - **记忆衰减机制** - 长期未访问记忆自动降低权重
-- **原生集成** - 无需 HTTP 服务，直接调用
+- **双后端支持** - PostgreSQL (pgvector) 或 Qdrant
 
 ## 快速开始
 
-### 1. 安装依赖
+### 方案 A: Qdrant 后端 (推荐，便于分发)
+
+**1. 启动 Qdrant**
+
+```bash
+cd ~/.openclaw/plugins/openclaw-memory
+./start-qdrant.sh
+```
+
+**2. 启动 llama.cpp**
+
+```bash
+llama-server --hf-repo lm-kit/bge-m3-gguf --embedding --port 8080
+```
+
+**3. 安装依赖**
+
+```bash
+npm install
+npm run build
+```
+
+**4. 测试**
+
+```bash
+node dist/test-qdrant.js
+```
+
+### 方案 B: PostgreSQL (pgvector) 后端
+
+**1. 确保 PostgreSQL 运行**
+
+```bash
+# 检查 PostgreSQL 状态
+pg_ctl -D /usr/local/var/postgres status
+```
+
+**2. 启动 llama.cpp**
+
+```bash
+llama-server --hf-repo lm-kit/bge-m3-gguf --embedding --port 8080
+```
+
+**3. 安装依赖**
 
 ```bash
 cd ~/.openclaw/plugins/openclaw-memory
@@ -23,46 +66,85 @@ npm install
 npm run build
 ```
 
-### 2. 确保 llama.cpp 运行
-
-```bash
-llama-server --hf-repo lm-kit/bge-m3-gguf --embedding --port 8080
-```
-
-### 3. 测试
+**4. 测试**
 
 ```bash
 node dist/test.js
 ```
 
+## 配置
+
+### Qdrant 配置
+
+```json
+{
+  "plugins": {
+    "openclaw-memory": {
+      "backend": "qdrant",
+      "qdrant": {
+        "url": "http://localhost:6333"
+      },
+      "embedding": {
+        "endpoint": "http://localhost:8080"
+      }
+    }
+  }
+}
+```
+
+### PostgreSQL 配置
+
+```json
+{
+  "plugins": {
+    "openclaw-memory": {
+      "backend": "pgvector",
+      "database": {
+        "host": "localhost",
+        "port": 5432,
+        "database": "openclaw_memory",
+        "user": "liufei",
+        "password": ""
+      },
+      "embedding": {
+        "endpoint": "http://localhost:8080"
+      }
+    }
+  }
+}
+```
+
 ## 系统要求
 
-- PostgreSQL 14+ with pgvector
-- Node.js 18+
-- llama.cpp (用于本地 embedding)
+| 组件 | Qdrant 方案 | PostgreSQL 方案 |
+|------|------------|----------------|
+| 数据库 | Qdrant (二进制) | PostgreSQL 14+ with pgvector |
+| Embedding | llama.cpp | llama.cpp |
+| Node.js | 18+ | 18+ |
 
-## 架构
+## 架构对比
 
-**v1.0 (Python)**:
+**Qdrant 方案**:
 ```
-OpenClaw → HTTP (8082) → Python Flask → PostgreSQL
-                          ↓
-                       llama.cpp (8080)
+OpenClaw → Node.js 插件 → Qdrant (本地二进制)
+            ↓
+         llama.cpp (8080)
 ```
 
-**v2.0 (Node.js)**:
+**PostgreSQL 方案**:
 ```
-OpenClaw → Node.js 插件 → PostgreSQL
+OpenClaw → Node.js 插件 → PostgreSQL (pgvector)
             ↓
          llama.cpp (8080)
 ```
 
 ## 性能对比
 
-| 版本 | 延迟 | 说明 |
-|------|------|------|
-| v1.0 Python | ~60ms | 含 HTTP 开销 |
-| v2.0 Node.js | ~40ms | 直接调用 |
+| 版本 | 后端 | 延迟 (warm) | 适合规模 |
+|------|------|------------|----------|
+| v2.1 | Qdrant | ~12-20ms | 100 万 + |
+| v2.0 | pgvector | ~15-25ms | 10 万 + |
+| v1.0 | Python HTTP | ~60ms | 10 万 + |
 
 ## 记忆类型
 
@@ -81,9 +163,25 @@ npm run build
 # 监听模式
 npm run dev
 
-# 测试
+# 测试 (pgvector)
 node dist/test.js
+
+# 测试 (Qdrant)
+node dist/test-qdrant.js
+
+# 性能基准
+node dist/benchmark.js
+
+# 迁移数据 (pgvector → Qdrant)
+npm run migrate
 ```
+
+## 从 pgvector 迁移到 Qdrant
+
+1. 启动 Qdrant: `./start-qdrant.sh`
+2. 运行迁移脚本：`npm run migrate`
+3. 更新配置为 Qdrant 后端
+4. 测试：`node dist/test-qdrant.js`
 
 ## 文档
 

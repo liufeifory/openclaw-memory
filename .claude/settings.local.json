@@ -89,7 +89,17 @@
       "Bash(git pull:*)",
       "Bash(cd /Users/liufei/.openclaw/extensions/openclaw-memory && npm install 2>&1)",
       "Bash(npm run:*)",
-      "Bash(node dist/test.js 2>&1)"
+      "Bash(node dist/test.js 2>&1)",
+      "Bash(node dist/test-full.js 2>&1)",
+      "Bash(# 同步测试文件到 extensions\ncp /Users/liufei/.openclaw/plugins/openclaw-memory/dist/test-full.js \\\\\n   /Users/liufei/.openclaw/extensions/openclaw-memory/dist/test-full.js\n\n# 提交测试文件\ncd /Users/liufei/.openclaw/plugins/openclaw-memory\ngit add dist/test-full.js\ngit commit -m \"test: 添加完整测试套件 \\(24 项测试\\)\" && git push origin master)",
+      "Bash(node dist/benchmark.js 2>&1)",
+      "Bash(psql -U liufei -d openclaw_memory -c \"\\\\dt\" 2>&1)",
+      "Bash(psql -U liufei -d openclaw_memory -c \"\\\\d episodic_memory\" 2>&1)",
+      "Bash(psql -U liufei -d openclaw_memory -c \"\\\\d memory_embeddings\" 2>&1)",
+      "Bash(psql -U liufei -d openclaw_memory -c \"\\\\d semantic_memory\" 2>&1)",
+      "Bash(psql -U liufei -d openclaw_memory -c \"\\\\d reflection_memory\" 2>&1)",
+      "Bash(npm install:*)",
+      "Bash(chmod +x /Users/liufei/.openclaw/plugins/openclaw-memory/start-qdrant.sh)"
     ]
   }
 }

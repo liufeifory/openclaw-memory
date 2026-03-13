@@ -1,7 +1,7 @@
 {
   "name": "openclaw-memory",
-  "version": "2.0.0",
-  "description": "PostgreSQL-based long-term memory with semantic search using pgvector",
+  "version": "2.1.0",
+  "description": "Qdrant-based long-term memory with semantic search",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -9,9 +9,11 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "node dist/test-full.js",
-    "test:quick": "node dist/test.js"
+    "test:quick": "node dist/test.js",
+    "migrate": "node dist/migrate.js"
   },
   "dependencies": {
+    "@qdrant/js-client-rest": "^1.7.0",
     "pg": "^8.11.3"
   },
   "devDependencies": {

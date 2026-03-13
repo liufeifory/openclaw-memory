@@ -1,15 +1,19 @@
 /**
  * OpenClaw Memory Plugin - Native Node.js Implementation
  *
- * Provides long-term memory with:
- * - Semantic retrieval via pgvector
+ * Supports both PostgreSQL (pgvector) and Qdrant backends.
+ *
+ * Features:
+ * - Semantic retrieval via vector search
  * - Importance-based ranking
  * - Episodic, semantic, and reflection memories
  */
 
-import { MemoryManager } from './memory-manager.js';
+import { MemoryManager as PgMemoryManager } from './memory-manager.js';
+import { MemoryManager as QdrantMemoryManager } from './memory-manager-qdrant.js';
 
-interface MemoryPluginConfig {
+interface PgConfig {
+  backend?: 'pgvector';
   database: {
     host: string;
     port: number;
@@ -22,33 +26,66 @@ interface MemoryPluginConfig {
   };
 }
 
-// Global instance for reuse across requests
-let memoryManager: MemoryManager | null = null;
+interface QdrantConfig {
+  backend: 'qdrant';
+  qdrant: {
+    url: string;
+    port?: number;
+    apiKey?: string;
+  };
+  embedding?: {
+    endpoint: string;
+  };
+}
 
-function getMemoryManager(config: MemoryPluginConfig): MemoryManager {
+type MemoryPluginConfig = PgConfig | QdrantConfig;
+
+// Global instance for reuse across requests
+let memoryManager: PgMemoryManager | QdrantMemoryManager | null = null;
+
+function getMemoryManager(config: MemoryPluginConfig): PgMemoryManager | QdrantMemoryManager {
   if (!memoryManager) {
-    memoryManager = new MemoryManager(config);
+    if (config.backend === 'qdrant') {
+      memoryManager = new QdrantMemoryManager(config);
+    } else {
+      memoryManager = new PgMemoryManager(config as PgConfig);
+    }
   }
   return memoryManager;
 }
 
 const memoryPlugin = {
   id: 'openclaw-memory',
-  name: 'OpenClaw Memory (PostgreSQL)',
-  description: 'PostgreSQL-based long-term memory with semantic search using pgvector',
+  name: 'OpenClaw Memory',
+  description: 'Long-term memory with semantic search (supports pgvector and Qdrant)',
   kind: 'memory',
 
   async init(config: MemoryPluginConfig) {
     // Initialize memory manager on plugin load
-    getMemoryManager(config);
-    console.log('[openclaw-memory] Plugin initialized');
+    const mm = getMemoryManager(config);
+
+    // Initialize Qdrant if using that backend
+    if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
+      await mm.initialize();
+    }
+
+    console.log('[openclaw-memory] Plugin initialized with', config.backend === 'qdrant' ? 'Qdrant' : 'PostgreSQL');
   },
 
   register(api: any) {
     // Get config from OpenClaw
     const config = api.getConfig?.() as MemoryPluginConfig | undefined;
 
-    if (!config?.database) {
+    if (!config) {
+      console.warn('[openclaw-memory] No config found, plugin disabled');
+      return;
+    }
+
+    // Check for either pgvector or qdrant config
+    const hasPgConfig = 'database' in config && !!config.database;
+    const hasQdrantConfig = config.backend === 'qdrant' || ('qdrant' in config && !!config.qdrant);
+
+    if (!hasPgConfig && !hasQdrantConfig) {
       console.warn('[openclaw-memory] No database config found, plugin disabled');
       return;
     }
