@@ -18,10 +18,11 @@ export class ContextBuilder {
             }
             context.push('');
         }
-        // Add relevant episodic/semantic memories
-        if (relevantMemories.length > 0) {
+        // Add relevant episodic/semantic memories (exclude reflections to avoid duplication)
+        const nonReflectionMemories = relevantMemories.filter(m => m.type !== 'reflection');
+        if (nonReflectionMemories.length > 0) {
             context.push('## Relevant Memories');
-            const displayMemories = relevantMemories.slice(0, this.maxMemories);
+            const displayMemories = nonReflectionMemories.slice(0, this.maxMemories);
             for (const mem of displayMemories) {
                 context.push(`- [${mem.type}] ${mem.content}`);
             }

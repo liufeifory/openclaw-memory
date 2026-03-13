@@ -54,11 +54,9 @@ export class MemoryManager {
     // Search all memories including reflections
     const searchResults = await this.memoryStore.search(embedding, topK, threshold);
 
-    // Increment access count for retrieved memories (for importance learning)
+    // Increment access count for ALL retrieved memories (including reflection)
     for (const mem of searchResults) {
-      if (mem.type === 'episodic' || mem.type === 'semantic') {
-        await this.memoryStore.incrementAccess(mem.id, mem.type);
-      }
+      await this.memoryStore.incrementAccess(mem.id, mem.type);
     }
 
     // Sort by combined score (similarity × importance)

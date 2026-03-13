@@ -190,7 +190,7 @@ export class MemoryStore {
         }
     }
     /**
-     * Process the storage queue asynchronously.
+     * Process the storage queue asynchronously with retry support.
      */
     async processStorageQueue() {
         if (this.storageQueue.length === 0) {
@@ -201,15 +201,32 @@ export class MemoryStore {
         while (this.storageQueue.length > 0) {
             const task = this.storageQueue.shift();
             if (task) {
-                try {
-                    await task();
-                }
-                catch (error) {
-                    console.error('[MemoryStore] Queue task failed:', error.message);
-                }
+                await this.executeWithRetry(task);
             }
         }
         this.processingQueue = false;
+    }
+    /**
+     * Execute a task with retry support (max 3 attempts).
+     */
+    async executeWithRetry(task, maxRetries = 3) {
+        let lastError = null;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                await task();
+                return; // Success
+            }
+            catch (error) {
+                lastError = error;
+                console.error(`[MemoryStore] Task failed (attempt ${attempt}/${maxRetries}):`, error.message);
+                // Wait before retry (exponential backoff: 1s, 2s, 4s)
+                if (attempt < maxRetries) {
+                    const delay = Math.pow(2, attempt - 1) * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+        console.error('[MemoryStore] Task failed after all retries:', lastError?.message);
     }
     /**
      * Get current queue length.

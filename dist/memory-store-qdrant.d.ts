@@ -85,9 +85,13 @@ export declare class MemoryStore {
      */
     enqueueStorage(task: () => Promise<void>): void;
     /**
-     * Process the storage queue asynchronously.
+     * Process the storage queue asynchronously with retry support.
      */
     private processStorageQueue;
+    /**
+     * Execute a task with retry support (max 3 attempts).
+     */
+    private executeWithRetry;
     /**
      * Get current queue length.
      */
