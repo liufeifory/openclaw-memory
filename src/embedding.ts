@@ -1,10 +1,13 @@
 /**
  * Embedding service using llama.cpp HTTP endpoint.
+ * Supports BGE-style task_type parameter for query/document distinction.
  */
 
 export interface EmbeddingResponse {
   embedding: number[];
 }
+
+export type EmbeddingTaskType = 'query' | 'document' | 'search_query' | 'passage';
 
 export class EmbeddingService {
   private endpoint: string;
@@ -13,11 +16,28 @@ export class EmbeddingService {
     this.endpoint = endpoint;
   }
 
-  async embed(text: string): Promise<number[]> {
+  /**
+   * Generate embedding for text.
+   * @param text - The text to embed
+   * @param taskType - Optional task type for BGE-style models (query vs document)
+   */
+  async embed(text: string, taskType?: EmbeddingTaskType): Promise<number[]> {
+    // Add task type prefix for BGE-style models
+    let inputText = text;
+    if (taskType) {
+      const prefixes: Record<EmbeddingTaskType, string> = {
+        'query': 'Represent the query for retrieving relevant documents: ',
+        'document': 'Represent the document for retrieval: ',
+        'search_query': 'Represent the search query for retrieving documents: ',
+        'passage': 'Represent the passage for retrieval: ',
+      };
+      inputText = prefixes[taskType] + text;
+    }
+
     const response = await fetch(`${this.endpoint}/embedding`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: text }),
+      body: JSON.stringify({ input: inputText }),
     });
 
     const result: any = await response.json();

@@ -22,7 +22,7 @@ Ranking (indices only, e.g., "2 0 1"): `;
 const DIVERSITY_PENALTY = 0.15;  // Penalty for duplicate content
 const CLUSTER_DIVERSITY_PENALTY = 0.2;  // Penalty for same-cluster results
 const SCORE_THRESHOLD = 0.7;     // Minimum score to keep result
-const INITIAL_K = 20;            // Initial retrieval count (high recall)
+const INITIAL_K = 30;            // Initial retrieval count (high recall, increased from 20 for better coverage)
 
 export { INITIAL_K, SCORE_THRESHOLD, DIVERSITY_PENALTY, CLUSTER_DIVERSITY_PENALTY };
 

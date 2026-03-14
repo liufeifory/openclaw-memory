@@ -10,7 +10,7 @@ import { LLMLimiter } from './llm-limiter.js';
 declare const DIVERSITY_PENALTY = 0.15;
 declare const CLUSTER_DIVERSITY_PENALTY = 0.2;
 declare const SCORE_THRESHOLD = 0.7;
-declare const INITIAL_K = 20;
+declare const INITIAL_K = 30;
 export { INITIAL_K, SCORE_THRESHOLD, DIVERSITY_PENALTY, CLUSTER_DIVERSITY_PENALTY };
 export interface RerankResult {
     id: number;

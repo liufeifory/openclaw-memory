@@ -4,6 +4,30 @@
 import { MemoryType } from './qdrant-client.js';
 // Semantic deduplication threshold
 const DEDUPE_THRESHOLD = 0.95; // Very high threshold for near-duplicates
+/**
+ * Clean payload for Qdrant storage - remove undefined/null fields, ensure defaults.
+ */
+function cleanPayload(payload) {
+    const cleaned = {};
+    for (const [key, value] of Object.entries(payload)) {
+        // Skip undefined and null values
+        if (value === undefined || value === null) {
+            continue;
+        }
+        // Ensure importance has default value
+        if (key === 'importance' && typeof value !== 'number') {
+            cleaned[key] = 0.5;
+            continue;
+        }
+        // Ensure access_count has default value
+        if (key === 'access_count' && typeof value !== 'number') {
+            cleaned[key] = 0;
+            continue;
+        }
+        cleaned[key] = value;
+    }
+    return cleaned;
+}
 export class MemoryStore {
     db;
     embedding;
@@ -34,8 +58,8 @@ export class MemoryStore {
         const now = Date.now();
         // Generate embedding
         const embedding = await this.embedding.embed(content);
-        // Store in Qdrant with version metadata
-        await this.db.upsert(memoryId, embedding, {
+        // Store in Qdrant with version metadata (clean payload first)
+        await this.db.upsert(memoryId, embedding, cleanPayload({
             type: MemoryType.EPISODIC,
             session_id: sessionId,
             content: content,
@@ -43,7 +67,7 @@ export class MemoryStore {
             access_count: 0,
             created_at: new Date().toISOString(),
             version: now,
-        });
+        }));
         // Store in memory
         this.episodicMemories.set(memoryId, {
             id: memoryId,
@@ -89,14 +113,15 @@ export class MemoryStore {
         const memoryId = ++this.idCounter;
         const now = Date.now();
         const embedding = await this.embedding.embed(content);
-        await this.db.upsert(memoryId, embedding, {
+        // Store in Qdrant with version metadata (clean payload first)
+        await this.db.upsert(memoryId, embedding, cleanPayload({
             type: MemoryType.SEMANTIC,
             content: content,
             importance: importance,
             access_count: 0,
             created_at: new Date().toISOString(),
             version: now,
-        });
+        }));
         this.semanticMemories.set(memoryId, {
             id: memoryId,
             content,
@@ -186,14 +211,15 @@ export class MemoryStore {
         const memoryId = ++this.idCounter;
         const now = Date.now();
         const embedding = await this.embedding.embed(summary);
-        await this.db.upsert(memoryId, embedding, {
+        // Store in Qdrant with version metadata (clean payload first)
+        await this.db.upsert(memoryId, embedding, cleanPayload({
             type: MemoryType.REFLECTION,
             summary: summary,
             importance: importance,
             access_count: 0,
             created_at: new Date().toISOString(),
             version: now,
-        });
+        }));
         const reflection = {
             id: memoryId,
             summary,

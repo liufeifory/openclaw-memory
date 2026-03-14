@@ -92,6 +92,11 @@ export class Summarizer {
                 return await response.json();
             });
             const output = (result.content || result.generated_text || '').trim();
+            // Guard: empty output from LLM
+            if (!output || output.length === 0) {
+                console.warn('[Summarizer] LLM returned empty output');
+                return { summary: '', isEmpty: true };
+            }
             const isEmpty = output.toLowerCase().includes('no significant content');
             // Calculate compression ratio
             const { ratio, quality } = this.calculateCompressionRatio(messagesText, output);
