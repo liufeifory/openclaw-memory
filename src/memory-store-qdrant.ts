@@ -59,11 +59,12 @@ export class MemoryStore {
    */
   async storeEpisodic(sessionId: string, content: string, importance: number = 0.5): Promise<number> {
     const memoryId = ++this.idCounter;
+    const now = Date.now();
 
     // Generate embedding
     const embedding = await this.embedding.embed(content);
 
-    // Store in Qdrant
+    // Store in Qdrant with version metadata
     await this.db.upsert(memoryId, embedding, {
       type: MemoryType.EPISODIC,
       session_id: sessionId,
@@ -71,6 +72,7 @@ export class MemoryStore {
       importance: importance,
       access_count: 0,
       created_at: new Date().toISOString(),
+      version: now,
     });
 
     // Store in memory
@@ -91,6 +93,7 @@ export class MemoryStore {
    */
   async storeSemantic(content: string, importance: number = 0.7): Promise<number> {
     const memoryId = ++this.idCounter;
+    const now = Date.now();
 
     const embedding = await this.embedding.embed(content);
 
@@ -100,6 +103,7 @@ export class MemoryStore {
       importance: importance,
       access_count: 0,
       created_at: new Date().toISOString(),
+      version: now,
     });
 
     this.semanticMemories.set(memoryId, {
@@ -173,6 +177,7 @@ export class MemoryStore {
    */
   async addReflection(summary: string, importance: number = 0.9): Promise<number> {
     const memoryId = ++this.idCounter;
+    const now = Date.now();
 
     const embedding = await this.embedding.embed(summary);
 
@@ -182,6 +187,7 @@ export class MemoryStore {
       importance: importance,
       access_count: 0,
       created_at: new Date().toISOString(),
+      version: now,
     });
 
     const reflection: ReflectionMemory = {
@@ -203,9 +209,13 @@ export class MemoryStore {
     // Get current payload from Qdrant
     const point = await this.db.get(memoryId);
     if (point && point.payload) {
-      // Update access count in Qdrant
+      // Update access count in Qdrant, preserve version
       const newAccessCount = (point.payload.access_count || 0) + 1;
-      await this.db.updatePayload(memoryId, { ...point.payload, access_count: newAccessCount });
+      await this.db.updatePayload(memoryId, {
+        ...point.payload,
+        access_count: newAccessCount,
+        updated_at: new Date().toISOString(),
+      });
     }
 
     // Update in-memory cache

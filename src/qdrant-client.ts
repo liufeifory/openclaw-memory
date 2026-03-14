@@ -83,20 +83,39 @@ export class QdrantDatabase {
   async upsert(
     id: number,
     embedding: number[],
-    payload: Record<string, any>
-  ): Promise<void> {
+    payload: Record<string, any>,
+    options?: { checkVersion?: boolean }  // If true, only upsert if new version is newer
+  ): Promise<{ success: boolean; reason?: string }> {
+    // Add version and updated_at metadata
+    const enhancedPayload = {
+      ...payload,
+      memory_type: payload.type || 'episodic',
+      updated_at: new Date().toISOString(),
+      version: payload.version || Date.now(),  // Use timestamp as version
+    };
+
+    // If checkVersion is enabled, check existing version first
+    if (options?.checkVersion) {
+      const existing = await this.get(id);
+      if (existing && existing.payload.version) {
+        if (existing.payload.version >= enhancedPayload.version) {
+          // Existing version is newer or equal, skip upsert
+          return { success: false, reason: 'Existing version is newer' };
+        }
+      }
+    }
+
     await this.client.upsert(COLLECTION_NAME, {
       points: [
         {
           id: id,
           vector: embedding,
-          payload: {
-            ...payload,
-            memory_type: payload.type || 'episodic',
-          },
+          payload: enhancedPayload,
         },
       ],
     });
+
+    return { success: true };
   }
 
   async search(

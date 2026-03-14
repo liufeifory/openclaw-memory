@@ -16,7 +16,12 @@ export declare class QdrantDatabase {
     private initialized;
     constructor(config: QdrantConfig);
     initialize(): Promise<MigrationResult>;
-    upsert(id: number, embedding: number[], payload: Record<string, any>): Promise<void>;
+    upsert(id: number, embedding: number[], payload: Record<string, any>, options?: {
+        checkVersion?: boolean;
+    }): Promise<{
+        success: boolean;
+        reason?: string;
+    }>;
     search(embedding: number[], limit?: number, filter?: Record<string, any>): Promise<Array<{
         id: number;
         score: number;

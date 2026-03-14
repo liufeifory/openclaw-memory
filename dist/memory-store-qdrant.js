@@ -22,9 +22,10 @@ export class MemoryStore {
      */
     async storeEpisodic(sessionId, content, importance = 0.5) {
         const memoryId = ++this.idCounter;
+        const now = Date.now();
         // Generate embedding
         const embedding = await this.embedding.embed(content);
-        // Store in Qdrant
+        // Store in Qdrant with version metadata
         await this.db.upsert(memoryId, embedding, {
             type: MemoryType.EPISODIC,
             session_id: sessionId,
@@ -32,6 +33,7 @@ export class MemoryStore {
             importance: importance,
             access_count: 0,
             created_at: new Date().toISOString(),
+            version: now,
         });
         // Store in memory
         this.episodicMemories.set(memoryId, {
@@ -49,6 +51,7 @@ export class MemoryStore {
      */
     async storeSemantic(content, importance = 0.7) {
         const memoryId = ++this.idCounter;
+        const now = Date.now();
         const embedding = await this.embedding.embed(content);
         await this.db.upsert(memoryId, embedding, {
             type: MemoryType.SEMANTIC,
@@ -56,6 +59,7 @@ export class MemoryStore {
             importance: importance,
             access_count: 0,
             created_at: new Date().toISOString(),
+            version: now,
         });
         this.semanticMemories.set(memoryId, {
             id: memoryId,
@@ -118,6 +122,7 @@ export class MemoryStore {
      */
     async addReflection(summary, importance = 0.9) {
         const memoryId = ++this.idCounter;
+        const now = Date.now();
         const embedding = await this.embedding.embed(summary);
         await this.db.upsert(memoryId, embedding, {
             type: MemoryType.REFLECTION,
@@ -125,6 +130,7 @@ export class MemoryStore {
             importance: importance,
             access_count: 0,
             created_at: new Date().toISOString(),
+            version: now,
         });
         const reflection = {
             id: memoryId,
@@ -143,9 +149,13 @@ export class MemoryStore {
         // Get current payload from Qdrant
         const point = await this.db.get(memoryId);
         if (point && point.payload) {
-            // Update access count in Qdrant
+            // Update access count in Qdrant, preserve version
             const newAccessCount = (point.payload.access_count || 0) + 1;
-            await this.db.updatePayload(memoryId, { ...point.payload, access_count: newAccessCount });
+            await this.db.updatePayload(memoryId, {
+                ...point.payload,
+                access_count: newAccessCount,
+                updated_at: new Date().toISOString(),
+            });
         }
         // Update in-memory cache
         if (type === 'episodic') {

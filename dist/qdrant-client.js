@@ -58,19 +58,35 @@ export class QdrantDatabase {
         }
         return result;
     }
-    async upsert(id, embedding, payload) {
+    async upsert(id, embedding, payload, options // If true, only upsert if new version is newer
+    ) {
+        // Add version and updated_at metadata
+        const enhancedPayload = {
+            ...payload,
+            memory_type: payload.type || 'episodic',
+            updated_at: new Date().toISOString(),
+            version: payload.version || Date.now(), // Use timestamp as version
+        };
+        // If checkVersion is enabled, check existing version first
+        if (options?.checkVersion) {
+            const existing = await this.get(id);
+            if (existing && existing.payload.version) {
+                if (existing.payload.version >= enhancedPayload.version) {
+                    // Existing version is newer or equal, skip upsert
+                    return { success: false, reason: 'Existing version is newer' };
+                }
+            }
+        }
         await this.client.upsert(COLLECTION_NAME, {
             points: [
                 {
                     id: id,
                     vector: embedding,
-                    payload: {
-                        ...payload,
-                        memory_type: payload.type || 'episodic',
-                    },
+                    payload: enhancedPayload,
                 },
             ],
         });
+        return { success: true };
     }
     async search(embedding, limit = 10, filter) {
         const result = await this.client.search(COLLECTION_NAME, {
