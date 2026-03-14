@@ -31,7 +31,12 @@ export declare class ConflictDetector {
     }) => Promise<void>): Promise<ConflictResult>;
     /**
      * Check pairwise conflict between two statements.
+     * Uses LLM for semantic analysis with keyword-based fallback.
      */
     private checkPairwise;
+    /**
+     * Keyword-based fallback conflict detection.
+     */
+    private checkKeywordConflict;
 }
 //# sourceMappingURL=conflict-detector.d.ts.map
