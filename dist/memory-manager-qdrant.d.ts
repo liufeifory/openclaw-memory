@@ -21,6 +21,9 @@ export declare class MemoryManager {
     private reranker;
     private conflictDetector;
     private limiter;
+    private importanceLearning;
+    private clusterer;
+    private idleClusteringInterval?;
     constructor(config: MemoryManagerConfig);
     /**
      * Initialize the memory manager (connect to Qdrant).
@@ -28,8 +31,13 @@ export declare class MemoryManager {
      */
     initialize(): Promise<MigrationResult>;
     /**
+     * Start idle clustering worker - runs semantic clustering during idle time.
+     * Task 2.B: Low frequency clustering (idle time) for similarity > 0.9
+     */
+    private startIdleClusteringWorker;
+    /**
      * Retrieve memories relevant to a query.
-     * Uses vector search + reranking + recency boost.
+     * Uses vector search + reranking + diversity + time decay.
      */
     retrieveRelevant(query: string, topK?: number, threshold?: number): Promise<MemoryWithSimilarity[]>;
     /**

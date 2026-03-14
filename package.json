@@ -10,6 +10,7 @@
     "dev": "tsc --watch",
     "test": "node dist/test-full.js",
     "test:qdrant": "node dist/test-qdrant.js",
+    "test:recall": "node dist/test-recall.js",
     "migrate": "node dist/migrate.js",
     "profile": "node dist/profile.js",
     "clean": "rm -rf dist/"

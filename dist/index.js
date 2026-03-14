@@ -165,8 +165,8 @@ const memoryPlugin = {
                 }
                 const buffer = conversationBuffers.get(sessionId);
                 buffer.push(`User: ${message}`);
-                // Summarize every 20 turns
-                if (buffer.length >= 20) {
+                // Summarize every 10 turns (Task 2.A: high frequency temporal rolling)
+                if (buffer.length >= 10) {
                     const summary = await summarizer.summarize(buffer);
                     if (!summary.isEmpty) {
                         mm.storeReflection(`Summary: ${summary.summary}`, 0.8);

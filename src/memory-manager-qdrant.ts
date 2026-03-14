@@ -6,9 +6,11 @@ import { QdrantDatabase, MigrationResult } from './qdrant-client.js';
 import { EmbeddingService } from './embedding.js';
 import { MemoryStore } from './memory-store-qdrant.js';
 import { ContextBuilder } from './context-builder.js';
-import { Reranker } from './reranker.js';
+import { Reranker, INITIAL_K } from './reranker.js';
 import { ConflictDetector } from './conflict-detector.js';
 import { LLMLimiter } from './llm-limiter.js';
+import { ImportanceLearning } from './importance-learning.js';
+import { SemanticClusterer } from './clusterer.js';
 import type { MemoryWithSimilarity } from './memory-store-qdrant.js';
 
 export interface MemoryManagerConfig {
@@ -30,6 +32,9 @@ export class MemoryManager {
   private reranker: Reranker;
   private conflictDetector: ConflictDetector;
   private limiter: LLMLimiter;
+  private importanceLearning: ImportanceLearning;
+  private clusterer: SemanticClusterer;
+  private idleClusteringInterval?: NodeJS.Timeout;
 
   constructor(config: MemoryManagerConfig) {
     this.db = new QdrantDatabase(config.qdrant);
@@ -42,6 +47,8 @@ export class MemoryManager {
     this.limiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100, queueLimit: 50 });
     this.reranker = new Reranker(llamaEndpoint, this.limiter);
     this.conflictDetector = new ConflictDetector(llamaEndpoint, this.limiter);
+    this.importanceLearning = new ImportanceLearning();
+    this.clusterer = new SemanticClusterer(llamaEndpoint, this.limiter);
   }
 
   /**
@@ -51,54 +58,110 @@ export class MemoryManager {
   async initialize(): Promise<MigrationResult> {
     const result = await this.db.initialize();
     console.log('[MemoryManager] Initialized with Qdrant');
+
+    // Start idle clustering worker (runs every 5 minutes)
+    this.startIdleClusteringWorker();
+
     return result;
   }
 
   /**
+   * Start idle clustering worker - runs semantic clustering during idle time.
+   * Task 2.B: Low frequency clustering (idle time) for similarity > 0.9
+   */
+  private startIdleClusteringWorker(): void {
+    // Run every 5 minutes (300000ms)
+    this.idleClusteringInterval = setInterval(async () => {
+      try {
+        console.log('[MemoryManager] Running idle clustering worker...');
+
+        // Get all semantic memories for clustering
+        const semanticMemories = await this.memoryStore.getSemantic(100);
+
+        if (semanticMemories.length < 5) {
+          console.log('[MemoryManager] Not enough memories for clustering');
+          return;
+        }
+
+        // Run clustering
+        await this.clusterer.runIdleClustering(
+          async () => semanticMemories.map(m => ({ id: m.id, content: m.content })),
+          async (result) => {
+            // Store merged memory with source_ids tracking
+            const mergedId = await this.memoryStore.addReflection(
+              `Merged fact: ${result.mergedContent}`,
+              0.85
+            );
+            console.log(
+              `[MemoryManager] Stored merged memory ${mergedId} from ${result.sourceIds.length} sources: ${result.theme}`
+            );
+          }
+        );
+      } catch (error: any) {
+        console.error('[MemoryManager] Idle clustering worker failed:', error.message);
+      }
+    }, 300000);
+  }
+
+  /**
    * Retrieve memories relevant to a query.
-   * Uses vector search + reranking + recency boost.
+   * Uses vector search + reranking + diversity + time decay.
    */
   async retrieveRelevant(
     query: string,
-    topK: number = 10,
+    topK: number = 5,
     threshold: number = 0.6
   ): Promise<MemoryWithSimilarity[]> {
     // Generate embedding for query
     const embedding = await this.embedding.embed(query);
 
-    // Search all memories including reflections
-    const searchResults = await this.memoryStore.search(embedding, topK * 2, threshold);
+    // Search all memories with high recall (K=20)
+    const searchResults = await this.memoryStore.search(embedding, INITIAL_K, threshold);
 
-    // Apply recency boost (memories from last 3 days get +0.1 score)
-    const now = Date.now();
-    const threeDaysMs = 3 * 24 * 60 * 60 * 1000;
+    // Apply time decay to similarity scores
+    const now = new Date();
     for (const mem of searchResults) {
+      // Calculate time decay factor: e^(-λt) where λ = 0.05 (half-life ~14 days)
+      const daysSinceCreation = (now.getTime() - mem.created_at.getTime()) / (1000 * 60 * 60 * 24);
+      const timeDecay = Math.exp(-0.05 * daysSinceCreation);
+
+      // Apply time decay to similarity (but keep recent boost from 3-day window)
       const memoryTime = mem.created_at?.getTime() || 0;
-      if (now - memoryTime < threeDaysMs) {
-        // Boost recent memories
-        mem.similarity = (mem.similarity ?? 0.5) + 0.1;
+      const threeDaysMs = 3 * 24 * 60 * 60 * 1000;
+      let baseSimilarity = mem.similarity ?? 0.5;
+
+      if (now.getTime() - memoryTime < threeDaysMs) {
+        // Recent memories get +0.1 boost before decay
+        baseSimilarity += 0.1;
       }
+
+      // Final similarity with time decay
+      mem.similarity = baseSimilarity * timeDecay;
     }
 
-    // Rerank results using 1B model (take top 10 for reranking)
-    const reranked = await this.reranker.rerank(query, searchResults);
+    // Rerank with diversity enabled and threshold filtering
+    const reranked = await this.reranker.rerank(query, searchResults, {
+      topK: topK,
+      threshold: 0.7,  // Higher threshold for better precision
+      enableDiversity: true,
+    });
 
-    // Increment access count for ALL retrieved memories (including reflection)
+    // Increment access count for ALL retrieved memories
     for (const mem of reranked) {
       await this.memoryStore.incrementAccess(mem.id, mem.type as 'episodic' | 'semantic' | 'reflection');
     }
 
+    // Filter by importance (Task 1.B.2: filter out importance < 0.3)
+    const filtered = reranked.filter(r => (r.importance ?? 0.5) >= 0.3);
+
     // Sort by combined score (similarity × importance)
-    reranked.sort((a, b) => {
+    filtered.sort((a, b) => {
       const scoreA = (a.similarity ?? a.score) * (a.importance ?? 0.5);
       const scoreB = (b.similarity ?? b.score) * (b.importance ?? 0.5);
       return scoreB - scoreA;
     });
 
-    // Apply threshold and limit
-    return reranked
-      .filter(r => (r.similarity ?? r.score) >= threshold)
-      .slice(0, 5) as MemoryWithSimilarity[];
+    return filtered as MemoryWithSimilarity[];
   }
 
   /**
@@ -207,6 +270,10 @@ export class MemoryManager {
    * Shutdown and cleanup resources.
    */
   async shutdown(): Promise<void> {
+    // Stop idle clustering worker
+    if (this.idleClusteringInterval) {
+      clearInterval(this.idleClusteringInterval);
+    }
     console.log('[MemoryManager] Shutting down');
   }
 }
