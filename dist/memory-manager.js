@@ -18,12 +18,16 @@ export class MemoryManager {
     }
     /**
      * Retrieve memories relevant to a query.
+     * @param query - The search query
+     * @param sessionId - Optional session ID for session isolation (PG backend only)
+     * @param topK - Maximum number of results to return
+     * @param threshold - Minimum similarity threshold
      */
-    async retrieveRelevant(query, topK = 10, threshold = 0.6) {
+    async retrieveRelevant(query, sessionId, topK = 10, threshold = 0.6) {
         // Generate embedding for query
         const embedding = await this.embedding.embed(query);
-        // Search episodic memories
-        const episodicResults = await this.memoryStore.searchEpisodic(embedding, topK, threshold);
+        // Search episodic memories (optionally filtered by session)
+        const episodicResults = await this.memoryStore.searchEpisodic(embedding, topK, threshold, sessionId);
         // Get semantic memories
         const semanticMemories = await this.memoryStore.getSemantic(20);
         // Get reflection memories

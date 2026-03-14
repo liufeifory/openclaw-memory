@@ -14,8 +14,15 @@ export interface MigrationResult {
 export declare class QdrantDatabase {
     private client;
     private initialized;
+    private readonly maxRetries;
+    private readonly baseDelayMs;
     constructor(config: QdrantConfig);
     initialize(): Promise<MigrationResult>;
+    /**
+     * Execute an async operation with retry support.
+     * Uses exponential backoff: 1s, 2s, 4s...
+     */
+    private executeWithRetry;
     upsert(id: number, embedding: number[], payload: Record<string, any>, options?: {
         checkVersion?: boolean;
     }): Promise<{

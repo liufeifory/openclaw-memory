@@ -27,6 +27,19 @@ export interface ClusterResult {
     totalMemories: number;
     clusteredCount: number;
 }
+export interface HierarchicalMemory {
+    level: 1 | 2 | 3;
+    id: number;
+    content: string;
+    importance: number;
+    similarity?: number;
+    children?: HierarchicalMemory[];
+}
+export interface HierarchyConfig {
+    episodicThreshold: number;
+    semanticThreshold: number;
+    reflectionThreshold: number;
+}
 export declare class SemanticClusterer {
     private endpoint;
     private limiter;
@@ -74,5 +87,22 @@ export declare class SemanticClusterer {
         mergedContent: string;
         sourceIds: number[];
     }) => Promise<void>): Promise<void>;
+    /**
+     * Build hierarchical memory tree from retrieved memories.
+     * Level 1: Episodic memories (specific events)
+     * Level 2: Semantic memories (general facts)
+     * Level 3: Reflection memories (themes/summaries)
+     */
+    buildHierarchy(memories: Array<{
+        id: number;
+        content: string;
+        type: string;
+        importance: number;
+        similarity?: number;
+    }>, config?: HierarchyConfig): HierarchicalMemory[];
+    /**
+     * Simple text similarity for hierarchy building (Jaccard similarity).
+     */
+    private textSimilarity;
 }
 //# sourceMappingURL=clusterer.d.ts.map

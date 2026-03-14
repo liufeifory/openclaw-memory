@@ -2,6 +2,8 @@
  * Memory store using Qdrant vector database.
  */
 import { MemoryType } from './qdrant-client.js';
+// Semantic deduplication threshold
+const DEDUPE_THRESHOLD = 0.95; // Very high threshold for near-duplicates
 export class MemoryStore {
     db;
     embedding;
@@ -19,8 +21,15 @@ export class MemoryStore {
     }
     /**
      * Store episodic memory with embedding.
+     * Checks for near-duplicate content within the same session.
      */
     async storeEpisodic(sessionId, content, importance = 0.5) {
+        // Check for duplicates within the same session
+        const dedupeResult = await this.checkDuplicateInSession(sessionId, content);
+        if (dedupeResult.isDuplicate) {
+            console.log(`[MemoryStore] Skipping duplicate episodic memory in session ${sessionId} (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
+            return dedupeResult.similarMemoryId;
+        }
         const memoryId = ++this.idCounter;
         const now = Date.now();
         // Generate embedding
@@ -47,9 +56,36 @@ export class MemoryStore {
         return memoryId;
     }
     /**
+     * Check if content is a near-duplicate within the same session.
+     */
+    async checkDuplicateInSession(sessionId, content) {
+        const embedding = await this.embedding.embed(content);
+        const results = await this.search(embedding, 5, 0.9, 'episodic');
+        // Filter by session and check similarity
+        const sessionResults = results.filter(r => r.session_id === sessionId);
+        if (sessionResults.length > 0 && sessionResults[0].similarity >= DEDUPE_THRESHOLD) {
+            return {
+                isDuplicate: true,
+                similarMemoryId: sessionResults[0].id,
+                similarity: sessionResults[0].similarity,
+            };
+        }
+        return {
+            isDuplicate: false,
+            similarity: sessionResults.length > 0 ? sessionResults[0].similarity : 0,
+        };
+    }
+    /**
      * Store semantic memory with embedding.
+     * Checks for near-duplicate content before storing.
      */
     async storeSemantic(content, importance = 0.7) {
+        // Check for duplicates first
+        const dedupeResult = await this.checkDuplicate(content);
+        if (dedupeResult.isDuplicate) {
+            console.log(`[MemoryStore] Skipping duplicate semantic memory (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
+            return dedupeResult.similarMemoryId;
+        }
         const memoryId = ++this.idCounter;
         const now = Date.now();
         const embedding = await this.embedding.embed(content);
@@ -71,11 +107,37 @@ export class MemoryStore {
         return memoryId;
     }
     /**
+     * Check if content is a near-duplicate of existing memory.
+     * Uses vector similarity with high threshold (0.95).
+     */
+    async checkDuplicate(content) {
+        const embedding = await this.embedding.embed(content);
+        const results = await this.search(embedding, 1, 0.9, 'semantic');
+        if (results.length > 0 && results[0].similarity >= DEDUPE_THRESHOLD) {
+            return {
+                isDuplicate: true,
+                similarMemoryId: results[0].id,
+                similarity: results[0].similarity,
+            };
+        }
+        return {
+            isDuplicate: false,
+            similarity: results.length > 0 ? results[0].similarity : 0,
+        };
+    }
+    /**
      * Search memories by vector similarity.
      * Filters out superseded memories by default.
+     * @param sessionId - Optional session ID for session isolation
      */
-    async search(embedding, topK = 10, threshold = 0.6, memoryType, includeSuperseded = false) {
-        const results = await this.db.search(embedding, topK * 2, memoryType ? { type: memoryType } : undefined);
+    async search(embedding, topK = 10, threshold = 0.6, memoryType, includeSuperseded = false, sessionId // For session isolation
+    ) {
+        const filter = {};
+        if (memoryType)
+            filter.type = memoryType;
+        if (sessionId)
+            filter.session_id = sessionId; // Session isolation
+        const results = await this.db.search(embedding, topK * 2, Object.keys(filter).length > 0 ? filter : undefined);
         return results
             .map(r => ({
             id: r.id,

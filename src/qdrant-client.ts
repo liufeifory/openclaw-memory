@@ -24,6 +24,10 @@ export class QdrantDatabase {
   private client: QdrantClient;
   private initialized = false;
 
+  // Retry configuration
+  private readonly maxRetries = 3;
+  private readonly baseDelayMs = 1000;  // 1s base delay for exponential backoff
+
   constructor(config: QdrantConfig) {
     this.client = new QdrantClient({
       url: config.url,
@@ -38,25 +42,31 @@ export class QdrantDatabase {
     const result: MigrationResult = { success: true, migrated: false, changes: [] };
 
     try {
-      // Check if collection exists
-      const collections = await this.client.getCollections();
+      // Check if collection exists (with retry)
+      const collections = await this.executeWithRetry(async () => {
+        return await this.client.getCollections();
+      }, 'getCollections');
+
       const exists = collections.collections.some(c => c.name === COLLECTION_NAME);
 
       if (!exists) {
-        // Create collection with HNSW index
-        await this.client.createCollection(COLLECTION_NAME, {
-          vectors: {
-            size: VECTOR_SIZE,
-            distance: 'Cosine',
-          },
-          optimizers_config: {
-            default_segment_number: 2,
-          },
-          hnsw_config: {
-            m: 16,
-            ef_construct: 100,
-          },
-        });
+        // Create collection with HNSW index (with retry)
+        await this.executeWithRetry(async () => {
+          await this.client.createCollection(COLLECTION_NAME, {
+            vectors: {
+              size: VECTOR_SIZE,
+              distance: 'Cosine',
+            },
+            optimizers_config: {
+              default_segment_number: 2,
+            },
+            hnsw_config: {
+              m: 16,
+              ef_construct: 100,
+            },
+          });
+        }, 'createCollection');
+
         result.changes.push('Created collection');
         result.migrated = true;
         console.log('[Qdrant] Collection created:', COLLECTION_NAME);
@@ -78,6 +88,37 @@ export class QdrantDatabase {
     }
 
     return result;
+  }
+
+  /**
+   * Execute an async operation with retry support.
+   * Uses exponential backoff: 1s, 2s, 4s...
+   */
+  private async executeWithRetry<T>(
+    operation: () => Promise<T>,
+    operationName: string
+  ): Promise<T> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        lastError = error;
+        console.error(
+          `[Qdrant] ${operationName} failed (attempt ${attempt}/${this.maxRetries}):`,
+          error.message
+        );
+
+        // Wait before retry (exponential backoff)
+        if (attempt < this.maxRetries) {
+          const delay = Math.pow(2, attempt - 1) * this.baseDelayMs;
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    throw new Error(`[Qdrant] ${operationName} failed after ${this.maxRetries} retries: ${lastError?.message}`);
   }
 
   async upsert(
@@ -105,17 +146,18 @@ export class QdrantDatabase {
       }
     }
 
-    await this.client.upsert(COLLECTION_NAME, {
-      points: [
-        {
-          id: id,
-          vector: embedding,
-          payload: enhancedPayload,
-        },
-      ],
-    });
-
-    return { success: true };
+    return this.executeWithRetry(async () => {
+      await this.client.upsert(COLLECTION_NAME, {
+        points: [
+          {
+            id: id,
+            vector: embedding,
+            payload: enhancedPayload,
+          },
+        ],
+      });
+      return { success: true };
+    }, 'upsert');
   }
 
   async search(
@@ -123,41 +165,47 @@ export class QdrantDatabase {
     limit: number = 10,
     filter?: Record<string, any>
   ): Promise<Array<{ id: number; score: number; payload: Record<string, any> }>> {
-    const result = await this.client.search(COLLECTION_NAME, {
-      vector: embedding,
-      limit: limit,
-      filter: filter ? this.buildFilter(filter) : undefined,
-      with_payload: true,
-    });
+    return this.executeWithRetry(async () => {
+      const result = await this.client.search(COLLECTION_NAME, {
+        vector: embedding,
+        limit: limit,
+        filter: filter ? this.buildFilter(filter) : undefined,
+        with_payload: true,
+      });
 
-    return result.map(r => ({
-      id: r.id as number,
-      score: r.score,
-      payload: r.payload as Record<string, any>,
-    }));
+      return result.map(r => ({
+        id: r.id as number,
+        score: r.score,
+        payload: r.payload as Record<string, any>,
+      }));
+    }, 'search');
   }
 
   /**
    * Get a single memory by ID.
    */
   async get(id: number): Promise<{ id: number; payload: Record<string, any> } | null> {
-    const result = await this.client.retrieve(COLLECTION_NAME, {
-      ids: [id],
-      with_payload: true,
-    });
-    return result.length > 0
-      ? { id: result[0].id as number, payload: result[0].payload as Record<string, any> }
-      : null;
+    return this.executeWithRetry(async () => {
+      const result = await this.client.retrieve(COLLECTION_NAME, {
+        ids: [id],
+        with_payload: true,
+      });
+      return result.length > 0
+        ? { id: result[0].id as number, payload: result[0].payload as Record<string, any> }
+        : null;
+    }, 'get');
   }
 
   /**
    * Update payload for an existing memory.
    */
   async updatePayload(id: number, payload: Record<string, any>): Promise<void> {
-    await this.client.setPayload(COLLECTION_NAME, {
-      points: [id],
-      payload: payload,
-    });
+    return this.executeWithRetry(async () => {
+      await this.client.setPayload(COLLECTION_NAME, {
+        points: [id],
+        payload: payload,
+      });
+    }, 'updatePayload');
   }
 
   /**
@@ -169,17 +217,19 @@ export class QdrantDatabase {
     limit: number = 100,
     offset?: number
   ): Promise<Array<{ id: number; payload: Record<string, any> }>> {
-    const result = await this.client.scroll(COLLECTION_NAME, {
-      limit,
-      offset,
-      filter: filter ? this.buildFilter(filter) : undefined,
-      with_payload: true,
-      with_vector: false,
-    });
-    return result.points.map(p => ({
-      id: p.id as number,
-      payload: p.payload as Record<string, any>,
-    }));
+    return this.executeWithRetry(async () => {
+      const result = await this.client.scroll(COLLECTION_NAME, {
+        limit,
+        offset,
+        filter: filter ? this.buildFilter(filter) : undefined,
+        with_payload: true,
+        with_vector: false,
+      });
+      return result.points.map(p => ({
+        id: p.id as number,
+        payload: p.payload as Record<string, any>,
+      }));
+    }, 'scroll');
   }
 
   private buildFilter(filter: Record<string, any>) {
@@ -192,29 +242,43 @@ export class QdrantDatabase {
       });
     }
 
+    // Session isolation filter
+    if (filter.session_id) {
+      conditions.push({
+        key: 'session_id',
+        match: { value: filter.session_id },
+      });
+    }
+
     return conditions.length > 0 ? { must: conditions } : undefined;
   }
 
   async delete(id: number): Promise<void> {
-    await this.client.delete(COLLECTION_NAME, {
-      points: [id],
-    });
+    return this.executeWithRetry(async () => {
+      await this.client.delete(COLLECTION_NAME, {
+        points: [id],
+      });
+    }, 'delete');
   }
 
   async count(): Promise<number> {
-    const result = await this.client.count(COLLECTION_NAME, {});
-    return result.count;
+    return this.executeWithRetry(async () => {
+      const result = await this.client.count(COLLECTION_NAME, {});
+      return result.count;
+    }, 'count');
   }
 
   async getStats(): Promise<{
     total_points: number;
     collection_name: string;
   }> {
-    const info = await this.client.getCollection(COLLECTION_NAME);
-    return {
-      total_points: info.points_count || 0,
-      collection_name: COLLECTION_NAME,
-    };
+    return this.executeWithRetry(async () => {
+      const info = await this.client.getCollection(COLLECTION_NAME);
+      return {
+        total_points: info.points_count || 0,
+        collection_name: COLLECTION_NAME,
+      };
+    }, 'getStats');
   }
 
   /**
@@ -267,10 +331,12 @@ export class QdrantDatabase {
    * Create payload index.
    */
   async createPayloadIndex(fieldName: string): Promise<void> {
-    await this.client.createPayloadIndex(COLLECTION_NAME, {
-      field_name: fieldName,
-      field_schema: 'keyword',
-    });
+    return this.executeWithRetry(async () => {
+      await this.client.createPayloadIndex(COLLECTION_NAME, {
+        field_name: fieldName,
+        field_schema: 'keyword',
+      });
+    }, 'createPayloadIndex');
   }
 }
 

@@ -13,6 +13,8 @@ export interface Memory {
 export interface MemoryWithSimilarity extends Memory {
     similarity: number;
     type: 'episodic' | 'semantic' | 'reflection';
+    session_id?: string;
+    is_active?: boolean;
 }
 export interface EpisodicMemory extends Memory {
     session_id: string;
@@ -28,6 +30,11 @@ export interface ReflectionMemory {
     access_count: number;
     content?: string;
 }
+export interface DedupeCheckResult {
+    isDuplicate: boolean;
+    similarMemoryId?: number;
+    similarity: number;
+}
 export declare class MemoryStore {
     private db;
     private embedding;
@@ -40,17 +47,29 @@ export declare class MemoryStore {
     constructor(db: QdrantDatabase, embedding: EmbeddingService);
     /**
      * Store episodic memory with embedding.
+     * Checks for near-duplicate content within the same session.
      */
     storeEpisodic(sessionId: string, content: string, importance?: number): Promise<number>;
     /**
+     * Check if content is a near-duplicate within the same session.
+     */
+    private checkDuplicateInSession;
+    /**
      * Store semantic memory with embedding.
+     * Checks for near-duplicate content before storing.
      */
     storeSemantic(content: string, importance?: number): Promise<number>;
     /**
+     * Check if content is a near-duplicate of existing memory.
+     * Uses vector similarity with high threshold (0.95).
+     */
+    private checkDuplicate;
+    /**
      * Search memories by vector similarity.
      * Filters out superseded memories by default.
+     * @param sessionId - Optional session ID for session isolation
      */
-    search(embedding: number[], topK?: number, threshold?: number, memoryType?: string, includeSuperseded?: boolean): Promise<MemoryWithSimilarity[]>;
+    search(embedding: number[], topK?: number, threshold?: number, memoryType?: string, includeSuperseded?: boolean, sessionId?: string): Promise<MemoryWithSimilarity[]>;
     /**
      * Get all semantic memories.
      */

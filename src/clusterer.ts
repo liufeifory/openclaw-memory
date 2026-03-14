@@ -92,6 +92,21 @@ export interface ClusterResult {
   clusteredCount: number;
 }
 
+export interface HierarchicalMemory {
+  level: 1 | 2 | 3;  // 1=Episodic (events), 2=Semantic (facts), 3=Reflection (themes)
+  id: number;
+  content: string;
+  importance: number;
+  similarity?: number;
+  children?: HierarchicalMemory[];  // For level 3 (reflections have semantic children)
+}
+
+export interface HierarchyConfig {
+  episodicThreshold: number;  // Level 1 threshold (default: 0.7)
+  semanticThreshold: number;  // Level 2 threshold (default: 0.8)
+  reflectionThreshold: number;  // Level 3 threshold (default: 0.85)
+}
+
 export class SemanticClusterer {
   private endpoint: string;
   private limiter: LLMLimiter;
@@ -327,5 +342,96 @@ export class SemanticClusterer {
     } catch (error: any) {
       console.error('[SemanticClusterer] Idle clustering failed:', error.message);
     }
+  }
+
+  /**
+   * Build hierarchical memory tree from retrieved memories.
+   * Level 1: Episodic memories (specific events)
+   * Level 2: Semantic memories (general facts)
+   * Level 3: Reflection memories (themes/summaries)
+   */
+  buildHierarchy(
+    memories: Array<{
+      id: number;
+      content: string;
+      type: string;
+      importance: number;
+      similarity?: number;
+    }>,
+    config?: HierarchyConfig
+  ): HierarchicalMemory[] {
+    const cfg: Required<HierarchyConfig> = {
+      episodicThreshold: config?.episodicThreshold ?? 0.7,
+      semanticThreshold: config?.semanticThreshold ?? 0.8,
+      reflectionThreshold: config?.reflectionThreshold ?? 0.85,
+    };
+
+    // Separate memories by type
+    const episodic = memories.filter(m => m.type === 'episodic' && (m.similarity ?? 0) >= cfg.episodicThreshold);
+    const semantic = memories.filter(m => m.type === 'semantic' && (m.similarity ?? 0) >= cfg.semanticThreshold);
+    const reflection = memories.filter(m => m.type === 'reflection' && (m.similarity ?? 0) >= cfg.reflectionThreshold);
+
+    const hierarchy: HierarchicalMemory[] = [];
+
+    // Level 1: Episodic memories (leaf nodes)
+    for (const mem of episodic) {
+      hierarchy.push({
+        level: 1,
+        id: mem.id,
+        content: mem.content,
+        importance: mem.importance,
+        similarity: mem.similarity,
+      });
+    }
+
+    // Level 2: Semantic memories (can have episodic children if clustered)
+    for (const mem of semantic) {
+      hierarchy.push({
+        level: 2,
+        id: mem.id,
+        content: mem.content,
+        importance: mem.importance,
+        similarity: mem.similarity,
+      });
+    }
+
+    // Level 3: Reflection memories (themes, can have semantic children)
+    for (const mem of reflection) {
+      // Find semantically related semantic memories
+      const relatedSemantic = semantic.filter(s =>
+        s.content !== mem.content && this.textSimilarity(s.content, mem.content) > 0.5
+      );
+
+      hierarchy.push({
+        level: 3,
+        id: mem.id,
+        content: mem.content,
+        importance: mem.importance,
+        similarity: mem.similarity,
+        children: relatedSemantic.map(s => ({
+          level: 2,
+          id: s.id,
+          content: s.content,
+          importance: s.importance,
+          similarity: s.similarity,
+        })),
+      });
+    }
+
+    return hierarchy;
+  }
+
+  /**
+   * Simple text similarity for hierarchy building (Jaccard similarity).
+   */
+  private textSimilarity(a: string, b: string): number {
+    const wordsA = new Set(a.toLowerCase().split(/\s+/).filter(w => w.length > 3));
+    const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(w => w.length > 3));
+
+    const intersection = [...wordsA].filter(w => wordsB.has(w)).length;
+    const union = new Set([...wordsA, ...wordsB]).size;
+
+    if (union === 0) return 0;
+    return intersection / union;
   }
 }

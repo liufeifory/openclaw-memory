@@ -159,9 +159,9 @@ const memoryPlugin = {
             },
             required: ['query'],
           },
-          execute: async ({ query, top_k = 5, threshold = 0.6 }: any) => {
+          execute: async ({ query, top_k = 5, threshold = 0.6, session_id }: any) => {
             try {
-              const memories = await mm.retrieveRelevant(query, top_k, threshold);
+              const memories = await mm.retrieveRelevant(query, session_id, top_k, threshold);
               return {
                 memories,
                 count: memories.length,
@@ -179,8 +179,8 @@ const memoryPlugin = {
     // Register hook for user messages - build context automatically
     api.onUserMessage?.(async (sessionId: string, message: string, recentConversation?: string) => {
       try {
-        // Retrieve relevant memories
-        const memories = await mm.retrieveRelevant(message);
+        // Retrieve relevant memories with session isolation
+        const memories = await mm.retrieveRelevant(message, sessionId);
 
         // Build context
         const context = mm.buildContext(sessionId, memories, recentConversation);

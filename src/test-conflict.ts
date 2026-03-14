@@ -89,12 +89,14 @@ async function runConflictTests() {
     console.log(`  Old: "${testCase.oldContent}"`);
     console.log(`  New: "${testCase.newContent}"`);
 
-    // Store old memory first
-    await memoryStore.storeSemantic(testCase.oldContent, 0.7);
+    // Store old memory first (use episodic to avoid semantic dedupe)
+    await memoryStore.storeEpisodic(`test-session-${testCase.name}`, testCase.oldContent, 0.7);
 
-    // Search for similar memories
+    // Search for similar memories (include episodic)
     const newEmbedding = await embedding.embed(testCase.newContent);
-    const similarMemories = await memoryStore.search(newEmbedding, 5, 0.5);
+    const similarMemories = await memoryStore.search(newEmbedding, 5, 0.5, undefined, false);
+
+    console.log(`  Found ${similarMemories.length} similar memories`);
 
     // Check for conflicts
     const result = await conflictDetector.detectConflict(

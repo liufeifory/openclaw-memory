@@ -10,6 +10,7 @@ import { ConflictDetector } from './conflict-detector.js';
 import { LLMLimiter } from './llm-limiter.js';
 import { ImportanceLearning } from './importance-learning.js';
 import { SemanticClusterer } from './clusterer.js';
+import { Summarizer } from './summarizer.js';
 export class MemoryManager {
     db;
     embedding;
@@ -20,8 +21,10 @@ export class MemoryManager {
     limiter;
     importanceLearning;
     clusterer;
+    summarizer;
     idleClusteringInterval;
     activeSessions = new Set(); // Track active sessions
+    sessionBuffers = new Map(); // Buffer conversation turns per session
     lastRequestTime = Date.now();
     maintenanceHistory = {
         lastClustering: 0,
@@ -40,6 +43,7 @@ export class MemoryManager {
         this.conflictDetector = new ConflictDetector(llamaEndpoint, this.limiter);
         this.importanceLearning = new ImportanceLearning();
         this.clusterer = new SemanticClusterer(llamaEndpoint, this.limiter);
+        this.summarizer = new Summarizer(llamaEndpoint, this.limiter);
     }
     /**
      * Initialize the memory manager (connect to Qdrant).
@@ -91,10 +95,44 @@ export class MemoryManager {
         this.lastRequestTime = Date.now();
     }
     /**
-     * Track session end for idle detection.
+     * Track session end for idle detection and trigger auto-reflection.
      */
-    trackSessionEnd(sessionId) {
+    async trackSessionEnd(sessionId) {
         this.activeSessions.delete(sessionId);
+        // Generate reflection from session buffer
+        const buffer = this.sessionBuffers.get(sessionId);
+        if (buffer && buffer.length > 0) {
+            await this.generateAutoReflection(sessionId, buffer);
+        }
+        this.sessionBuffers.delete(sessionId);
+    }
+    /**
+     * Add conversation turn to session buffer for later reflection generation.
+     */
+    addToSessionBuffer(sessionId, message) {
+        if (!this.sessionBuffers.has(sessionId)) {
+            this.sessionBuffers.set(sessionId, []);
+        }
+        const buffer = this.sessionBuffers.get(sessionId);
+        buffer.push(message);
+        // Keep last 50 messages to avoid memory issues
+        if (buffer.length > 50) {
+            buffer.shift();
+        }
+    }
+    /**
+     * Generate reflection memory automatically from session conversation.
+     */
+    async generateAutoReflection(sessionId, messages) {
+        console.log(`[MemoryManager] Generating auto-reflection for session ${sessionId} (${messages.length} messages)`);
+        const result = await this.summarizer.summarize(messages);
+        if (!result.isEmpty && result.summary) {
+            await this.storeReflection(result.summary, 0.85);
+            console.log(`[MemoryManager] Stored auto-reflection: "${result.summary.substring(0, 50)}..."`);
+        }
+        else {
+            console.log(`[MemoryManager] No significant content for reflection in session ${sessionId}`);
+        }
     }
     /**
      * Run idle clustering during maintenance window.
@@ -116,25 +154,54 @@ export class MemoryManager {
     }
     /**
      * Run importance decay during maintenance window.
-     * Formula: importance *= exp(-age / 30 days)
+     * Formula: importance *= exp(-λt) where λ = 0.05 (half-life ~14 days)
+     * Updates Qdrant payloads with decayed importance values.
      */
     async runImportanceDecay() {
         console.log('[MemoryManager] Running importance decay...');
-        // Note: Actual decay is applied at retrieval time via time decay
-        // This method logs decay statistics for monitoring
-        const stats = await this.memoryStore.getStats();
-        console.log(`[MemoryManager] Decay check: ${stats.total_count} memories`);
+        const now = Date.now();
+        const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+        const lambda = 0.05; // Decay rate
+        // Get all memories older than 1 day (skip very recent ones)
+        const allMemories = await this.memoryStore.getSemantic(100);
+        let updatedCount = 0;
+        for (const memory of allMemories) {
+            const ageMs = now - memory.created_at.getTime();
+            // Skip memories less than 1 day old
+            if (ageMs < 24 * 60 * 60 * 1000) {
+                continue;
+            }
+            // Calculate decay factor
+            const days = ageMs / (1000 * 60 * 60 * 24);
+            const decayFactor = Math.exp(-lambda * days);
+            const newImportance = memory.importance * decayFactor;
+            // Only update if significant change (> 1% difference)
+            if (Math.abs(memory.importance - newImportance) > 0.01) {
+                // Update in Qdrant
+                const point = await this.db.get(memory.id);
+                if (point && point.payload) {
+                    await this.db.updatePayload(memory.id, {
+                        ...point.payload,
+                        importance: newImportance,
+                        updated_at: new Date().toISOString(),
+                    });
+                    updatedCount++;
+                }
+            }
+        }
+        console.log(`[MemoryManager] Decay applied: ${updatedCount}/${allMemories.length} memories updated`);
     }
     /**
      * Retrieve memories relevant to a query.
      * Uses vector search + reranking + diversity + time decay.
      * @param query - The search query
+     * @param sessionId - Optional session ID for session isolation
      * @param topK - Maximum number of results to return
      * @param threshold - Minimum similarity threshold
      * @param enableFunnelStats - Whether to log funnel statistics
      * @returns Relevant memories sorted by combined score
      */
-    async retrieveRelevant(query, topK = 5, threshold = 0.6, enableFunnelStats = true) {
+    async retrieveRelevant(query, sessionId, topK = 5, threshold = 0.6, enableFunnelStats = true) {
         const funnel = {
             initialCount: 0,
             afterTimeDecay: 0,
@@ -148,8 +215,8 @@ export class MemoryManager {
         };
         // Generate embedding for query
         const embedding = await this.embedding.embed(query);
-        // Search all memories with high recall (K=20)
-        const searchResults = await this.memoryStore.search(embedding, INITIAL_K, threshold);
+        // Search all memories with high recall (K=20), optionally filtered by session
+        const searchResults = await this.memoryStore.search(embedding, INITIAL_K, threshold, undefined, false, sessionId);
         funnel.initialCount = searchResults.length;
         // Apply time decay to similarity scores
         const now = new Date();
@@ -219,6 +286,15 @@ export class MemoryManager {
     buildContext(sessionId, memories, recentConversation) {
         const reflectionMemories = memories.filter(m => m.type === 'reflection');
         return this.contextBuilder.buildContext(sessionId, memories, reflectionMemories, recentConversation);
+    }
+    /**
+     * Build hierarchical memory tree for structured context.
+     * Level 1: Episodic (specific events)
+     * Level 2: Semantic (general facts)
+     * Level 3: Reflection (themes/summaries)
+     */
+    buildMemoryHierarchy(memories) {
+        return this.clusterer.buildHierarchy(memories);
     }
     /**
      * Store memory asynchronously (non-blocking).

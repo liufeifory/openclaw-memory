@@ -37,7 +37,7 @@ async function profileSearch(
   topK: number = 5
 ): Promise<number> {
   const start = Date.now();
-  await manager.retrieveRelevant(query, topK, 0.6);
+  await manager.retrieveRelevant(query, undefined, topK, 0.6);
   return Date.now() - start;
 }
 
@@ -91,7 +91,7 @@ async function profileColdStart() {
   console.log(`  Initialize: ${Date.now() - initStart}ms`);
 
   const searchStart = Date.now();
-  await manager.retrieveRelevant('test', 1, 0.5);
+  await manager.retrieveRelevant('test', undefined, 1, 0.5);
   console.log(`  First search: ${Date.now() - searchStart}ms`);
 
   await manager.shutdown();

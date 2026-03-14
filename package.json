@@ -12,6 +12,7 @@
     "test:qdrant": "node dist/test-qdrant.js",
     "test:recall": "node dist/test-recall.js",
     "test:conflict": "node dist/test-conflict.js",
+    "test:features": "node dist/test-features.js",
     "migrate": "node dist/migrate.js",
     "profile": "node dist/profile.js",
     "clean": "rm -rf dist/"

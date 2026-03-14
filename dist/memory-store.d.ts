@@ -18,8 +18,9 @@ export declare class MemoryStore {
     storeSemantic(content: string, importance?: number): Promise<number>;
     /**
      * Search episodic memories by vector similarity.
+     * @param sessionId - Optional session ID for session isolation
      */
-    searchEpisodic(embedding: number[], topK?: number, threshold?: number): Promise<MemoryWithSimilarity[]>;
+    searchEpisodic(embedding: number[], topK?: number, threshold?: number, sessionId?: string): Promise<MemoryWithSimilarity[]>;
     /**
      * Get all semantic memories.
      */

@@ -34,8 +34,10 @@ export declare class MemoryManager {
     private limiter;
     private importanceLearning;
     private clusterer;
+    private summarizer;
     private idleClusteringInterval?;
     private activeSessions;
+    private sessionBuffers;
     private lastRequestTime;
     private maintenanceHistory;
     constructor(config: MemoryManagerConfig);
@@ -54,32 +56,55 @@ export declare class MemoryManager {
      */
     trackSessionActivity(sessionId: string): void;
     /**
-     * Track session end for idle detection.
+     * Track session end for idle detection and trigger auto-reflection.
      */
-    trackSessionEnd(sessionId: string): void;
+    trackSessionEnd(sessionId: string): Promise<void>;
+    /**
+     * Add conversation turn to session buffer for later reflection generation.
+     */
+    addToSessionBuffer(sessionId: string, message: string): void;
+    /**
+     * Generate reflection memory automatically from session conversation.
+     */
+    private generateAutoReflection;
     /**
      * Run idle clustering during maintenance window.
      */
     private runIdleClustering;
     /**
      * Run importance decay during maintenance window.
-     * Formula: importance *= exp(-age / 30 days)
+     * Formula: importance *= exp(-λt) where λ = 0.05 (half-life ~14 days)
+     * Updates Qdrant payloads with decayed importance values.
      */
     private runImportanceDecay;
     /**
      * Retrieve memories relevant to a query.
      * Uses vector search + reranking + diversity + time decay.
      * @param query - The search query
+     * @param sessionId - Optional session ID for session isolation
      * @param topK - Maximum number of results to return
      * @param threshold - Minimum similarity threshold
      * @param enableFunnelStats - Whether to log funnel statistics
      * @returns Relevant memories sorted by combined score
      */
-    retrieveRelevant(query: string, topK?: number, threshold?: number, enableFunnelStats?: boolean): Promise<MemoryWithSimilarity[]>;
+    retrieveRelevant(query: string, sessionId: string | undefined, topK?: number, threshold?: number, enableFunnelStats?: boolean): Promise<MemoryWithSimilarity[]>;
     /**
      * Build context string for LLM.
      */
     buildContext(sessionId: string, memories: MemoryWithSimilarity[], recentConversation?: string): string;
+    /**
+     * Build hierarchical memory tree for structured context.
+     * Level 1: Episodic (specific events)
+     * Level 2: Semantic (general facts)
+     * Level 3: Reflection (themes/summaries)
+     */
+    buildMemoryHierarchy(memories: Array<{
+        id: number;
+        content: string;
+        type: string;
+        importance: number;
+        similarity?: number;
+    }>): import('./clusterer.js').HierarchicalMemory[];
     /**
      * Store memory asynchronously (non-blocking).
      * Uses internal queue to avoid blocking the conversation flow.

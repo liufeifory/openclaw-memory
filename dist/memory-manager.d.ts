@@ -22,8 +22,12 @@ export declare class MemoryManager {
     constructor(config: MemoryManagerConfig);
     /**
      * Retrieve memories relevant to a query.
+     * @param query - The search query
+     * @param sessionId - Optional session ID for session isolation (PG backend only)
+     * @param topK - Maximum number of results to return
+     * @param threshold - Minimum similarity threshold
      */
-    retrieveRelevant(query: string, topK?: number, threshold?: number): Promise<MemoryWithSimilarity[]>;
+    retrieveRelevant(query: string, sessionId: string | undefined, topK?: number, threshold?: number): Promise<MemoryWithSimilarity[]>;
     /**
      * Build context string for LLM.
      */

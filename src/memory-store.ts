@@ -65,13 +65,19 @@ export class MemoryStore {
 
   /**
    * Search episodic memories by vector similarity.
+   * @param sessionId - Optional session ID for session isolation
    */
   async searchEpisodic(
     embedding: number[],
     topK: number = 10,
-    threshold: number = 0.6
+    threshold: number = 0.6,
+    sessionId?: string
   ): Promise<MemoryWithSimilarity[]> {
     const embStr = `[${embedding.join(',')}]`;
+
+    // Add session filter if provided
+    const sessionCondition = sessionId ? 'AND m.session_id = $3' : '';
+    const params = sessionId ? [topK, embStr, sessionId] : [topK, embStr];
 
     const results = await this.db.query<{
       memory_id: number;
@@ -83,10 +89,10 @@ export class MemoryStore {
               1 - (e.embedding <=> $2::vector) AS similarity
        FROM memory_embeddings e
        JOIN episodic_memory m ON e.memory_id = m.id
-       WHERE e.memory_type = 'episodic'
+       WHERE e.memory_type = 'episodic' ${sessionCondition}
        ORDER BY e.embedding <=> $2::vector
        LIMIT $1`,
-      [topK, embStr]
+      params
     );
 
     return results
