@@ -38,7 +38,15 @@ cd ~/.openclaw/plugins/openclaw-memory
 - 配置开机自启动
 - 更新 OpenClaw 配置文件
 
-**注意：** llama-server 首次启动时会自动下载 BGE-M3 向量模型（约 500MB），请耐心等待。
+**注意：** 部署脚本会启动两个 llama-server 实例：
+- **Embedding 服务** (端口 8080): BGE-M3 模型，用于生成向量嵌入
+- **LLM 服务** (端口 8081): Llama-3.2-1B-Instruct 模型，用于重排序、聚类和总结
+
+两个模型都会自动下载（共约 3GB），首次启动时请耐心等待。
+
+**数据存储位置：**
+- **Qdrant 数据**: `~/.openclaw/plugins/openclaw-memory/qdrant/storage/`
+- **模型文件**: 由 llama-server 管理，通常在 `~/Library/Caches/llama.cpp/` (macOS) 或 `~/.cache/llama.cpp/` (Linux)
 
 **其他部署命令：**
 
@@ -59,11 +67,29 @@ cd ~/.openclaw/plugins/openclaw-memory
 ./start-qdrant.sh
 ```
 
-**2. 启动 llama.cpp**
+**2. 启动 llama.cpp 服务**
 
+启动 Embedding 服务（BGE-M3，端口 8080）：
 ```bash
-llama-server --hf-repo lm-kit/bge-m3-gguf --embedding --port 8080
+llama-server \
+  --hf-repo lm-kit/bge-m3-gguf \
+  --hf-file bge-m3-Q8_0.gguf \
+  --embedding \
+  --port 8080 \
+  --ctx-size 8192
 ```
+
+启动 LLM 服务（Llama-3.2-1B-Instruct，端口 8081）：
+```bash
+llama-server \
+  --hf-repo bartowski/Llama-3.2-1B-Instruct-GGUF \
+  --hf-file Llama-3.2-1B-Instruct-Q8_0.gguf \
+  --port 8081 \
+  --ctx-size 1024 \
+  --n-gpu-layers 99
+```
+
+> **注意**: 需要同时运行两个服务：BGE-M3 (8080) 用于向量生成，Llama-3.2-1B (8081) 用于重排序/聚类/总结
 
 **3. 安装依赖**
 
@@ -78,7 +104,7 @@ npm run build
 node dist/test-qdrant.js
 ```
 
-### 方案 B: PostgreSQL (pgvector) 后端
+### 方案 C: PostgreSQL (pgvector) 后端
 
 **1. 确保 PostgreSQL 运行**
 
@@ -87,11 +113,29 @@ node dist/test-qdrant.js
 pg_ctl -D /usr/local/var/postgres status
 ```
 
-**2. 启动 llama.cpp**
+**2. 启动 llama.cpp 服务**
 
+启动 Embedding 服务（BGE-M3，端口 8080）：
 ```bash
-llama-server --hf-repo lm-kit/bge-m3-gguf --embedding --port 8080
+llama-server \
+  --hf-repo lm-kit/bge-m3-gguf \
+  --hf-file bge-m3-Q8_0.gguf \
+  --embedding \
+  --port 8080 \
+  --ctx-size 8192
 ```
+
+启动 LLM 服务（Llama-3.2-1B-Instruct，端口 8081）：
+```bash
+llama-server \
+  --hf-repo bartowski/Llama-3.2-1B-Instruct-GGUF \
+  --hf-file Llama-3.2-1B-Instruct-Q8_0.gguf \
+  --port 8081 \
+  --ctx-size 1024 \
+  --n-gpu-layers 99
+```
+
+> **注意**: 需要同时运行两个服务：BGE-M3 (8080) 用于向量生成，Llama-3.2-1B (8081) 用于重排序/聚类/总结
 
 **3. 安装依赖**
 
@@ -161,16 +205,24 @@ node dist/test.js
 
 **Qdrant 方案**:
 ```
-OpenClaw → Node.js 插件 → Qdrant (本地二进制)
+OpenClaw → Node.js 插件 → Qdrant (本地二进制，端口 6333)
             ↓
-         llama.cpp (8080)
+    ┌───────┴────────┐
+    ↓                ↓
+Embedding (8080)   LLM (8081)
+BGE-M3             Llama-3.2-1B-Instruct
+(向量生成)          (rerank/summarize/cluster)
 ```
 
 **PostgreSQL 方案**:
 ```
-OpenClaw → Node.js 插件 → PostgreSQL (pgvector)
+OpenClaw → Node.js 插件 → PostgreSQL (pgvector, 端口 5432)
             ↓
-         llama.cpp (8080)
+    ┌───────┴────────┐
+    ↓                ↓
+Embedding (8080)   LLM (8081)
+BGE-M3             Llama-3.2-1B-Instruct
+(向量生成)          (rerank/summarize/cluster)
 ```
 
 ## 性能对比
@@ -183,25 +235,26 @@ OpenClaw → Node.js 插件 → PostgreSQL (pgvector)
 
 ## 服务管理
 
-部署脚本创建的系统服务会开机自启。日常使用中使用 `services.sh` 管理：
+部署脚本创建的系统服务会开机自启。日常使用中使用 `deploy.sh` 管理：
 
 ```bash
 # 查看服务状态
-./services.sh status
+./deploy.sh status
 
 # 启动所有服务
-./services.sh start
+./deploy.sh start
 
 # 停止所有服务
-./services.sh stop
+./deploy.sh stop
 
 # 重启所有服务
-./services.sh restart
+./deploy.sh restart
 
 # 查看日志
-./services.sh logs           # 同时查看两个日志
-./services.sh logs llama     # 只看 llama-server 日志
-./services.sh logs qdrant    # 只看 Qdrant 日志
+./deploy.sh logs           # 同时查看三个日志
+./deploy.sh logs embedding # 只看 embedding 服务日志
+./deploy.sh logs llm       # 只看 LLM 服务日志
+./deploy.sh logs qdrant    # 只看 Qdrant 日志
 ```
 
 ## 记忆类型

@@ -27,14 +27,19 @@ PLUGIN_DIR="$OPENCLAW_DIR/plugins/$PLUGIN_NAME"
 # Service configuration
 LLAMA_SERVER_LABEL="io.github.liufei.llama-server"
 QDRANT_LABEL="io.github.liufei.qdrant"
-LLAMA_SERVER_PORT=8080
+EMBEDDING_PORT=8080
+LLM_PORT=8081
 QDRANT_PORT=6333
 
-# llama.cpp configuration
-# llama-server will auto-download the model if not present
-LLAMA_SERVER_REPO="lm-kit/bge-m3-gguf"
-LLAMA_SERVER_MODEL="bge-m3-Q8_0.gguf"
-LLAMA_SERVER_ARGS="--hf-repo $LLAMA_SERVER_REPO --hf-file $LLAMA_SERVER_MODEL --embedding --port $LLAMA_SERVER_PORT --ctx-size 8192"
+# Embedding model configuration (BGE-M3 for vector embeddings)
+EMBEDDING_MODEL_REPO="lm-kit/bge-m3-gguf"
+EMBEDDING_MODEL_FILE="bge-m3-Q8_0.gguf"
+EMBEDDING_ARGS="--hf-repo $EMBEDDING_MODEL_REPO --hf-file $EMBEDDING_MODEL_FILE --embedding --port $EMBEDDING_PORT --ctx-size 8192"
+
+# LLM model configuration (Llama-3.2-1B-Instruct for reranking, summarization, clustering)
+LLM_MODEL_REPO="bartowski/Llama-3.2-1B-Instruct-GGUF"
+LLM_MODEL_FILE="Llama-3.2-1B-Instruct-Q8_0.gguf"
+LLM_ARGS="--hf-repo $LLM_MODEL_REPO --hf-file $LLM_MODEL_FILE --port $LLM_PORT --ctx-size 1024 --n-gpu-layers 99"
 
 # Colors for output
 RED='\033[0;31m'
@@ -215,7 +220,6 @@ setup_launchd_services() {
     # Get llama paths
     local LLAMA_DIR="$PLUGIN_DIR/llama.cpp"
     local LLAMA_BINARY=$(cat "$LLAMA_DIR/llama_path" 2>/dev/null || echo "")
-    local MODEL_PATH=$(cat "$LLAMA_DIR/model_path" 2>/dev/null || echo "")
 
     if [ -z "$LLAMA_BINARY" ] || [ ! -f "$LLAMA_BINARY" ]; then
         if command -v llama-server &> /dev/null; then
@@ -226,25 +230,25 @@ setup_launchd_services() {
         fi
     fi
 
-    # Create llama-server plist
-    log_info "Creating llama-server launchd service..."
-    cat > "$AGENTS_DIR/${LLAMA_SERVER_LABEL}.plist" << EOF
+    # Create llama-server service for Embedding (BGE-M3)
+    log_info "Creating llama-server launchd service (Embedding - BGE-M3)..."
+    cat > "$AGENTS_DIR/${LLAMA_SERVER_LABEL}-embedding.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>${LLAMA_SERVER_LABEL}</string>
+    <string>${LLAMA_SERVER_LABEL}-embedding</string>
     <key>ProgramArguments</key>
     <array>
         <string>${LLAMA_BINARY}</string>
         <string>--hf-repo</string>
-        <string>${LLAMA_SERVER_REPO}</string>
+        <string>${EMBEDDING_MODEL_REPO}</string>
         <string>--hf-file</string>
-        <string>${LLAMA_SERVER_MODEL}</string>
+        <string>${EMBEDDING_MODEL_FILE}</string>
         <string>--embedding</string>
         <string>--port</string>
-        <string>${LLAMA_SERVER_PORT}</string>
+        <string>${EMBEDDING_PORT}</string>
         <string>--ctx-size</string>
         <string>8192</string>
     </array>
@@ -260,9 +264,56 @@ setup_launchd_services() {
         <true/>
     </dict>
     <key>StandardOutPath</key>
-    <string>${LOGS_DIR}/llama-server.log</string>
+    <string>${LOGS_DIR}/llama-embedding.log</string>
     <key>StandardErrorPath</key>
-    <string>${LOGS_DIR}/llama-server.log</string>
+    <string>${LOGS_DIR}/llama-embedding.log</string>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+</dict>
+</plist>
+EOF
+
+    # Create llama-server service for LLM (Llama-3.2-1B-Instruct)
+    log_info "Creating llama-server launchd service (LLM - Llama-3.2-1B)..."
+    cat > "$AGENTS_DIR/${LLAMA_SERVER_LABEL}-llm.plist" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LLAMA_SERVER_LABEL}-llm</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${LLAMA_BINARY}</string>
+        <string>--hf-repo</string>
+        <string>${LLM_MODEL_REPO}</string>
+        <string>--hf-file</string>
+        <string>${LLM_MODEL_FILE}</string>
+        <string>--port</string>
+        <string>${LLM_PORT}</string>
+        <string>--ctx-size</string>
+        <string>1024</string>
+        <string>--n-gpu-layers</string>
+        <string>99</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${PLUGIN_DIR}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${LOGS_DIR}/llama-llm.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOGS_DIR}/llama-llm.log</string>
     <key>SoftResourceLimits</key>
     <dict>
         <key>NumberOfFiles</key>
@@ -316,9 +367,11 @@ EOF
 
     # Load services
     log_info "Loading services..."
-    launchctl unload "$AGENTS_DIR/${LLAMA_SERVER_LABEL}.plist" 2>/dev/null || true
+    launchctl unload "$AGENTS_DIR/${LLAMA_SERVER_LABEL}-embedding.plist" 2>/dev/null || true
+    launchctl unload "$AGENTS_DIR/${LLAMA_SERVER_LABEL}-llm.plist" 2>/dev/null || true
     launchctl unload "$AGENTS_DIR/${QDRANT_LABEL}.plist" 2>/dev/null || true
-    launchctl load "$AGENTS_DIR/${LLAMA_SERVER_LABEL}.plist"
+    launchctl load "$AGENTS_DIR/${LLAMA_SERVER_LABEL}-embedding.plist"
+    launchctl load "$AGENTS_DIR/${LLAMA_SERVER_LABEL}-llm.plist"
     launchctl load "$AGENTS_DIR/${QDRANT_LABEL}.plist"
 
     log_success "launchd services created and loaded"
@@ -344,21 +397,42 @@ setup_systemd_services() {
         fi
     fi
 
-    # Create llama-server service
-    log_info "Creating llama-server systemd service..."
-    cat > "$SYSTEMD_DIR/llama-server.service" << EOF
+    # Create llama-server service for Embedding (BGE-M3)
+    log_info "Creating llama-server systemd service (Embedding - BGE-M3)..."
+    cat > "$SYSTEMD_DIR/llama-embedding.service" << EOF
 [Unit]
-Description=Llama.cpp Embedding Server for OpenClaw Memory
+Description=BGE-M3 Embedding Server for OpenClaw Memory
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${LLAMA_BINARY} --hf-repo ${LLAMA_SERVER_REPO} --embedding --port ${LLAMA_SERVER_PORT} --ctx-size 8192
+ExecStart=${LLAMA_BINARY} --hf-repo ${EMBEDDING_MODEL_REPO} --hf-file ${EMBEDDING_MODEL_FILE} --embedding --port ${EMBEDDING_PORT} --ctx-size 8192
 WorkingDirectory=${PLUGIN_DIR}
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:$HOME/.local/log/llama-server.log
-StandardError=append:$HOME/.local/log/llama-server.log
+StandardOutput=append:$HOME/.local/log/llama-embedding.log
+StandardError=append:$HOME/.local/log/llama-embedding.log
+LimitNOFILE=4096
+
+[Install]
+WantedBy=default.target
+EOF
+
+    # Create llama-server service for LLM (Llama-3.2-1B-Instruct)
+    log_info "Creating llama-server systemd service (LLM - Llama-3.2-1B)..."
+    cat > "$SYSTEMD_DIR/llama-llm.service" << EOF
+[Unit]
+Description=Llama-3.2-1B-Instruct Server for OpenClaw Memory (reranking, summarization)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${LLAMA_BINARY} --hf-repo ${LLM_MODEL_REPO} --hf-file ${LLM_MODEL_FILE} --port ${LLM_PORT} --ctx-size 1024 --n-gpu-layers 99
+WorkingDirectory=${PLUGIN_DIR}
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:$HOME/.local/log/llama-llm.log
+StandardError=append:$HOME/.local/log/llama-llm.log
 LimitNOFILE=4096
 
 [Install]
@@ -393,9 +467,11 @@ EOF
     log_info "Enabling services..."
     mkdir -p "$HOME/.local/log"
     systemctl --user daemon-reload
-    systemctl --user enable llama-server.service
+    systemctl --user enable llama-embedding.service
+    systemctl --user enable llama-llm.service
     systemctl --user enable qdrant.service
-    systemctl --user start llama-server.service
+    systemctl --user start llama-embedding.service
+    systemctl --user start llama-llm.service
     systemctl --user start qdrant.service
 
     log_success "systemd services created and enabled"
@@ -468,14 +544,18 @@ start_services() {
     log_info "Starting services..."
 
     if [ "$INIT_SYSTEM" = "launchd" ]; then
-        launchctl kickstart -k gui/$(id -u)/"$LLAMA_SERVER_LABEL" 2>/dev/null || true
+        launchctl kickstart -k gui/$(id -u)/"${LLAMA_SERVER_LABEL}-embedding" 2>/dev/null || true
+        launchctl kickstart -k gui/$(id -u)/"${LLAMA_SERVER_LABEL}-llm" 2>/dev/null || true
         launchctl kickstart -k gui/$(id -u)/"$QDRANT_LABEL" 2>/dev/null || true
-        launchctl list | grep -q "$LLAMA_SERVER_LABEL" && log_success "llama-server started" || log_warn "llama-server start failed"
+        launchctl list | grep -q "${LLAMA_SERVER_LABEL}-embedding" && log_success "Embedding service started" || log_warn "Embedding service start failed"
+        launchctl list | grep -q "${LLAMA_SERVER_LABEL}-llm" && log_success "LLM service started" || log_warn "LLM service start failed"
         launchctl list | grep -q "$QDRANT_LABEL" && log_success "Qdrant started" || log_warn "Qdrant start failed"
     elif [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl --user start llama-server.service
+        systemctl --user start llama-embedding.service
+        systemctl --user start llama-llm.service
         systemctl --user start qdrant.service
-        systemctl --user status llama-server.service --no-pager | grep -q "active" && log_success "llama-server started" || log_warn "llama-server start failed"
+        systemctl --user status llama-embedding.service --no-pager | grep -q "active" && log_success "Embedding service started" || log_warn "Embedding service start failed"
+        systemctl --user status llama-llm.service --no-pager | grep -q "active" && log_success "LLM service started" || log_warn "LLM service start failed"
         systemctl --user status qdrant.service --no-pager | grep -q "active" && log_success "Qdrant started" || log_warn "Qdrant start failed"
     fi
 
@@ -484,10 +564,16 @@ start_services() {
     sleep 3
 
     # Health checks
-    if curl -s http://localhost:$LLAMA_SERVER_PORT/health > /dev/null 2>&1; then
-        log_success "llama-server health check passed"
+    if curl -s http://localhost:$EMBEDDING_PORT/health > /dev/null 2>&1; then
+        log_success "Embedding service health check passed"
     else
-        log_warn "llama-server health check failed (may need more time)"
+        log_warn "Embedding service health check failed (may need more time)"
+    fi
+
+    if curl -s http://localhost:$LLM_PORT/health > /dev/null 2>&1; then
+        log_success "LLM service health check passed"
+    else
+        log_warn "LLM service health check failed (may need more time)"
     fi
 
     if curl -s http://localhost:$QDRANT_PORT/health > /dev/null 2>&1; then
@@ -502,11 +588,13 @@ stop_services() {
     log_info "Stopping services..."
 
     if [ "$INIT_SYSTEM" = "launchd" ]; then
-        launchctl bootout gui/$(id -u)/"$LLAMA_SERVER_LABEL" 2>/dev/null || true
+        launchctl bootout gui/$(id -u)/"${LLAMA_SERVER_LABEL}-embedding" 2>/dev/null || true
+        launchctl bootout gui/$(id -u)/"${LLAMA_SERVER_LABEL}-llm" 2>/dev/null || true
         launchctl bootout gui/$(id -u)/"$QDRANT_LABEL" 2>/dev/null || true
         log_success "Services stopped"
     elif [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl --user stop llama-server.service
+        systemctl --user stop llama-embedding.service
+        systemctl --user stop llama-llm.service
         systemctl --user stop qdrant.service
         log_success "Services stopped"
     fi
@@ -519,13 +607,22 @@ show_status() {
     echo ""
 
     if [ "$INIT_SYSTEM" = "launchd" ]; then
-        echo "llama-server (port $LLAMA_SERVER_PORT):"
-        if launchctl list | grep -q "$LLAMA_SERVER_LABEL"; then
+        echo "Embedding Service (BGE-M3, port $EMBEDDING_PORT):"
+        if launchctl list | grep -q "${LLAMA_SERVER_LABEL}-embedding"; then
             echo -e "  ${GREEN}✓ Running${NC}"
         else
             echo -e "  ${RED}✗ Not running${NC}"
         fi
-        curl -s http://localhost:$LLAMA_SERVER_PORT/health > /dev/null 2>&1 && echo -e "  ${GREEN}✓ Healthy${NC}" || echo -e "  ${YELLOW}○ Health check pending${NC}"
+        curl -s http://localhost:$EMBEDDING_PORT/health > /dev/null 2>&1 && echo -e "  ${GREEN}✓ Healthy${NC}" || echo -e "  ${YELLOW}○ Health check pending${NC}"
+        echo ""
+
+        echo "LLM Service (Llama-3.2-1B, port $LLM_PORT):"
+        if launchctl list | grep -q "${LLAMA_SERVER_LABEL}-llm"; then
+            echo -e "  ${GREEN}✓ Running${NC}"
+        else
+            echo -e "  ${RED}✗ Not running${NC}"
+        fi
+        curl -s http://localhost:$LLM_PORT/health > /dev/null 2>&1 && echo -e "  ${GREEN}✓ Healthy${NC}" || echo -e "  ${YELLOW}○ Health check pending${NC}"
         echo ""
 
         echo "Qdrant (port $QDRANT_PORT):"
@@ -537,13 +634,22 @@ show_status() {
         curl -s http://localhost:$QDRANT_PORT/health > /dev/null 2>&1 && echo -e "  ${GREEN}✓ Healthy${NC}" || echo -e "  ${YELLOW}○ Health check pending${NC}"
         echo ""
     elif [ "$INIT_SYSTEM" = "systemd" ]; then
-        echo "llama-server (port $LLAMA_SERVER_PORT):"
-        if systemctl --user is-active llama-server.service > /dev/null 2>&1; then
+        echo "Embedding Service (BGE-M3, port $EMBEDDING_PORT):"
+        if systemctl --user is-active llama-embedding.service > /dev/null 2>&1; then
             echo -e "  ${GREEN}✓ Active${NC}"
         else
             echo -e "  ${RED}✗ Inactive${NC}"
         fi
-        curl -s http://localhost:$LLAMA_SERVER_PORT/health > /dev/null 2>&1 && echo -e "  ${GREEN}✓ Healthy${NC}" || echo -e "  ${YELLOW}○ Health check pending${NC}"
+        curl -s http://localhost:$EMBEDDING_PORT/health > /dev/null 2>&1 && echo -e "  ${GREEN}✓ Healthy${NC}" || echo -e "  ${YELLOW}○ Health check pending${NC}"
+        echo ""
+
+        echo "LLM Service (Llama-3.2-1B, port $LLM_PORT):"
+        if systemctl --user is-active llama-llm.service > /dev/null 2>&1; then
+            echo -e "  ${GREEN}✓ Active${NC}"
+        else
+            echo -e "  ${RED}✗ Inactive${NC}"
+        fi
+        curl -s http://localhost:$LLM_PORT/health > /dev/null 2>&1 && echo -e "  ${GREEN}✓ Healthy${NC}" || echo -e "  ${YELLOW}○ Health check pending${NC}"
         echo ""
 
         echo "Qdrant (port $QDRANT_PORT):"
@@ -568,26 +674,32 @@ show_status() {
 # Show logs
 show_logs() {
     local target=$1
-    local llama_log="$HOME/Library/Logs/llama-server.log"
+    local embedding_log="$HOME/Library/Logs/llama-embedding.log"
+    local llm_log="$HOME/Library/Logs/llama-llm.log"
     local qdrant_log="$HOME/Library/Logs/qdrant.log"
 
     if [ "$OS" = "linux" ]; then
-        llama_log="$HOME/.local/log/llama-server.log"
+        embedding_log="$HOME/.local/log/llama-embedding.log"
+        llm_log="$HOME/.local/log/llama-llm.log"
         qdrant_log="$HOME/.local/log/qdrant.log"
     fi
 
     case "$target" in
-        llama)
-            echo "=== llama-server Log ==="
-            tail -f "$llama_log"
+        embedding)
+            echo "=== Embedding Service Log (BGE-M3) ==="
+            tail -f "$embedding_log"
+            ;;
+        llm)
+            echo "=== LLM Service Log (Llama-3.2-1B) ==="
+            tail -f "$llm_log"
             ;;
         qdrant)
             echo "=== Qdrant Log ==="
             tail -f "$qdrant_log"
             ;;
         *)
-            echo "=== Both Logs (llama-server | qdrant) ==="
-            tail -f "$llama_log" "$qdrant_log" 2>/dev/null | grep --line-buffered -v "^==>"
+            echo "=== All Logs (embedding | llm | qdrant) ==="
+            tail -f "$embedding_log" "$llm_log" "$qdrant_log" 2>/dev/null | grep --line-buffered -v "^==>"
             ;;
     esac
 }
@@ -608,14 +720,18 @@ uninstall() {
 
     log_info "Removing services..."
     if [ "$INIT_SYSTEM" = "launchd" ]; then
-        rm -f "$HOME/Library/LaunchAgents/${LLAMA_SERVER_LABEL}.plist"
+        rm -f "$HOME/Library/LaunchAgents/${LLAMA_SERVER_LABEL}-embedding.plist"
+        rm -f "$HOME/Library/LaunchAgents/${LLAMA_SERVER_LABEL}-llm.plist"
         rm -f "$HOME/Library/LaunchAgents/${QDRANT_LABEL}.plist"
-        launchctl list | grep -q "$LLAMA_SERVER_LABEL" && launchctl bootout gui/$(id -u)/"$LLAMA_SERVER_LABEL" 2>/dev/null || true
+        launchctl list | grep -q "${LLAMA_SERVER_LABEL}-embedding" && launchctl bootout gui/$(id -u)/"${LLAMA_SERVER_LABEL}-embedding" 2>/dev/null || true
+        launchctl list | grep -q "${LLAMA_SERVER_LABEL}-llm" && launchctl bootout gui/$(id -u)/"${LLAMA_SERVER_LABEL}-llm" 2>/dev/null || true
         launchctl list | grep -q "$QDRANT_LABEL" && launchctl bootout gui/$(id -u)/"$QDRANT_LABEL" 2>/dev/null || true
     elif [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl --user disable llama-server.service 2>/dev/null || true
+        systemctl --user disable llama-embedding.service 2>/dev/null || true
+        systemctl --user disable llama-llm.service 2>/dev/null || true
         systemctl --user disable qdrant.service 2>/dev/null || true
-        rm -f "$HOME/.config/systemd/user/llama-server.service"
+        rm -f "$HOME/.config/systemd/user/llama-embedding.service"
+        rm -f "$HOME/.config/systemd/user/llama-llm.service"
         rm -f "$HOME/.config/systemd/user/qdrant.service"
         systemctl --user daemon-reload
     fi
@@ -654,14 +770,17 @@ Commands:
   start      - Start all services
   stop       - Stop all services
   restart    - Restart all services
-  logs       - View logs (llama|qdrant|all)
+  logs       - View logs (embedding|llm|qdrant|all)
   help       - Show this help
 
 Examples:
-  $0 install           # Full installation
-  $0 status            # Check if services are running
-  $0 logs llama        # View only llama-server logs
-  $0 uninstall         # Remove everything
+  $0 install            # Full installation
+  $0 status             # Check if services are running
+  $0 logs embedding     # View only embedding service (BGE-M3) logs
+  $0 logs llm           # View only LLM service (Llama-3.2-1B) logs
+  $0 logs qdrant        # View only Qdrant logs
+  $0 logs               # View all logs merged
+  $0 uninstall          # Remove everything
 
 EOF
 }
