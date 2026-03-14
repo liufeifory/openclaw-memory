@@ -12,7 +12,7 @@ export interface QdrantConfig {
 
 const COLLECTION_NAME = 'openclaw_memories';
 const VECTOR_SIZE = 1024; // BGE-M3 embedding dimension
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;  // v2: added BM25 and hierarchical memory support
 
 export interface MigrationResult {
   success: boolean;
@@ -50,12 +50,16 @@ export class QdrantDatabase {
       const exists = collections.collections.some(c => c.name === COLLECTION_NAME);
 
       if (!exists) {
-        // Create collection with HNSW index (with retry)
+        // Create collection with HNSW index and BM25 sparse vector support (with retry)
         await this.executeWithRetry(async () => {
           await this.client.createCollection(COLLECTION_NAME, {
             vectors: {
               size: VECTOR_SIZE,
               distance: 'Cosine',
+            },
+            // Sparse vector for BM25 (hybrid retrieval)
+            sparse_vectors: {
+              'bm25': {},
             },
             optimizers_config: {
               default_segment_number: 2,
@@ -67,9 +71,17 @@ export class QdrantDatabase {
           });
         }, 'createCollection');
 
-        result.changes.push('Created collection');
+        result.changes.push('Created collection with BM25 support');
         result.migrated = true;
         console.log('[Qdrant] Collection created:', COLLECTION_NAME);
+      }
+
+      // Create BM25 payload index for text search
+      const bm25IndexExists = await this.indexExists('content');
+      if (!bm25IndexExists) {
+        await this.createPayloadIndex('content');
+        result.changes.push('Created BM25 payload index on content field');
+        result.migrated = true;
       }
 
       // Check schema version
@@ -160,6 +172,139 @@ export class QdrantDatabase {
     }, 'upsert');
   }
 
+  /**
+   * Search using BM25 (keyword-based full-text search).
+   */
+  async searchBM25(
+    query: string,
+    limit: number = 10,
+    filter?: Record<string, any>
+  ): Promise<Array<{ id: number; score: number; payload: Record<string, any> }>> {
+    return this.executeWithRetry(async () => {
+      // Tokenize query for BM25
+      const tokens = query.toLowerCase().split(/\s+/).filter(w => w.length > 0);
+      const sparseVector = this.buildSparseVector(tokens);
+
+      const result = await this.client.search(COLLECTION_NAME, {
+        vector: {
+          name: 'bm25',
+          vector: sparseVector,
+        },
+        limit: limit,
+        filter: filter ? this.buildFilter(filter) : undefined,
+        with_payload: true,
+      });
+
+      return result.map(r => ({
+        id: r.id as number,
+        score: r.score,
+        payload: r.payload as Record<string, any>,
+      }));
+    }, 'searchBM25');
+  }
+
+  /**
+   * Hybrid search: combine BM25 and vector search with reciprocal rank fusion.
+   */
+  async searchHybrid(
+    query: string,
+    embedding: number[],
+    limit: number = 10,
+    filter?: Record<string, any>,
+    bm25Weight: number = 0.5  // BM25 weight (0.5 = equal weighting)
+  ): Promise<Array<{ id: number; score: number; payload: Record<string, any>; bm25Score?: number; vectorScore?: number }>> {
+    // Run both searches in parallel
+    const [bm25Results, vectorResults] = await Promise.all([
+      this.searchBM25(query, limit * 2, filter),
+      this.search(embedding, limit * 2, filter),
+    ]);
+
+    // Reciprocal Rank Fusion (RRF)
+    const rrfK = 60;  // RRF constant
+    const scoreMap = new Map<number, { bm25Rank: number; vectorRank: number; payload: Record<string, any> }>();
+
+    // Rank BM25 results
+    bm25Results.forEach((r, idx) => {
+      scoreMap.set(r.id, {
+        bm25Rank: idx + 1,
+        vectorRank: Infinity,
+        payload: r.payload,
+      });
+    });
+
+    // Rank vector results and merge
+    vectorResults.forEach((r, idx) => {
+      const existing = scoreMap.get(r.id);
+      if (existing) {
+        existing.vectorRank = idx + 1;
+      } else {
+        scoreMap.set(r.id, {
+          bm25Rank: Infinity,
+          vectorRank: idx + 1,
+          payload: r.payload,
+        });
+      }
+    });
+
+    // Calculate RRF scores and sort
+    const fusedResults = Array.from(scoreMap.entries())
+      .map(([id, ranks]) => ({
+        id,
+        rrfScore: (ranks.bm25Rank !== Infinity ? 1 / (ranks.bm25Rank + rrfK) : 0) * bm25Weight +
+                  (ranks.vectorRank !== Infinity ? 1 / (ranks.vectorRank + rrfK) : 0) * (1 - bm25Weight),
+        bm25Rank: ranks.bm25Rank,
+        vectorRank: ranks.vectorRank,
+        payload: ranks.payload,
+      }))
+      .sort((a, b) => b.rrfScore - a.rrfScore)
+      .slice(0, limit);
+
+    return fusedResults.map(r => ({
+      id: r.id,
+      score: r.rrfScore,
+      payload: r.payload,
+      bm25Score: r.bm25Rank !== Infinity ? 1 / (r.bm25Rank + rrfK) : 0,
+      vectorScore: r.vectorRank !== Infinity ? 1 / (r.vectorRank + rrfK) : 0,
+    }));
+  }
+
+  /**
+   * Build sparse vector from tokens for BM25.
+   */
+  private buildSparseVector(tokens: string[]): { indices: number[]; values: number[] } {
+    // Simple term frequency based sparse vector
+    const termFreq = new Map<string, number>();
+    for (const token of tokens) {
+      termFreq.set(token, (termFreq.get(token) || 0) + 1);
+    }
+
+    // Use hash of token as index (simple approach)
+    const indices: number[] = [];
+    const values: number[] = [];
+    for (const [token, freq] of termFreq.entries()) {
+      indices.push(this.hashToken(token));
+      values.push(freq);
+    }
+
+    return { indices, values };
+  }
+
+  /**
+   * Simple hash function for tokens.
+   */
+  private hashToken(token: string): number {
+    let hash = 0;
+    for (let i = 0; i < token.length; i++) {
+      const char = token.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash;  // Convert to 32-bit integer
+    }
+    return Math.abs(hash);
+  }
+
+  /**
+   * Search using vector similarity.
+   */
   async search(
     embedding: number[],
     limit: number = 10,
@@ -295,6 +440,35 @@ export class QdrantDatabase {
         points: [id],
       });
     }, 'delete');
+  }
+
+  /**
+   * Hierarchical search: Reflection -> Semantic -> Episodic.
+   * Returns memories organized by hierarchy level.
+   */
+  async searchHierarchical(
+    embedding: number[],
+    filter?: Record<string, any>,
+    reflectionLimit: number = 3,
+    semanticLimit: number = 5,
+    episodicLimit: number = 10
+  ): Promise<{
+    reflections: Array<{ id: number; score: number; payload: Record<string, any> }>;
+    semantics: Array<{ id: number; score: number; payload: Record<string, any> }>;
+    episodic: Array<{ id: number; score: number; payload: Record<string, any> }>;
+  }> {
+    // Search by memory type separately
+    const [reflectionResults, semanticResults, episodicResults] = await Promise.all([
+      this.search(embedding, reflectionLimit, { ...filter, type: 'reflection' }),
+      this.search(embedding, semanticLimit, { ...filter, type: 'semantic' }),
+      this.search(embedding, episodicLimit, { ...filter, type: 'episodic' }),
+    ]);
+
+    return {
+      reflections: reflectionResults,
+      semantics: semanticResults,
+      episodic: episodicResults,
+    };
   }
 
   async count(): Promise<number> {
