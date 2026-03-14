@@ -123,16 +123,15 @@ const memoryPlugin = {
         // ============================================================
         api.on('message_received', async (event, ctx) => {
             console.log('[openclaw-memory] message_received hook triggered:', {
-                from: event.from,
+                from: event.from || 'anonymous',
                 content: event.content?.slice(0, 50),
                 conversationId: ctx.conversationId
             });
             const sessionId = ctx.conversationId || 'default';
             const message = event.content;
-            const from = event.from;
-            // 跳过空消息或系统消息
-            if (!message || !from) {
-                console.log('[openclaw-memory] Skipping message: no content or from');
+            // 跳过空消息（允许 from 为空，因为某些渠道不提供 from 字段）
+            if (!message || message.trim().length === 0) {
+                console.log('[openclaw-memory] Skipping message: no content');
                 return;
             }
             try {
@@ -224,6 +223,7 @@ const memoryPlugin = {
             catch (error) {
                 if (error.message !== 'Memory retrieval timeout') {
                     console.error('[openclaw-memory] before_prompt_build hook failed:', error.message);
+                    console.error('[openclaw-memory] Stack trace:', error.stack);
                 }
                 else {
                     console.warn('[openclaw-memory] before_prompt_build hook timeout (>', timeoutMs, 'ms)');

@@ -31,26 +31,30 @@ export class EmbeddingService {
         });
         const result = await response.json();
         // Handle nested array format from llama.cpp
+        // Format: [{index: 0, embedding: [[...]]}]
         if (Array.isArray(result)) {
             let emb = result[0]?.embedding;
-            if (Array.isArray(emb) && Array.isArray(emb[0])) {
-                emb = emb[0]; // Unwrap nested array
+            // Unwrap nested arrays (could be [[[...]]] or [[...]])
+            while (Array.isArray(emb) && Array.isArray(emb[0])) {
+                emb = emb[0];
             }
-            else if (Array.isArray(emb)) {
-                // Already flat array
-            }
-            return this.normalize(emb);
+            return this.normalize(emb || []);
         }
+        // Format: {embedding: [[...]]}
         let emb = result.embedding;
-        if (Array.isArray(emb) && Array.isArray(emb[0])) {
+        while (Array.isArray(emb) && Array.isArray(emb[0])) {
             emb = emb[0];
         }
-        return this.normalize(emb);
+        return this.normalize(emb || []);
     }
     /**
      * Normalize embedding vector to unit length for cosine similarity.
      */
     normalize(vector) {
+        if (!vector || vector.length === 0) {
+            console.warn('[embedding] Empty or undefined vector received');
+            return vector || [];
+        }
         const magnitude = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));
         if (magnitude === 0)
             return vector;

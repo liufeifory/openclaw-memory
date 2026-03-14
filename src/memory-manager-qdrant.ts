@@ -305,6 +305,13 @@ export class MemoryManager {
 
     // Search all memories with high recall (K=20), optionally filtered by session
     const searchResults = await this.memoryStore.search(embedding, INITIAL_K, threshold, undefined, false, sessionId);
+    
+    // Safety check: searchResults should always be an array
+    if (!searchResults || !Array.isArray(searchResults)) {
+      console.warn('[MemoryManager] search returned invalid results, returning empty');
+      return [];
+    }
+    
     funnel.initialCount = searchResults.length;
 
     // Apply time decay to similarity scores
@@ -335,6 +342,13 @@ export class MemoryManager {
       threshold: 0.7,  // Higher threshold for better precision
       enableDiversity: true,
     });
+    
+    // Safety check: reranked should always be an array
+    if (!reranked || !Array.isArray(reranked)) {
+      console.warn('[MemoryManager] reranker returned invalid results, returning empty');
+      return [];
+    }
+    
     funnel.afterRerank = reranked.length;
 
     // Increment access count for ALL retrieved memories
@@ -364,10 +378,14 @@ export class MemoryManager {
       return [];
     }
 
-    // Calculate statistics
-    funnel.finalCount = filtered.length;
-    funnel.avgSimilarity = filtered.reduce((sum, m) => sum + (m.similarity ?? m.score ?? 0), 0) / filtered.length;
-    funnel.avgImportance = filtered.reduce((sum, m) => sum + (m.importance ?? 0.5), 0) / filtered.length;
+    // Calculate statistics (with safety checks)
+    funnel.finalCount = filtered?.length ?? 0;
+    funnel.avgSimilarity = filtered && filtered.length > 0
+      ? filtered.reduce((sum, m) => sum + (m.similarity ?? m.score ?? 0), 0) / filtered.length
+      : 0;
+    funnel.avgImportance = filtered && filtered.length > 0
+      ? filtered.reduce((sum, m) => sum + (m.importance ?? 0.5), 0) / filtered.length
+      : 0;
     for (const mem of filtered) {
       funnel.typeDistribution[mem.type] = (funnel.typeDistribution[mem.type] || 0) + 1;
     }
