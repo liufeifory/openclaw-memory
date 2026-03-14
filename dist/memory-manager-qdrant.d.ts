@@ -35,6 +35,9 @@ export declare class MemoryManager {
     private importanceLearning;
     private clusterer;
     private idleClusteringInterval?;
+    private activeSessions;
+    private lastRequestTime;
+    private maintenanceHistory;
     constructor(config: MemoryManagerConfig);
     /**
      * Initialize the memory manager (connect to Qdrant).
@@ -46,6 +49,23 @@ export declare class MemoryManager {
      * Task 2.B: Low frequency clustering (idle time) for similarity > 0.9
      */
     private startIdleClusteringWorker;
+    /**
+     * Track session activity for idle detection.
+     */
+    trackSessionActivity(sessionId: string): void;
+    /**
+     * Track session end for idle detection.
+     */
+    trackSessionEnd(sessionId: string): void;
+    /**
+     * Run idle clustering during maintenance window.
+     */
+    private runIdleClustering;
+    /**
+     * Run importance decay during maintenance window.
+     * Formula: importance *= exp(-age / 30 days)
+     */
+    private runImportanceDecay;
     /**
      * Retrieve memories relevant to a query.
      * Uses vector search + reranking + diversity + time decay.

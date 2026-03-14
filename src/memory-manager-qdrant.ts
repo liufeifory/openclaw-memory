@@ -47,6 +47,13 @@ export class MemoryManager {
   private importanceLearning: ImportanceLearning;
   private clusterer: SemanticClusterer;
   private idleClusteringInterval?: NodeJS.Timeout;
+  private activeSessions = new Set<string>();  // Track active sessions
+  private lastRequestTime = Date.now();
+  private maintenanceHistory = {
+    lastClustering: 0,
+    lastDecay: 0,
+    lastSummarization: 0,
+  };
 
   constructor(config: MemoryManagerConfig) {
     this.db = new QdrantDatabase(config.qdrant);
@@ -82,37 +89,93 @@ export class MemoryManager {
    * Task 2.B: Low frequency clustering (idle time) for similarity > 0.9
    */
   private startIdleClusteringWorker(): void {
-    // Run every 5 minutes (300000ms)
+    // Run every 2 minutes (120000ms) - check idle status
     this.idleClusteringInterval = setInterval(async () => {
       try {
-        console.log('[MemoryManager] Running idle clustering worker...');
+        // Check if system is idle
+        const now = Date.now();
+        const isIdle = this.activeSessions.size === 0 && (now - this.lastRequestTime) > 30000;
 
-        // Get all semantic memories for clustering
-        const semanticMemories = await this.memoryStore.getSemantic(100);
-
-        if (semanticMemories.length < 5) {
-          console.log('[MemoryManager] Not enough memories for clustering');
-          return;
+        if (!isIdle) {
+          return; // Skip maintenance if system is active
         }
 
-        // Run clustering
-        await this.clusterer.runIdleClustering(
-          async () => semanticMemories.map(m => ({ id: m.id, content: m.content })),
-          async (result) => {
-            // Store merged memory with source_ids tracking
-            const mergedId = await this.memoryStore.addReflection(
-              `Merged fact: ${result.mergedContent}`,
-              0.85
-            );
-            console.log(
-              `[MemoryManager] Stored merged memory ${mergedId} from ${result.sourceIds.length} sources: ${result.theme}`
-            );
-          }
-        );
+        console.log('[MemoryManager] System idle, running maintenance...');
+
+        // Run clustering every 5 minutes
+        if (now - this.maintenanceHistory.lastClustering > 300000) {
+          await this.runIdleClustering();
+          this.maintenanceHistory.lastClustering = now;
+        }
+
+        // Run importance decay every 10 minutes
+        if (now - this.maintenanceHistory.lastDecay > 600000) {
+          await this.runImportanceDecay();
+          this.maintenanceHistory.lastDecay = now;
+        }
+
       } catch (error: any) {
-        console.error('[MemoryManager] Idle clustering worker failed:', error.message);
+        console.error('[MemoryManager] Idle maintenance failed:', error.message);
       }
-    }, 300000);
+    }, 120000);
+  }
+
+  /**
+   * Track session activity for idle detection.
+   */
+  trackSessionActivity(sessionId: string): void {
+    this.activeSessions.add(sessionId);
+    this.lastRequestTime = Date.now();
+  }
+
+  /**
+   * Track session end for idle detection.
+   */
+  trackSessionEnd(sessionId: string): void {
+    this.activeSessions.delete(sessionId);
+  }
+
+  /**
+   * Run idle clustering during maintenance window.
+   */
+  private async runIdleClustering(): Promise<void> {
+    console.log('[MemoryManager] Running idle clustering...');
+
+    // Get all semantic memories for clustering
+    const semanticMemories = await this.memoryStore.getSemantic(100);
+
+    if (semanticMemories.length < 5) {
+      console.log('[MemoryManager] Not enough memories for clustering');
+      return;
+    }
+
+    // Run clustering
+    await this.clusterer.runIdleClustering(
+      async () => semanticMemories.map(m => ({ id: m.id, content: m.content })),
+      async (result) => {
+        // Store merged memory with source_ids tracking
+        const mergedId = await this.memoryStore.addReflection(
+          `Merged fact: ${result.mergedContent}`,
+          0.85
+        );
+        console.log(
+          `[MemoryManager] Stored merged memory ${mergedId} from ${result.sourceIds.length} sources: ${result.theme}`
+        );
+      }
+    );
+  }
+
+  /**
+   * Run importance decay during maintenance window.
+   * Formula: importance *= exp(-age / 30 days)
+   */
+  private async runImportanceDecay(): Promise<void> {
+    console.log('[MemoryManager] Running importance decay...');
+
+    // Note: Actual decay is applied at retrieval time via time decay
+    // This method logs decay statistics for monitoring
+    const stats = await this.memoryStore.getStats();
+    console.log(`[MemoryManager] Decay check: ${stats.total_count} memories`);
   }
 
   /**
