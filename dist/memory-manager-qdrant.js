@@ -136,6 +136,7 @@ export class MemoryManager {
     }
     /**
      * Run idle clustering during maintenance window.
+     * Timeout: 2 minutes max to avoid blocking.
      */
     async runIdleClustering() {
         console.log('[MemoryManager] Running idle clustering...');
@@ -145,12 +146,28 @@ export class MemoryManager {
             console.log('[MemoryManager] Not enough memories for clustering');
             return;
         }
-        // Run clustering
-        await this.clusterer.runIdleClustering(async () => semanticMemories.map(m => ({ id: m.id, content: m.content })), async (result) => {
-            // Store merged memory with source_ids tracking
-            const mergedId = await this.memoryStore.addReflection(`Merged fact: ${result.mergedContent}`, 0.85);
-            console.log(`[MemoryManager] Stored merged memory ${mergedId} from ${result.sourceIds.length} sources: ${result.theme}`);
-        });
+        // Run clustering with timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
+        try {
+            const clusteringPromise = this.clusterer.runIdleClustering(async () => semanticMemories.map(m => ({ id: m.id, content: m.content })), async (result) => {
+                // Store merged memory with source_ids tracking
+                const mergedId = await this.memoryStore.addReflection(`Merged fact: ${result.mergedContent}`, 0.85);
+                console.log(`[MemoryManager] Stored merged memory ${mergedId} from ${result.sourceIds.length} sources: ${result.theme}`);
+            }, { timeoutMs: 120000, maxMemories: 100 });
+            await Promise.race([
+                clusteringPromise,
+                new Promise((_, reject) => {
+                    controller.signal.addEventListener('abort', () => {
+                        reject(new Error('[MemoryManager] Clustering timeout after 2 minutes'));
+                    });
+                }),
+            ]);
+            clearTimeout(timeoutId);
+        }
+        catch (error) {
+            console.error('[MemoryManager] Idle clustering failed or timed out:', error.message);
+        }
     }
     /**
      * Run importance decay during maintenance window.

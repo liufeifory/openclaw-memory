@@ -310,15 +310,28 @@ export class SemanticClusterer {
   /**
    * Run clustering in background (async worker).
    * Non-blocking - processes memories during idle time.
+   * Limits to top 100 memories to avoid O(N²) performance issues.
    */
   async runIdleClustering(
     getMemories: () => Promise<Array<{ id: number; content: string }>>,
-    onClusterMerged: (result: { theme: string; mergedContent: string; sourceIds: number[] }) => Promise<void>
-  ): Promise<void> {
+    onClusterMerged: (result: { theme: string; mergedContent: string; sourceIds: number[] }) => Promise<void>,
+    options?: { timeoutMs?: number; maxMemories?: number }
+  ): Promise<{ completed: boolean; reason?: string }> {
+    const timeoutMs = options?.timeoutMs ?? 120000;  // 2 minutes default
+    const maxMemories = options?.maxMemories ?? 100;  // Limit to top 100
+
     try {
-      const memories = await getMemories();
+      const allMemories = await getMemories();
+
+      // Limit to recent/top memories to avoid O(N²) performance issues
+      const memories = allMemories.slice(0, maxMemories);
+
       if (memories.length < 5) {
-        return; // Not enough memories to cluster
+        return { completed: true, reason: 'Not enough memories' };
+      }
+
+      if (allMemories.length > maxMemories) {
+        console.log(`[SemanticClusterer] Limited clustering to ${maxMemories}/${allMemories.length} memories`);
       }
 
       // Cluster memories
@@ -339,8 +352,11 @@ export class SemanticClusterer {
           console.log(`[SemanticClusterer] Merged cluster "${cluster.theme}" (${cluster.memoryIndices.length} memories)`);
         }
       }
+
+      return { completed: true, reason: 'Success' };
     } catch (error: any) {
       console.error('[SemanticClusterer] Idle clustering failed:', error.message);
+      return { completed: false, reason: error.message };
     }
   }
 

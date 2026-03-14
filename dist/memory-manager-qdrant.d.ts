@@ -69,6 +69,7 @@ export declare class MemoryManager {
     private generateAutoReflection;
     /**
      * Run idle clustering during maintenance window.
+     * Timeout: 2 minutes max to avoid blocking.
      */
     private runIdleClustering;
     /**

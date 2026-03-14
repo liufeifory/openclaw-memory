@@ -198,13 +198,49 @@ export class QdrantDatabase {
 
   /**
    * Update payload for an existing memory.
+   * Preserves existing fields that are not in the new payload.
+   * @param id - Memory ID
+   * @param payload - New payload fields to merge
+   * @param options.checkVersion - If true, only update if existing version is older
    */
-  async updatePayload(id: number, payload: Record<string, any>): Promise<void> {
+  async updatePayload(
+    id: number,
+    payload: Record<string, any>,
+    options?: { checkVersion?: boolean }
+  ): Promise<{ success: boolean; reason?: string }> {
     return this.executeWithRetry(async () => {
+      // Get existing payload to merge
+      const existing = await this.get(id);
+      if (!existing) {
+        return { success: false, reason: 'Memory not found' };
+      }
+
+      // Check version if requested
+      if (options?.checkVersion && existing.payload.version) {
+        const newVersion = payload.version || Date.now();
+        if (existing.payload.version >= newVersion) {
+          return { success: false, reason: 'Existing version is newer' };
+        }
+      }
+
+      // Merge payloads: preserve existing fields, override with new values
+      const mergedPayload: Record<string, any> = {
+        ...existing.payload,
+        ...payload,
+        updated_at: new Date().toISOString(),
+      };
+
+      // Ensure version is preserved or updated
+      if (!payload.version) {
+        mergedPayload.version = existing.payload.version || Date.now();
+      }
+
       await this.client.setPayload(COLLECTION_NAME, {
         points: [id],
-        payload: payload,
+        payload: mergedPayload,
       });
+
+      return { success: true };
     }, 'updatePayload');
   }
 

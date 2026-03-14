@@ -22,7 +22,10 @@ export class ContextBuilder {
         const context = [];
         // Calculate slot allocation based on approximate line counts
         // Assuming ~4000 tokens budget (~300 lines, ~13 tokens/line)
-        const totalLines = 300;
+        // Reserve 500-800 tokens buffer for user input and model response
+        const BUFFER_TOKENS = 600; // Hard buffer for safety
+        const BUFFER_LINES = Math.ceil(BUFFER_TOKENS / 13); // ~46 lines
+        const totalLines = 300 - BUFFER_LINES; // ~254 lines available
         const reflectionLines = Math.floor(totalLines * this.reflectionRatio);
         const preferenceLines = Math.floor(totalLines * this.preferenceRatio);
         const memoryLines = Math.floor(totalLines * this.memoryRatio);

@@ -43,8 +43,17 @@ export declare class QdrantDatabase {
     } | null>;
     /**
      * Update payload for an existing memory.
+     * Preserves existing fields that are not in the new payload.
+     * @param id - Memory ID
+     * @param payload - New payload fields to merge
+     * @param options.checkVersion - If true, only update if existing version is older
      */
-    updatePayload(id: number, payload: Record<string, any>): Promise<void>;
+    updatePayload(id: number, payload: Record<string, any>, options?: {
+        checkVersion?: boolean;
+    }): Promise<{
+        success: boolean;
+        reason?: string;
+    }>;
     /**
      * Scroll through memories with optional filter.
      * Use limit: 100 for each batch, use offset for pagination.

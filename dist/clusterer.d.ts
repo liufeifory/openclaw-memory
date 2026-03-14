@@ -78,6 +78,7 @@ export declare class SemanticClusterer {
     /**
      * Run clustering in background (async worker).
      * Non-blocking - processes memories during idle time.
+     * Limits to top 100 memories to avoid O(N²) performance issues.
      */
     runIdleClustering(getMemories: () => Promise<Array<{
         id: number;
@@ -86,7 +87,13 @@ export declare class SemanticClusterer {
         theme: string;
         mergedContent: string;
         sourceIds: number[];
-    }) => Promise<void>): Promise<void>;
+    }) => Promise<void>, options?: {
+        timeoutMs?: number;
+        maxMemories?: number;
+    }): Promise<{
+        completed: boolean;
+        reason?: string;
+    }>;
     /**
      * Build hierarchical memory tree from retrieved memories.
      * Level 1: Episodic memories (specific events)

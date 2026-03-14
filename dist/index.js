@@ -168,11 +168,28 @@ const memoryPlugin = {
                 // Summarize every 10 turns (Task 2.A: high frequency temporal rolling)
                 if (buffer.length >= 10) {
                     const summary = await summarizer.summarize(buffer);
-                    if (!summary.isEmpty) {
+                    // Atomic operation: only clear buffer if summary was successfully created and stored
+                    if (!summary.isEmpty && summary.summary) {
                         mm.storeReflection(`Summary: ${summary.summary}`, 0.8);
                         console.log('[Memory] Conversation summarized');
+                        buffer.length = 0; // Clear buffer ONLY on success
                     }
-                    buffer.length = 0; // Clear buffer
+                    else if (summary.isEmpty) {
+                        // No significant content - store raw buffer as episodic memories instead
+                        console.log('[Memory] No significant content for summary, storing episodic memories');
+                        for (const msg of buffer.slice(-5)) {
+                            mm.storeMemory(sessionId, msg, 0.4);
+                        }
+                        buffer.length = 0;
+                    }
+                    else {
+                        // LLM failed - keep buffer for next retry, store recent messages as fallback
+                        console.warn('[Memory] Summarization failed, storing fallback episodic memories');
+                        for (const msg of buffer.slice(-3)) {
+                            mm.storeMemory(sessionId, msg, 0.4);
+                        }
+                        // Don't clear buffer - retry next time
+                    }
                 }
                 // Extract preferences periodically
                 if (buffer.length % 10 === 0 && buffer.length > 0) {
