@@ -39,7 +39,7 @@ EMBEDDING_ARGS="--hf-repo $EMBEDDING_MODEL_REPO --hf-file $EMBEDDING_MODEL_FILE 
 # LLM model configuration (Llama-3.2-1B-Instruct for reranking, summarization, clustering)
 LLM_MODEL_REPO="bartowski/Llama-3.2-1B-Instruct-GGUF"
 LLM_MODEL_FILE="Llama-3.2-1B-Instruct-Q8_0.gguf"
-LLM_ARGS="--hf-repo $LLM_MODEL_REPO --hf-file $LLM_MODEL_FILE --port $LLM_PORT --ctx-size 1024 --n-gpu-layers 99"
+LLM_ARGS="--hf-repo $LLM_MODEL_REPO --hf-file $LLM_MODEL_FILE --port $LLM_PORT --ctx-size 8192 --n-gpu-layers 99 --threads 8 --mlock"
 
 # Colors for output
 RED='\033[0;31m'
@@ -295,9 +295,12 @@ EOF
         <string>--port</string>
         <string>${LLM_PORT}</string>
         <string>--ctx-size</string>
-        <string>1024</string>
+        <string>8192</string>
         <string>--n-gpu-layers</string>
         <string>99</string>
+        <string>--threads</string>
+        <string>8</string>
+        <string>--mlock</string>
     </array>
     <key>WorkingDirectory</key>
     <string>${PLUGIN_DIR}</string>
@@ -427,7 +430,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${LLAMA_BINARY} --hf-repo ${LLM_MODEL_REPO} --hf-file ${LLM_MODEL_FILE} --port ${LLM_PORT} --ctx-size 1024 --n-gpu-layers 99
+ExecStart=${LLAMA_BINARY} --hf-repo ${LLM_MODEL_REPO} --hf-file ${LLM_MODEL_FILE} --port ${LLM_PORT} --ctx-size 8192 --n-gpu-layers 99 --threads 8 --mlock
 WorkingDirectory=${PLUGIN_DIR}
 Restart=on-failure
 RestartSec=5

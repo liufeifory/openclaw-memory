@@ -157,6 +157,11 @@ export class MemoryStore {
      */
     async search(embedding, topK = 10, threshold = 0.6, memoryType, includeSuperseded = false, sessionId // For session isolation
     ) {
+        // Check for empty embedding vector
+        if (!embedding || embedding.length === 0) {
+            console.warn('[MemoryStore] search received empty embedding, returning empty results');
+            return [];
+        }
         const filter = {};
         if (memoryType)
             filter.type = memoryType;

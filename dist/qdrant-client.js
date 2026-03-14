@@ -275,6 +275,11 @@ export class QdrantDatabase {
      * Search using vector similarity.
      */
     async search(embedding, limit = 10, filter) {
+        // Check for empty embedding vector
+        if (!embedding || embedding.length === 0) {
+            console.warn('[Qdrant] search received empty embedding, returning empty results');
+            return [];
+        }
         return this.executeWithRetry(async () => {
             const result = await this.client.search(COLLECTION_NAME, {
                 vector: embedding,

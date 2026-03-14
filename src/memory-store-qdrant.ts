@@ -231,6 +231,11 @@ export class MemoryStore {
     includeSuperseded: boolean = false,
     sessionId?: string  // For session isolation
   ): Promise<MemoryWithSimilarity[]> {
+    // Check for empty embedding vector
+    if (!embedding || embedding.length === 0) {
+      console.warn('[MemoryStore] search received empty embedding, returning empty results');
+      return [];
+    }
     const filter: Record<string, any> = {};
     if (memoryType) filter.type = memoryType;
     if (sessionId) filter.session_id = sessionId;  // Session isolation

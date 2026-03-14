@@ -14,6 +14,8 @@ import { LLMLimiter } from './llm-limiter.js';
 import { MemoryFilter } from './memory-filter.js';
 import { PreferenceExtractor } from './preference-extractor.js';
 import { Summarizer } from './summarizer.js';
+import * as fs from 'fs';
+import * as path from 'path';
 // Global instance for reuse across requests
 let memoryManager = null;
 let memoryFilter = null;
@@ -21,6 +23,38 @@ let preferenceExtractor = null;
 let summarizer = null;
 let globalLimiter = null;
 let savedConfig = null; // Store config from init
+/**
+ * Append memory to local Markdown file for self-improving-agent compatibility.
+ */
+function appendToLocalMemory(content, sessionId) {
+    try {
+        const workspaceDir = process.env.HOME ? path.join(process.env.HOME, '.openclaw', 'workspace') : '~/.openclaw/workspace';
+        const memoryDir = path.join(workspaceDir, 'memory');
+        const memoryFile = path.join(memoryDir, `${new Date().toISOString().split('T')[0]}.md`);
+        // Ensure directory exists
+        if (!fs.existsSync(memoryDir)) {
+            fs.mkdirSync(memoryDir, { recursive: true });
+        }
+        // Format memory entry
+        const timestamp = new Date().toISOString();
+        const entry = `- ${timestamp}: ${content}\n`;
+        // Check if file exists, create header if not
+        let fileContent = '';
+        if (fs.existsSync(memoryFile)) {
+            fileContent = fs.readFileSync(memoryFile, 'utf-8');
+        }
+        else {
+            const dateStr = new Date().toISOString().split('T')[0];
+            fileContent = `# ${dateStr}\n\n## 日志\n\n`;
+        }
+        // Append entry
+        fs.writeFileSync(memoryFile, fileContent + entry);
+        console.log(`[openclaw-memory] Appended to local memory: ${memoryFile}`);
+    }
+    catch (error) {
+        console.error('[openclaw-memory] Failed to write local memory:', error.message);
+    }
+}
 function getMemoryManager(config) {
     if (!memoryManager) {
         if (config.backend === 'qdrant') {
@@ -137,7 +171,7 @@ const memoryPlugin = {
                 }
                 // 1. 分类消息
                 const filterResult = await filter.classify(message);
-                // 2. 存储记忆
+                // 2. 存储记忆（同时写入 Qdrant 和本地文件）
                 if (filterResult.shouldStore && filterResult.memoryType) {
                     if (filterResult.memoryType === 'semantic') {
                         if (mm instanceof QdrantMemoryManager) {
@@ -150,6 +184,10 @@ const memoryPlugin = {
                     else {
                         await mm.storeMemory(sessionId, message, filterResult.importance);
                     }
+                    // 同时写入本地 Markdown 文件（用于 self-improving-agent 读取）
+                    // 根据分类添加标签
+                    const categoryLabel = filterResult.category ? `[${filterResult.category}] ` : '';
+                    appendToLocalMemory(`${categoryLabel}${message}`, sessionId);
                 }
                 // 3. 偏好提取（每 10 条）
                 const buffer = conversationBuffers.get(sessionId) || [];
@@ -161,15 +199,21 @@ const memoryPlugin = {
                     // Store likes as semantic memories
                     for (const like of userProfile.likes) {
                         await mm.storeSemantic(like, 0.8);
+                        // 同步写入本地文件
+                        appendToLocalMemory(`[PREFERENCE-LIKE] ${like}`);
                     }
                     // Store dislikes as semantic memories
                     for (const dislike of userProfile.dislikes) {
                         await mm.storeSemantic(dislike, 0.8);
+                        // 同步写入本地文件
+                        appendToLocalMemory(`[PREFERENCE-DISLIKE] ${dislike}`);
                     }
                     // 生成摘要
                     const summaryResult = await summarizer.summarize(buffer);
                     if (summaryResult.summary) {
                         await mm.storeReflection(summaryResult.summary, 0.9);
+                        // 同步写入本地文件
+                        appendToLocalMemory(`[REFLECTION] ${summaryResult.summary}`);
                     }
                     // 清空缓冲
                     conversationBuffers.set(sessionId, []);
@@ -260,8 +304,8 @@ const memoryPlugin = {
                     console.error('[openclaw-memory] Background message store failed:', err.message);
                 });
             }
-            // 超时控制：300ms 内必须返回，避免阻塞 Agent 响应
-            const timeoutMs = 300;
+            // 超时控制：1000ms 内必须返回，避免阻塞 Agent 响应（Rerank 需要调用 LLM，约 800-900ms）
+            const timeoutMs = 1000;
             try {
                 // 1. 检索相关记忆 (带超时)
                 const memories = await Promise.race([
