@@ -10,16 +10,17 @@
  */
 import { MemoryManager as PgMemoryManager } from './memory-manager.js';
 import { MemoryManager as QdrantMemoryManager } from './memory-manager-qdrant.js';
+import { LLMLimiter } from './llm-limiter.js';
 import { MemoryFilter } from './memory-filter.js';
 import { PreferenceExtractor } from './preference-extractor.js';
 import { Summarizer } from './summarizer.js';
-import { LLMLimiter } from './llm-limiter.js';
 // Global instance for reuse across requests
 let memoryManager = null;
 let memoryFilter = null;
 let preferenceExtractor = null;
 let summarizer = null;
 let globalLimiter = null;
+let savedConfig = null; // Store config from init
 function getMemoryManager(config) {
     if (!memoryManager) {
         if (config.backend === 'qdrant') {
@@ -49,12 +50,30 @@ function getSummarizer(llamaEndpoint, limiter) {
     }
     return summarizer;
 }
+/**
+ * Build context string from retrieved memories.
+ */
+function buildMemoryContext(memories) {
+    if (memories.length === 0) {
+        return '';
+    }
+    const contextParts = memories.map(m => {
+        const type = m.type || m.memory_type || 'unknown';
+        const similarity = m.similarity?.toFixed(3) || 'N/A';
+        const importance = m.importance?.toFixed(2) || 'N/A';
+        const content = m.content || m.text || '';
+        return `[${type.toUpperCase()}] (sim: ${similarity}, imp: ${importance}) ${content}`;
+    });
+    return '\n--- Relevant Memories ---\n' + contextParts.join('\n') + '\n--- End Memories ---\n';
+}
 const memoryPlugin = {
     id: 'openclaw-memory',
     name: 'OpenClaw Memory',
     description: 'Long-term memory with semantic search (supports pgvector and Qdrant)',
     kind: 'memory',
     async init(config) {
+        // Store config for later use in register
+        savedConfig = config;
         // Initialize memory manager on plugin load
         const mm = getMemoryManager(config);
         // Initialize Qdrant if using that backend (run migration)
@@ -67,12 +86,18 @@ const memoryPlugin = {
         console.log('[openclaw-memory] Plugin initialized with', config.backend === 'qdrant' ? 'Qdrant' : 'PostgreSQL');
     },
     register(api) {
-        // Get config from OpenClaw
-        const config = api.getConfig?.();
+        // Get plugin config from OpenClaw - use api.pluginConfig property (not getConfig method)
+        const pluginConfig = api.pluginConfig;
+        // Debug: log what we received
+        console.log('[openclaw-memory] Plugin config from api.pluginConfig:', JSON.stringify(pluginConfig, null, 2));
+        // Handle both formats: {enabled, config} or direct config
+        const config = pluginConfig?.config || pluginConfig;
         if (!config) {
             console.warn('[openclaw-memory] No config found, plugin disabled');
             return;
         }
+        // Debug: log resolved config
+        console.log('[openclaw-memory] Resolved config:', JSON.stringify(config, null, 2));
         // Check for either pgvector or qdrant config
         const hasPgConfig = 'database' in config && !!config.database;
         const hasQdrantConfig = config.backend === 'qdrant' || ('qdrant' in config && !!config.qdrant);
@@ -84,20 +109,128 @@ const memoryPlugin = {
         const mm = getMemoryManager(config);
         // Initialize 1B model helpers (Llama-3.2-1B-Instruct on port 8081)
         const llamaEndpoint = config.embedding?.endpoint?.replace('8080', '8081') ?? 'http://localhost:8081';
-        // Create shared LLM limiter (only for Qdrant backend)
-        if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
-            // Limiter is managed internally by QdrantMemoryManager
-        }
-        else {
-            // For pgvector or standalone usage, create global limiter
-            globalLimiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100, queueLimit: 50 });
-        }
+        // Create shared LLM limiter
+        globalLimiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100, queueLimit: 50 });
         const limiter = globalLimiter;
+        // Initialize helpers
         const filter = getMemoryFilter(llamaEndpoint, limiter);
         const extractor = getPreferenceExtractor(llamaEndpoint, limiter);
         const summarizer = getSummarizer(llamaEndpoint, limiter);
         // Conversation buffer for summarization
         const conversationBuffers = new Map();
+        // ============================================================
+        // ✅ 注册 message_received Hook - 存储消息 (异步非阻塞)
+        // ============================================================
+        api.on('message_received', async (event, ctx) => {
+            console.log('[openclaw-memory] message_received hook triggered:', {
+                from: event.from,
+                content: event.content?.slice(0, 50),
+                conversationId: ctx.conversationId
+            });
+            const sessionId = ctx.conversationId || 'default';
+            const message = event.content;
+            const from = event.from;
+            // 跳过空消息或系统消息
+            if (!message || !from) {
+                console.log('[openclaw-memory] Skipping message: no content or from');
+                return;
+            }
+            try {
+                // 1. 分类消息
+                const filterResult = await filter.classify(message);
+                // 2. 存储记忆
+                if (filterResult.shouldStore && filterResult.memoryType) {
+                    if (filterResult.memoryType === 'semantic') {
+                        // Only QdrantMemoryManager has storeSemanticWithConflictCheck
+                        if (mm instanceof QdrantMemoryManager) {
+                            await mm.storeSemanticWithConflictCheck(message, filterResult.importance, 0.85);
+                        }
+                        else {
+                            await mm.storeSemantic(message, filterResult.importance);
+                        }
+                    }
+                    else {
+                        await mm.storeMemory(sessionId, message, filterResult.importance);
+                    }
+                }
+                // 3. 偏好提取（每 10 条）
+                const buffer = conversationBuffers.get(sessionId) || [];
+                buffer.push(message);
+                conversationBuffers.set(sessionId, buffer);
+                if (buffer.length >= 10) {
+                    // 提取偏好
+                    const userProfile = await extractor.extract(buffer);
+                    // Store likes as semantic memories
+                    for (const like of userProfile.likes) {
+                        await mm.storeSemantic(like, 0.8);
+                    }
+                    // Store dislikes as semantic memories
+                    for (const dislike of userProfile.dislikes) {
+                        await mm.storeSemantic(dislike, 0.8);
+                    }
+                    // 生成摘要
+                    const summaryResult = await summarizer.summarize(buffer);
+                    if (summaryResult.summary) {
+                        await mm.storeReflection(summaryResult.summary, 0.9);
+                    }
+                    // 清空缓冲
+                    conversationBuffers.set(sessionId, []);
+                }
+            }
+            catch (error) {
+                console.error('[openclaw-memory] message_received hook failed:', error.message);
+            }
+        });
+        // ============================================================
+        // ✅ 注册 before_prompt_build Hook - 注入上下文 (带超时优化)
+        // ============================================================
+        api.on('before_prompt_build', async (event, ctx) => {
+            console.log('[openclaw-memory] before_prompt_build hook triggered:', {
+                hasMessages: !!event.messages,
+                messagesCount: event.messages?.length || 0,
+                sessionId: ctx.sessionId
+            });
+            const sessionId = ctx.sessionId;
+            const messages = event.messages;
+            // 检查 messages 是否存在
+            if (!messages || messages.length === 0) {
+                console.log('[openclaw-memory] No messages in event, skipping context injection');
+                return;
+            }
+            // 获取最后一条用户消息
+            const lastUserMessage = messages.filter(m => m.role === 'user').pop();
+            if (!lastUserMessage) {
+                console.log('[openclaw-memory] No user message found, skipping context injection');
+                return; // 没有用户消息，不注入
+            }
+            // 超时控制：300ms 内必须返回，避免阻塞 Agent 响应
+            const timeoutMs = 300;
+            try {
+                // 1. 检索相关记忆 (带超时)
+                const memories = await Promise.race([
+                    mm.retrieveRelevant(lastUserMessage.content, sessionId, 3, 0.65), // top_k=3, threshold=0.65
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Memory retrieval timeout')), timeoutMs))
+                ]);
+                if (!memories || memories.length === 0) {
+                    return; // 没有相关记忆
+                }
+                // 2. 构建上下文 (限制总长度)
+                const context = buildMemoryContext(memories.slice(0, 3)); // 最多 3 条记忆
+                // 3. 返回 prependContext
+                return {
+                    prependContext: context,
+                };
+            }
+            catch (error) {
+                if (error.message !== 'Memory retrieval timeout') {
+                    console.error('[openclaw-memory] before_prompt_build hook failed:', error.message);
+                }
+                else {
+                    console.warn('[openclaw-memory] before_prompt_build hook timeout (>', timeoutMs, 'ms)');
+                }
+                return; // 超时或失败时不注入上下文
+            }
+        });
         // Register memory_search tool
         api.registerTool((ctx) => {
             const memorySearchTool = {
@@ -127,111 +260,6 @@ const memoryPlugin = {
             };
             return [memorySearchTool];
         }, { names: ['memory_search'] });
-        // Register hook for user messages - build context automatically
-        api.onUserMessage?.(async (sessionId, message, recentConversation) => {
-            try {
-                // Retrieve relevant memories with session isolation
-                const memories = await mm.retrieveRelevant(message, sessionId);
-                // Build context
-                const context = mm.buildContext(sessionId, memories, recentConversation);
-                // Smart storage: use 1B model to classify and filter
-                const filterResult = await filter.classify(message);
-                if (filterResult.shouldStore && filterResult.memoryType) {
-                    // Check for conflicts if storing semantic memory
-                    if (filterResult.memoryType === 'semantic') {
-                        // Use conflict-aware storage (Qdrant only)
-                        if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
-                            const result = await mm.storeSemanticWithConflictCheck(message, filterResult.importance, 0.85);
-                            if (result.conflictDetected) {
-                                console.log(`[Memory] Conflict: "${message.substring(0, 40)}..." supersedes memory ${result.supersededId}`);
-                            }
-                        }
-                        else {
-                            // Fallback without conflict detection
-                            mm.storeSemantic(message, filterResult.importance);
-                        }
-                    }
-                    else {
-                        // Episodic memory - store normally
-                        mm.storeMemory(sessionId, message, filterResult.importance);
-                    }
-                }
-                else {
-                    console.log(`[Memory] Skipped: ${filterResult.category} - ${filterResult.reason}`);
-                }
-                // Add to conversation buffer for summarization
-                if (!conversationBuffers.has(sessionId)) {
-                    conversationBuffers.set(sessionId, []);
-                }
-                const buffer = conversationBuffers.get(sessionId);
-                buffer.push(`User: ${message}`);
-                // Summarize every 10 turns (Task 2.A: high frequency temporal rolling)
-                if (buffer.length >= 10) {
-                    const summary = await summarizer.summarize(buffer);
-                    // Atomic operation: only clear buffer if summary was successfully created and stored
-                    if (!summary.isEmpty && summary.summary) {
-                        mm.storeReflection(`Summary: ${summary.summary}`, 0.8);
-                        console.log('[Memory] Conversation summarized');
-                        buffer.length = 0; // Clear buffer ONLY on success
-                    }
-                    else if (summary.isEmpty) {
-                        // No significant content - store raw buffer as episodic memories instead
-                        console.log('[Memory] No significant content for summary, storing episodic memories');
-                        for (const msg of buffer.slice(-5)) {
-                            mm.storeMemory(sessionId, msg, 0.4);
-                        }
-                        buffer.length = 0;
-                    }
-                    else {
-                        // LLM failed - keep buffer for next retry, store recent messages as fallback
-                        console.warn('[Memory] Summarization failed, storing fallback episodic memories');
-                        for (const msg of buffer.slice(-3)) {
-                            mm.storeMemory(sessionId, msg, 0.4);
-                        }
-                        // Don't clear buffer - retry next time
-                    }
-                }
-                // Extract preferences periodically
-                if (buffer.length % 10 === 0 && buffer.length > 0) {
-                    const profile = await extractor.extract(buffer);
-                    if (profile.likes.length > 0 || profile.dislikes.length > 0) {
-                        console.log('[Memory] Extracted preferences:', profile);
-                        // Store extracted preferences as semantic memories (without conflict detection for now)
-                        for (const like of profile.likes) {
-                            if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
-                                await mm.storeSemanticWithConflictCheck(`User likes: ${like}`, 0.7, 0.9);
-                            }
-                            else {
-                                mm.storeSemantic(`User likes: ${like}`, 0.7);
-                            }
-                        }
-                        for (const dislike of profile.dislikes) {
-                            if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
-                                await mm.storeSemanticWithConflictCheck(`User dislikes: ${dislike}`, 0.7, 0.9);
-                            }
-                            else {
-                                mm.storeSemantic(`User dislikes: ${dislike}`, 0.7);
-                            }
-                        }
-                    }
-                }
-                return context;
-            }
-            catch (error) {
-                console.error('[openclaw-memory] Error processing message:', error);
-                return 'SYSTEM:\\n\\n[Memory system temporarily unavailable]';
-            }
-        });
-        // Register hook for assistant messages
-        api.onAssistantMessage?.(async (sessionId, message) => {
-            try {
-                // Store assistant messages with lower importance
-                mm.storeMemory(sessionId, `Assistant: ${message}`, 0.3);
-            }
-            catch (error) {
-                console.error('[openclaw-memory] Error storing assistant message:', error);
-            }
-        });
         console.log('[openclaw-memory] Plugin registered');
     },
     async shutdown() {

@@ -176,12 +176,18 @@ const memoryPlugin = {
     // ✅ 注册 message_received Hook - 存储消息 (异步非阻塞)
     // ============================================================
     api.on('message_received', async (event: any, ctx: any) => {
+      console.log('[openclaw-memory] message_received hook triggered:', {
+        from: event.from,
+        content: event.content?.slice(0, 50),
+        conversationId: ctx.conversationId
+      });
       const sessionId = ctx.conversationId || 'default';
       const message = event.content;
       const from = event.from;
 
-      // 只处理用户消息
-      if (from !== 'user') {
+      // 跳过空消息或系统消息
+      if (!message || !from) {
+        console.log('[openclaw-memory] Skipping message: no content or from');
         return;
       }
 
@@ -238,12 +244,24 @@ const memoryPlugin = {
     // ✅ 注册 before_prompt_build Hook - 注入上下文 (带超时优化)
     // ============================================================
     api.on('before_prompt_build', async (event: any, ctx: any) => {
+      console.log('[openclaw-memory] before_prompt_build hook triggered:', {
+        hasMessages: !!event.messages,
+        messagesCount: event.messages?.length || 0,
+        sessionId: ctx.sessionId
+      });
       const sessionId = ctx.sessionId;
       const messages = event.messages as any[];
+
+      // 检查 messages 是否存在
+      if (!messages || messages.length === 0) {
+        console.log('[openclaw-memory] No messages in event, skipping context injection');
+        return;
+      }
 
       // 获取最后一条用户消息
       const lastUserMessage = messages.filter(m => m.role === 'user').pop();
       if (!lastUserMessage) {
+        console.log('[openclaw-memory] No user message found, skipping context injection');
         return;  // 没有用户消息，不注入
       }
 
@@ -259,7 +277,7 @@ const memoryPlugin = {
           )
         ]);
 
-        if (memories.length === 0) {
+        if (!memories || memories.length === 0) {
           return;  // 没有相关记忆
         }
 
