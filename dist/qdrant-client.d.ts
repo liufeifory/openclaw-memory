@@ -6,11 +6,16 @@ export interface QdrantConfig {
     port?: number;
     apiKey?: string;
 }
+export interface MigrationResult {
+    success: boolean;
+    migrated: boolean;
+    changes: string[];
+}
 export declare class QdrantDatabase {
     private client;
     private initialized;
     constructor(config: QdrantConfig);
-    initialize(): Promise<void>;
+    initialize(): Promise<MigrationResult>;
     upsert(id: number, embedding: number[], payload: Record<string, any>): Promise<void>;
     search(embedding: number[], limit?: number, filter?: Record<string, any>): Promise<Array<{
         id: number;
@@ -43,6 +48,26 @@ export declare class QdrantDatabase {
         total_points: number;
         collection_name: string;
     }>;
+    /**
+     * Get current schema version.
+     */
+    getSchemaVersion(): Promise<number>;
+    /**
+     * Store schema version metadata.
+     */
+    storeSchemaVersion(): Promise<void>;
+    /**
+     * Check if collection exists.
+     */
+    collectionExists(): Promise<boolean>;
+    /**
+     * Check if payload index exists.
+     */
+    indexExists(fieldName: string): Promise<boolean>;
+    /**
+     * Create payload index.
+     */
+    createPayloadIndex(fieldName: string): Promise<void>;
 }
 export declare const MemoryType: {
     readonly EPISODIC: "episodic";

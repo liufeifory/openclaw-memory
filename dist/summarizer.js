@@ -3,6 +3,7 @@
  *
  * Compresses multiple conversation turns into concise summaries.
  */
+import { LLMLimiter } from './llm-limiter.js';
 const SUMMARIZE_PROMPT = `Summarize these conversation turns into ONE concise fact or observation.
 Focus on:
 - User preferences mentioned
@@ -17,8 +18,10 @@ Conversation:
 Summary:`;
 export class Summarizer {
     endpoint;
-    constructor(endpoint = 'http://localhost:8081') {
+    limiter;
+    constructor(endpoint = 'http://localhost:8081', limiter) {
         this.endpoint = endpoint;
+        this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     }
     /**
      * Summarize a list of messages into a concise fact.
@@ -32,17 +35,19 @@ export class Summarizer {
         const messagesText = messages.slice(-20).join('\n'); // Last 20 messages
         const prompt = SUMMARIZE_PROMPT.replace('{{messages}}', messagesText);
         try {
-            const response = await fetch(`${this.endpoint}/completion`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    prompt: prompt,
-                    n_predict: 100,
-                    temperature: 0.3,
-                    top_p: 0.9,
-                }),
+            const result = await this.limiter.execute(async () => {
+                const response = await fetch(`${this.endpoint}/completion`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        prompt: prompt,
+                        n_predict: 100,
+                        temperature: 0.3,
+                        top_p: 0.9,
+                    }),
+                });
+                return await response.json();
             });
-            const result = await response.json();
             const output = (result.content || result.generated_text || '').trim();
             const isEmpty = output.toLowerCase().includes('no significant content');
             return {

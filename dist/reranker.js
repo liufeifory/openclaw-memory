@@ -3,6 +3,7 @@
  *
  * Reranks vector search results based on query relevance.
  */
+import { LLMLimiter } from './llm-limiter.js';
 const RERANK_PROMPT = `Rank these memory snippets by relevance to the query.
 Output ONLY the indices in order (0-based), most relevant first.
 
@@ -14,8 +15,10 @@ Memories:
 Ranking (indices only, e.g., "2 0 1"): `;
 export class Reranker {
     endpoint;
-    constructor(endpoint = 'http://localhost:8081') {
+    limiter;
+    constructor(endpoint = 'http://localhost:8081', limiter) {
         this.endpoint = endpoint;
+        this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     }
     /**
      * Rerank search results by relevance.
@@ -36,17 +39,19 @@ export class Reranker {
             .replace('{{query}}', query)
             .replace('{{memories}}', memoriesText);
         try {
-            const response = await fetch(`${this.endpoint}/completion`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    prompt: prompt,
-                    n_predict: 50,
-                    temperature: 0.1,
-                    top_p: 0.9,
-                }),
+            const result = await this.limiter.execute(async () => {
+                const response = await fetch(`${this.endpoint}/completion`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        prompt: prompt,
+                        n_predict: 50,
+                        temperature: 0.1,
+                        top_p: 0.9,
+                    }),
+                });
+                return await response.json();
             });
-            const result = await response.json();
             const output = (result.content || result.generated_text || '').trim();
             const rankedIndices = this.parseRanking(output, topResults.length);
             // Assign new scores based on rank

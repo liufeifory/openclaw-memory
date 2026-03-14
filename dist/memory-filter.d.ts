@@ -10,6 +10,7 @@
  * - EVENT: Something that happened (store as episodic, importance 0.5-0.8)
  * - QUESTION: User asking something (don't store, importance 0.3)
  */
+import { LLMLimiter } from './llm-limiter.js';
 export interface FilterResult {
     category: 'TRIVIAL' | 'FACT' | 'PREFERENCE' | 'EVENT' | 'QUESTION';
     importance: number;
@@ -19,7 +20,8 @@ export interface FilterResult {
 }
 export declare class MemoryFilter {
     private endpoint;
-    constructor(endpoint?: string);
+    private limiter;
+    constructor(endpoint?: string, limiter?: LLMLimiter);
     /**
      * Classify message and determine if it should be stored.
      */

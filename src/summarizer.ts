@@ -4,6 +4,8 @@
  * Compresses multiple conversation turns into concise summaries.
  */
 
+import { LLMLimiter } from './llm-limiter.js';
+
 const SUMMARIZE_PROMPT = `Summarize these conversation turns into ONE concise fact or observation.
 Focus on:
 - User preferences mentioned
@@ -24,9 +26,11 @@ export interface SummaryResult {
 
 export class Summarizer {
   private endpoint: string;
+  private limiter: LLMLimiter;
 
-  constructor(endpoint: string = 'http://localhost:8081') {
+  constructor(endpoint: string = 'http://localhost:8081', limiter?: LLMLimiter) {
     this.endpoint = endpoint;
+    this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
   }
 
   /**
@@ -43,18 +47,20 @@ export class Summarizer {
     const prompt = SUMMARIZE_PROMPT.replace('{{messages}}', messagesText);
 
     try {
-      const response = await fetch(`${this.endpoint}/completion`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: prompt,
-          n_predict: 100,
-          temperature: 0.3,
-          top_p: 0.9,
-        }),
-      });
+      const result = await this.limiter.execute(async () => {
+        const response = await fetch(`${this.endpoint}/completion`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: prompt,
+            n_predict: 100,
+            temperature: 0.3,
+            top_p: 0.9,
+          }),
+        });
+        return await response.json();
+      }) as any;
 
-      const result: any = await response.json();
       const output = (result.content || result.generated_text || '').trim();
 
       const isEmpty = output.toLowerCase().includes('no significant content');

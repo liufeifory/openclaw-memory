@@ -1,6 +1,7 @@
 /**
  * Memory Manager - orchestrates all memory operations using Qdrant.
  */
+import { MigrationResult } from './qdrant-client.js';
 import type { MemoryWithSimilarity } from './memory-store-qdrant.js';
 export interface MemoryManagerConfig {
     qdrant: {
@@ -19,14 +20,16 @@ export declare class MemoryManager {
     private contextBuilder;
     private reranker;
     private conflictDetector;
+    private limiter;
     constructor(config: MemoryManagerConfig);
     /**
      * Initialize the memory manager (connect to Qdrant).
+     * @returns Migration result
      */
-    initialize(): Promise<void>;
+    initialize(): Promise<MigrationResult>;
     /**
      * Retrieve memories relevant to a query.
-     * Uses vector search + reranking for better results.
+     * Uses vector search + reranking + recency boost.
      */
     retrieveRelevant(query: string, topK?: number, threshold?: number): Promise<MemoryWithSimilarity[]>;
     /**
@@ -42,6 +45,15 @@ export declare class MemoryManager {
      * Store semantic memory asynchronously (non-blocking).
      */
     storeSemantic(content: string, importance?: number): Promise<void>;
+    /**
+     * Store semantic memory with conflict detection.
+     * Marks conflicting memories as superseded (not deleted).
+     */
+    storeSemanticWithConflictCheck(content: string, importance?: number, similarityThreshold?: number): Promise<{
+        stored: boolean;
+        conflictDetected: boolean;
+        supersededId?: number;
+    }>;
     /**
      * Store reflection memory.
      */

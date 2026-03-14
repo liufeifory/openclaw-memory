@@ -34,10 +34,13 @@ Examples:
 Message: "{{message}}"
 
 JSON:`;
+import { LLMLimiter } from './llm-limiter.js';
 export class MemoryFilter {
     endpoint;
-    constructor(endpoint = 'http://localhost:8081') {
+    limiter;
+    constructor(endpoint = 'http://localhost:8081', limiter) {
         this.endpoint = endpoint;
+        this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     }
     /**
      * Classify message and determine if it should be stored.
@@ -45,17 +48,19 @@ export class MemoryFilter {
     async classify(message) {
         const prompt = FILTER_PROMPT.replace('{{message}}', message);
         try {
-            const response = await fetch(`${this.endpoint}/completion`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    prompt: prompt,
-                    n_predict: 100,
-                    temperature: 0.1,
-                    top_p: 0.9,
-                }),
+            const result = await this.limiter.execute(async () => {
+                const response = await fetch(`${this.endpoint}/completion`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        prompt: prompt,
+                        n_predict: 100,
+                        temperature: 0.1,
+                        top_p: 0.9,
+                    }),
+                });
+                return await response.json();
             });
-            const result = await response.json();
             const output = (result.content || result.generated_text || '').trim();
             // Parse JSON response
             const parsed = this.parseJsonResponse(output);

@@ -13,11 +13,13 @@ import { MemoryManager as QdrantMemoryManager } from './memory-manager-qdrant.js
 import { MemoryFilter } from './memory-filter.js';
 import { PreferenceExtractor } from './preference-extractor.js';
 import { Summarizer } from './summarizer.js';
+import { LLMLimiter } from './llm-limiter.js';
 // Global instance for reuse across requests
 let memoryManager = null;
 let memoryFilter = null;
 let preferenceExtractor = null;
 let summarizer = null;
+let globalLimiter = null;
 function getMemoryManager(config) {
     if (!memoryManager) {
         if (config.backend === 'qdrant') {
@@ -29,21 +31,21 @@ function getMemoryManager(config) {
     }
     return memoryManager;
 }
-function getMemoryFilter(llamaEndpoint) {
+function getMemoryFilter(llamaEndpoint, limiter) {
     if (!memoryFilter) {
-        memoryFilter = new MemoryFilter(llamaEndpoint);
+        memoryFilter = new MemoryFilter(llamaEndpoint, limiter);
     }
     return memoryFilter;
 }
-function getPreferenceExtractor(llamaEndpoint) {
+function getPreferenceExtractor(llamaEndpoint, limiter) {
     if (!preferenceExtractor) {
-        preferenceExtractor = new PreferenceExtractor(llamaEndpoint);
+        preferenceExtractor = new PreferenceExtractor(llamaEndpoint, limiter);
     }
     return preferenceExtractor;
 }
-function getSummarizer(llamaEndpoint) {
+function getSummarizer(llamaEndpoint, limiter) {
     if (!summarizer) {
-        summarizer = new Summarizer(llamaEndpoint);
+        summarizer = new Summarizer(llamaEndpoint, limiter);
     }
     return summarizer;
 }
@@ -55,9 +57,12 @@ const memoryPlugin = {
     async init(config) {
         // Initialize memory manager on plugin load
         const mm = getMemoryManager(config);
-        // Initialize Qdrant if using that backend
+        // Initialize Qdrant if using that backend (run migration)
         if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
-            await mm.initialize();
+            const result = await mm.initialize();
+            if (result.migrated) {
+                console.log('[openclaw-memory] Schema migration:', result.changes);
+            }
         }
         console.log('[openclaw-memory] Plugin initialized with', config.backend === 'qdrant' ? 'Qdrant' : 'PostgreSQL');
     },
@@ -79,9 +84,18 @@ const memoryPlugin = {
         const mm = getMemoryManager(config);
         // Initialize 1B model helpers (Llama-3.2-1B-Instruct on port 8081)
         const llamaEndpoint = config.embedding?.endpoint?.replace('8080', '8081') ?? 'http://localhost:8081';
-        const filter = getMemoryFilter(llamaEndpoint);
-        const extractor = getPreferenceExtractor(llamaEndpoint);
-        const summarizer = getSummarizer(llamaEndpoint);
+        // Create shared LLM limiter (only for Qdrant backend)
+        if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
+            // Limiter is managed internally by QdrantMemoryManager
+        }
+        else {
+            // For pgvector or standalone usage, create global limiter
+            globalLimiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100, queueLimit: 50 });
+        }
+        const limiter = globalLimiter;
+        const filter = getMemoryFilter(llamaEndpoint, limiter);
+        const extractor = getPreferenceExtractor(llamaEndpoint, limiter);
+        const summarizer = getSummarizer(llamaEndpoint, limiter);
         // Conversation buffer for summarization
         const conversationBuffers = new Map();
         // Register memory_search tool
@@ -125,20 +139,21 @@ const memoryPlugin = {
                 if (filterResult.shouldStore && filterResult.memoryType) {
                     // Check for conflicts if storing semantic memory
                     if (filterResult.memoryType === 'semantic') {
-                        // Search for similar memories to check for conflicts
-                        const similar = await mm.retrieveRelevant(message, 5, 0.85);
-                        if (similar.length > 0) {
-                            // Conflict detection would go here (implemented in memory-manager)
-                            console.log(`[Memory] Classified as ${filterResult.category}, importance: ${filterResult.importance}`);
+                        // Use conflict-aware storage (Qdrant only)
+                        if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
+                            const result = await mm.storeSemanticWithConflictCheck(message, filterResult.importance, 0.85);
+                            if (result.conflictDetected) {
+                                console.log(`[Memory] Conflict: "${message.substring(0, 40)}..." supersedes memory ${result.supersededId}`);
+                            }
+                        }
+                        else {
+                            // Fallback without conflict detection
+                            mm.storeSemantic(message, filterResult.importance);
                         }
                     }
-                    // Store with classified importance and type
-                    if (filterResult.memoryType === 'episodic') {
-                        mm.storeMemory(sessionId, message, filterResult.importance);
-                    }
                     else {
-                        // Semantic memory - store without session ID
-                        mm.storeSemantic(message, filterResult.importance);
+                        // Episodic memory - store normally
+                        mm.storeMemory(sessionId, message, filterResult.importance);
                     }
                 }
                 else {
@@ -164,12 +179,22 @@ const memoryPlugin = {
                     const profile = await extractor.extract(buffer);
                     if (profile.likes.length > 0 || profile.dislikes.length > 0) {
                         console.log('[Memory] Extracted preferences:', profile);
-                        // Store extracted preferences as semantic memories
+                        // Store extracted preferences as semantic memories (without conflict detection for now)
                         for (const like of profile.likes) {
-                            mm.storeSemantic(`User likes: ${like}`, 0.7);
+                            if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
+                                await mm.storeSemanticWithConflictCheck(`User likes: ${like}`, 0.7, 0.9);
+                            }
+                            else {
+                                mm.storeSemantic(`User likes: ${like}`, 0.7);
+                            }
                         }
                         for (const dislike of profile.dislikes) {
-                            mm.storeSemantic(`User dislikes: ${dislike}`, 0.7);
+                            if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
+                                await mm.storeSemanticWithConflictCheck(`User dislikes: ${dislike}`, 0.7, 0.9);
+                            }
+                            else {
+                                mm.storeSemantic(`User dislikes: ${dislike}`, 0.7);
+                            }
                         }
                     }
                 }

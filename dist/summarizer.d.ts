@@ -3,13 +3,15 @@
  *
  * Compresses multiple conversation turns into concise summaries.
  */
+import { LLMLimiter } from './llm-limiter.js';
 export interface SummaryResult {
     summary: string;
     isEmpty: boolean;
 }
 export declare class Summarizer {
     private endpoint;
-    constructor(endpoint?: string);
+    private limiter;
+    constructor(endpoint?: string, limiter?: LLMLimiter);
     /**
      * Summarize a list of messages into a concise fact.
      * @param messages - Array of message strings

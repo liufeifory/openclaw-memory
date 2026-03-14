@@ -4,6 +4,8 @@
  * Reranks vector search results based on query relevance.
  */
 
+import { LLMLimiter } from './llm-limiter.js';
+
 const RERANK_PROMPT = `Rank these memory snippets by relevance to the query.
 Output ONLY the indices in order (0-based), most relevant first.
 
@@ -39,9 +41,11 @@ export interface RerankInput {
 
 export class Reranker {
   private endpoint: string;
+  private limiter: LLMLimiter;
 
-  constructor(endpoint: string = 'http://localhost:8081') {
+  constructor(endpoint: string = 'http://localhost:8081', limiter?: LLMLimiter) {
     this.endpoint = endpoint;
+    this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
   }
 
   /**
@@ -70,18 +74,20 @@ export class Reranker {
       .replace('{{memories}}', memoriesText);
 
     try {
-      const response = await fetch(`${this.endpoint}/completion`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: prompt,
-          n_predict: 50,
-          temperature: 0.1,
-          top_p: 0.9,
-        }),
-      });
+      const result = await this.limiter.execute(async () => {
+        const response = await fetch(`${this.endpoint}/completion`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: prompt,
+            n_predict: 50,
+            temperature: 0.1,
+            top_p: 0.9,
+          }),
+        });
+        return await response.json();
+      }) as any;
 
-      const result: any = await response.json();
       const output = (result.content || result.generated_text || '').trim();
 
       const rankedIndices = this.parseRanking(output, topResults.length);

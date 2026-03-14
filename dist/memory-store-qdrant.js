@@ -68,10 +68,10 @@ export class MemoryStore {
     }
     /**
      * Search memories by vector similarity.
+     * Filters out superseded memories by default.
      */
-    async search(embedding, topK = 10, threshold = 0.6, memoryType) {
-        const filter = memoryType ? { type: memoryType } : undefined;
-        const results = await this.db.search(embedding, topK, filter);
+    async search(embedding, topK = 10, threshold = 0.6, memoryType, includeSuperseded = false) {
+        const results = await this.db.search(embedding, topK * 2, memoryType ? { type: memoryType } : undefined);
         return results
             .map(r => ({
             id: r.id,
@@ -82,8 +82,18 @@ export class MemoryStore {
             created_at: new Date(r.payload.created_at),
             access_count: r.payload.access_count || 0,
             session_id: r.payload.session_id,
+            is_active: r.payload.is_active ?? true,
         }))
-            .filter(m => m.similarity > threshold);
+            .filter(m => {
+            // Filter by threshold
+            if (m.similarity <= threshold)
+                return false;
+            // Filter out superseded memories unless explicitly requested
+            if (!includeSuperseded && m.is_active === false)
+                return false;
+            return true;
+        })
+            .slice(0, topK);
     }
     /**
      * Get all semantic memories.
@@ -159,6 +169,25 @@ export class MemoryStore {
                 this.reflectionMemories.set(memoryId, memory);
             }
         }
+    }
+    /**
+     * Mark a memory as superseded (replaced by a newer memory).
+     * Does not delete - just adds metadata tags for retrieval filtering.
+     */
+    async markAsSuperseded(memoryId, metadata) {
+        // Get current payload from Qdrant
+        const point = await this.db.get(memoryId);
+        if (point && point.payload) {
+            // Update payload with superseded metadata
+            const newPayload = {
+                ...point.payload,
+                superseded_by: metadata.superseded_by ?? point.payload.superseded_by,
+                is_active: metadata.is_active ?? false,
+                superseded_at: new Date().toISOString(),
+            };
+            await this.db.updatePayload(memoryId, newPayload);
+        }
+        // Note: In-memory cache is not updated - superseded memories are filtered at query time
     }
     /**
      * Get payload for a memory from Qdrant.

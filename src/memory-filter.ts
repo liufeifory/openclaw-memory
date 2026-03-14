@@ -36,6 +36,8 @@ Message: "{{message}}"
 
 JSON:`;
 
+import { LLMLimiter } from './llm-limiter.js';
+
 export interface FilterResult {
   category: 'TRIVIAL' | 'FACT' | 'PREFERENCE' | 'EVENT' | 'QUESTION';
   importance: number;
@@ -46,9 +48,11 @@ export interface FilterResult {
 
 export class MemoryFilter {
   private endpoint: string;
+  private limiter: LLMLimiter;
 
-  constructor(endpoint: string = 'http://localhost:8081') {
+  constructor(endpoint: string = 'http://localhost:8081', limiter?: LLMLimiter) {
     this.endpoint = endpoint;
+    this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
   }
 
   /**
@@ -58,18 +62,20 @@ export class MemoryFilter {
     const prompt = FILTER_PROMPT.replace('{{message}}', message);
 
     try {
-      const response = await fetch(`${this.endpoint}/completion`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: prompt,
-          n_predict: 100,
-          temperature: 0.1,
-          top_p: 0.9,
-        }),
-      });
+      const result = await this.limiter.execute(async () => {
+        const response = await fetch(`${this.endpoint}/completion`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: prompt,
+            n_predict: 100,
+            temperature: 0.1,
+            top_p: 0.9,
+          }),
+        });
+        return await response.json();
+      }) as any;
 
-      const result: any = await response.json();
       const output = (result.content || result.generated_text || '').trim();
 
       // Parse JSON response

@@ -3,6 +3,7 @@
  *
  * Reranks vector search results based on query relevance.
  */
+import { LLMLimiter } from './llm-limiter.js';
 export interface RerankResult {
     id: number;
     content: string;
@@ -25,7 +26,8 @@ export interface RerankInput {
 }
 export declare class Reranker {
     private endpoint;
-    constructor(endpoint?: string);
+    private limiter;
+    constructor(endpoint?: string, limiter?: LLMLimiter);
     /**
      * Rerank search results by relevance.
      * @param query - The search query

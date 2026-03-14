@@ -48,8 +48,9 @@ export declare class MemoryStore {
     storeSemantic(content: string, importance?: number): Promise<number>;
     /**
      * Search memories by vector similarity.
+     * Filters out superseded memories by default.
      */
-    search(embedding: number[], topK?: number, threshold?: number, memoryType?: string): Promise<MemoryWithSimilarity[]>;
+    search(embedding: number[], topK?: number, threshold?: number, memoryType?: string, includeSuperseded?: boolean): Promise<MemoryWithSimilarity[]>;
     /**
      * Get all semantic memories.
      */
@@ -66,6 +67,14 @@ export declare class MemoryStore {
      * Increment access count for a memory (also updates Qdrant payload).
      */
     incrementAccess(memoryId: number, type: 'episodic' | 'semantic' | 'reflection'): Promise<void>;
+    /**
+     * Mark a memory as superseded (replaced by a newer memory).
+     * Does not delete - just adds metadata tags for retrieval filtering.
+     */
+    markAsSuperseded(memoryId: number, metadata: {
+        superseded_by?: number;
+        is_active?: boolean;
+    }): Promise<void>;
     /**
      * Get payload for a memory from Qdrant.
      */

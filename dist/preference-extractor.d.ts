@@ -3,6 +3,7 @@
  *
  * Extracts structured user preferences from conversation.
  */
+import { LLMLimiter } from './llm-limiter.js';
 export interface UserProfile {
     likes: string[];
     dislikes: string[];
@@ -16,7 +17,8 @@ export interface UserProfile {
 }
 export declare class PreferenceExtractor {
     private endpoint;
-    constructor(endpoint?: string);
+    private limiter;
+    constructor(endpoint?: string, limiter?: LLMLimiter);
     /**
      * Extract user profile from conversation.
      */

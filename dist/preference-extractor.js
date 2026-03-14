@@ -3,6 +3,7 @@
  *
  * Extracts structured user preferences from conversation.
  */
+import { LLMLimiter } from './llm-limiter.js';
 const EXTRACT_PROMPT = `Extract user preferences, facts, and profile information from the conversation.
 
 Output JSON format:
@@ -25,8 +26,10 @@ Conversation:
 JSON:`;
 export class PreferenceExtractor {
     endpoint;
-    constructor(endpoint = 'http://localhost:8081') {
+    limiter;
+    constructor(endpoint = 'http://localhost:8081', limiter) {
         this.endpoint = endpoint;
+        this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     }
     /**
      * Extract user profile from conversation.
@@ -35,17 +38,19 @@ export class PreferenceExtractor {
         const prompt = EXTRACT_PROMPT.replace('{{conversation}}', conversation.slice(-20).join('\n') // Last 20 messages
         );
         try {
-            const response = await fetch(`${this.endpoint}/completion`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    prompt: prompt,
-                    n_predict: 500,
-                    temperature: 0.3,
-                    top_p: 0.9,
-                }),
+            const result = await this.limiter.execute(async () => {
+                const response = await fetch(`${this.endpoint}/completion`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        prompt: prompt,
+                        n_predict: 500,
+                        temperature: 0.3,
+                        top_p: 0.9,
+                    }),
+                });
+                return await response.json();
             });
-            const result = await response.json();
             const output = (result.content || result.generated_text || '').trim();
             return this.parseUserProfile(output);
         }

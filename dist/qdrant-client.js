@@ -4,6 +4,7 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 const COLLECTION_NAME = 'openclaw_memories';
 const VECTOR_SIZE = 1024; // BGE-M3 embedding dimension
+const SCHEMA_VERSION = 1;
 export class QdrantDatabase {
     client;
     initialized = false;
@@ -16,7 +17,8 @@ export class QdrantDatabase {
     }
     async initialize() {
         if (this.initialized)
-            return;
+            return { success: true, migrated: false, changes: [] };
+        const result = { success: true, migrated: false, changes: [] };
         try {
             // Check if collection exists
             const collections = await this.client.getCollections();
@@ -36,14 +38,25 @@ export class QdrantDatabase {
                         ef_construct: 100,
                     },
                 });
+                result.changes.push('Created collection');
+                result.migrated = true;
                 console.log('[Qdrant] Collection created:', COLLECTION_NAME);
+            }
+            // Check schema version
+            const currentVersion = await this.getSchemaVersion();
+            if (currentVersion < SCHEMA_VERSION) {
+                await this.storeSchemaVersion();
+                result.changes.push(`Schema version: ${currentVersion} -> ${SCHEMA_VERSION}`);
+                result.migrated = true;
             }
             this.initialized = true;
         }
         catch (error) {
+            result.success = false;
             console.error('[Qdrant] Initialization failed:', error.message);
             throw error;
         }
+        return result;
     }
     async upsert(id, embedding, payload) {
         await this.client.upsert(COLLECTION_NAME, {
@@ -135,6 +148,59 @@ export class QdrantDatabase {
             total_points: info.points_count || 0,
             collection_name: COLLECTION_NAME,
         };
+    }
+    /**
+     * Get current schema version.
+     */
+    async getSchemaVersion() {
+        try {
+            const metadata = await this.get(0);
+            return metadata?.payload?.schema_version || 0;
+        }
+        catch {
+            return 0;
+        }
+    }
+    /**
+     * Store schema version metadata.
+     */
+    async storeSchemaVersion() {
+        await this.upsert(0, new Array(VECTOR_SIZE).fill(0), {
+            type: '_metadata',
+            schema_version: SCHEMA_VERSION,
+            updated_at: new Date().toISOString(),
+        });
+    }
+    /**
+     * Check if collection exists.
+     */
+    async collectionExists() {
+        const collections = await this.client.getCollections();
+        return collections.collections.some(c => c.name === COLLECTION_NAME);
+    }
+    /**
+     * Check if payload index exists.
+     */
+    async indexExists(fieldName) {
+        try {
+            const info = await this.client.getCollection(COLLECTION_NAME);
+            // Access payload schema via index signature
+            const schemaInfo = info;
+            const indexes = schemaInfo.config?.payload_schema || {};
+            return !!indexes[fieldName];
+        }
+        catch {
+            return false;
+        }
+    }
+    /**
+     * Create payload index.
+     */
+    async createPayloadIndex(fieldName) {
+        await this.client.createPayloadIndex(COLLECTION_NAME, {
+            field_name: fieldName,
+            field_schema: 'keyword',
+        });
     }
 }
 export const MemoryType = {

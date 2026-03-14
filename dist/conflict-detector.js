@@ -1,8 +1,9 @@
 /**
  * Conflict Detector using Llama-3.2-1B-Instruct
  *
- * Detects contradictory memories and marks old ones as deprecated.
+ * Detects contradictory memories and marks old ones with superseded_by tag.
  */
+import { LLMLimiter } from './llm-limiter.js';
 const CONFLICT_PROMPT = `Do these two statements contradict each other?
 Consider:
 - Preference changes (like red -> like blue) = YES
@@ -18,16 +19,19 @@ Statement B: "{{new}}"
 Answer:`;
 export class ConflictDetector {
     endpoint;
-    constructor(endpoint = 'http://localhost:8081') {
+    limiter;
+    constructor(endpoint = 'http://localhost:8081', limiter) {
         this.endpoint = endpoint;
+        this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     }
     /**
      * Check if new content conflicts with existing memories.
      * @param newContent - The new memory content
      * @param similarMemories - Memories with high vector similarity
+     * @param storeMemory - Optional function to store/update memory metadata
      * @returns Conflict detection result
      */
-    async detectConflict(newContent, similarMemories) {
+    async detectConflict(newContent, similarMemories, storeMemory) {
         if (similarMemories.length === 0) {
             return { isConflict: false, reason: 'no similar memories' };
         }
@@ -35,10 +39,15 @@ export class ConflictDetector {
         for (const memory of similarMemories) {
             const isConflict = await this.checkPairwise(newContent, memory.content);
             if (isConflict) {
+                // Mark old memory as superseded (not deleted, just tagged)
+                if (storeMemory) {
+                    await storeMemory(memory.id, { superseded_by: -1, is_active: false });
+                }
                 return {
                     isConflict: true,
                     oldMemoryId: memory.id,
                     reason: `conflicts with memory ${memory.id}: "${memory.content.substring(0, 50)}..."`,
+                    supersededBy: memory.id,
                 };
             }
         }
@@ -52,17 +61,19 @@ export class ConflictDetector {
             .replace('{{old}}', oldStatement)
             .replace('{{new}}', newStatement);
         try {
-            const response = await fetch(`${this.endpoint}/completion`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    prompt: prompt,
-                    n_predict: 10,
-                    temperature: 0.1,
-                    top_p: 0.9,
-                }),
+            const result = await this.limiter.execute(async () => {
+                const response = await fetch(`${this.endpoint}/completion`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        prompt: prompt,
+                        n_predict: 10,
+                        temperature: 0.1,
+                        top_p: 0.9,
+                    }),
+                });
+                return await response.json();
             });
-            const result = await response.json();
             const output = (result.content || result.generated_text || '').trim().toUpperCase();
             return output.includes('YES');
         }
