@@ -118,29 +118,28 @@ const memoryPlugin = {
         const summarizer = getSummarizer(llamaEndpoint, limiter);
         // Conversation buffer for summarization
         const conversationBuffers = new Map();
-        // ============================================================
-        // ✅ 注册 message_received Hook - 存储消息 (异步非阻塞)
-        // ============================================================
-        api.on('message_received', async (event, ctx) => {
-            console.log('[openclaw-memory] message_received hook triggered:', {
-                from: event.from || 'anonymous',
-                content: event.content?.slice(0, 50),
-                conversationId: ctx.conversationId
-            });
-            const sessionId = ctx.conversationId || 'default';
-            const message = event.content;
-            // 跳过空消息（允许 from 为空，因为某些渠道不提供 from 字段）
-            if (!message || message.trim().length === 0) {
-                console.log('[openclaw-memory] Skipping message: no content');
-                return;
-            }
+        // 已存储消息记录（用于避免 TUI 模式下重复存储）
+        const storedMessages = new Set();
+        /**
+         * 存储消息的通用函数（被 message_received 和 before_prompt_build 共用）
+         */
+        async function storeMessage(sessionId, message, source) {
             try {
+                // 类型检查：确保 message 是字符串
+                if (typeof message !== 'string') {
+                    console.warn(`[openclaw-memory] storeMessage (${source}) received non-string message (type: ${typeof message})`);
+                    message = String(message);
+                }
+                // 跳过空消息
+                if (!message || message.trim().length === 0) {
+                    console.log('[openclaw-memory] storeMessage: empty message, skipping');
+                    return;
+                }
                 // 1. 分类消息
                 const filterResult = await filter.classify(message);
                 // 2. 存储记忆
                 if (filterResult.shouldStore && filterResult.memoryType) {
                     if (filterResult.memoryType === 'semantic') {
-                        // Only QdrantMemoryManager has storeSemanticWithConflictCheck
                         if (mm instanceof QdrantMemoryManager) {
                             await mm.storeSemanticWithConflictCheck(message, filterResult.importance, 0.85);
                         }
@@ -177,11 +176,35 @@ const memoryPlugin = {
                 }
             }
             catch (error) {
-                console.error('[openclaw-memory] message_received hook failed:', error.message);
+                console.error(`[openclaw-memory] storeMessage (${source}) failed:`, error.message);
             }
+        }
+        // ============================================================
+        // ✅ 注册 message_received Hook - 存储消息 (渠道模式)
+        // 注意：此 Hook 仅在渠道消息（Telegram/WhatsApp/Discord 等）时触发
+        // TUI 模式下不会触发，消息存储由 before_prompt_build 处理
+        // ============================================================
+        api.on('message_received', async (event, ctx) => {
+            console.log('[openclaw-memory] message_received hook triggered (channel mode):', {
+                from: event.from || 'anonymous',
+                content: event.content?.slice(0, 50),
+                conversationId: ctx.conversationId
+            });
+            const sessionId = ctx.conversationId || 'default';
+            const message = event.content;
+            // 跳过空消息
+            if (!message || message.trim().length === 0) {
+                console.log('[openclaw-memory] Skipping message: no content');
+                return;
+            }
+            // 渠道模式：直接存储消息
+            await storeMessage(sessionId, message, 'channel');
         });
         // ============================================================
-        // ✅ 注册 before_prompt_build Hook - 注入上下文 (带超时优化)
+        // ✅ 注册 before_prompt_build Hook - 注入上下文 + 存储消息 (TUI 模式)
+        // 此 Hook 在所有模式下都会触发（包括 TUI 和渠道）
+        // TUI 模式下：存储最后一条用户消息并检索记忆
+        // 渠道模式下：只检索记忆（消息已由 message_received 存储）
         // ============================================================
         api.on('before_prompt_build', async (event, ctx) => {
             console.log('[openclaw-memory] before_prompt_build hook triggered:', {
@@ -189,7 +212,7 @@ const memoryPlugin = {
                 messagesCount: event.messages?.length || 0,
                 sessionId: ctx.sessionId
             });
-            const sessionId = ctx.sessionId;
+            const sessionId = ctx.sessionId || 'default';
             const messages = event.messages;
             // 检查 messages 是否存在
             if (!messages || messages.length === 0) {
@@ -200,7 +223,42 @@ const memoryPlugin = {
             const lastUserMessage = messages.filter(m => m.role === 'user').pop();
             if (!lastUserMessage) {
                 console.log('[openclaw-memory] No user message found, skipping context injection');
-                return; // 没有用户消息，不注入
+                return;
+            }
+            // 提取消息内容（处理数组/对象/字符串三种格式）
+            let lastMessageContent;
+            if (typeof lastUserMessage.content === 'string') {
+                // 字符串格式
+                lastMessageContent = lastUserMessage.content;
+            }
+            else if (Array.isArray(lastUserMessage.content)) {
+                // 数组格式：[{ type: 'text', text: '...' }]
+                const textParts = lastUserMessage.content
+                    .filter((part) => part.type === 'text')
+                    .map((part) => part.text)
+                    .join(' ');
+                lastMessageContent = textParts || String(lastUserMessage.content);
+            }
+            else if (lastUserMessage.content && typeof lastUserMessage.content === 'object' && lastUserMessage.content.text) {
+                // 对象格式：{ text: '...' }
+                lastMessageContent = lastUserMessage.content.text;
+            }
+            else {
+                lastMessageContent = String(lastUserMessage.content ?? '');
+            }
+            if (!lastMessageContent) {
+                console.log('[openclaw-memory] Empty user message, skipping');
+                return;
+            }
+            // TUI 模式：存储最后一条用户消息（异步执行，不阻塞）
+            // 使用消息哈希避免重复存储
+            const messageHash = `${sessionId}:${lastMessageContent.slice(0, 50)}`;
+            if (!storedMessages.has(messageHash)) {
+                storedMessages.add(messageHash);
+                // 异步存储，不阻塞上下文检索
+                storeMessage(sessionId, lastMessageContent, 'tui').catch(err => {
+                    console.error('[openclaw-memory] Background message store failed:', err.message);
+                });
             }
             // 超时控制：300ms 内必须返回，避免阻塞 Agent 响应
             const timeoutMs = 300;
