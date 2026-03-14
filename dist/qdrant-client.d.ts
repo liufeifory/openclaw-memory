@@ -143,6 +143,29 @@ export declare class QdrantDatabase {
      * Create payload index.
      */
     createPayloadIndex(fieldName: string): Promise<void>;
+    /**
+     * Scroll through memories - wrapper for CLI usage.
+     */
+    scrollMemories(limit?: number): Promise<{
+        points: Array<{
+            id: number;
+            payload: Record<string, any>;
+        }>;
+    }>;
+    /**
+     * Get collection stats - wrapper for CLI usage.
+     */
+    getCollectionStats(): Promise<{
+        points_count: number;
+        indexed_vectors_count: number;
+        segments_count: number;
+        status: string;
+        payload_schema?: Record<string, any>;
+    }>;
+    /**
+     * Delete memories by IDs - wrapper for CLI usage.
+     */
+    deleteMemories(ids: number[]): Promise<void>;
 }
 export declare const MemoryType: {
     readonly EPISODIC: "episodic";

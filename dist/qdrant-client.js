@@ -473,6 +473,38 @@ export class QdrantDatabase {
             });
         }, 'createPayloadIndex');
     }
+    /**
+     * Scroll through memories - wrapper for CLI usage.
+     */
+    async scrollMemories(limit = 100) {
+        const points = await this.scroll(undefined, limit);
+        return { points };
+    }
+    /**
+     * Get collection stats - wrapper for CLI usage.
+     */
+    async getCollectionStats() {
+        return this.executeWithRetry(async () => {
+            const info = await this.client.getCollection(COLLECTION_NAME);
+            return {
+                points_count: info.points_count || 0,
+                indexed_vectors_count: info.indexed_vectors_count || 0,
+                segments_count: info.segments_count || 0,
+                status: info.status,
+                payload_schema: info.payload_schema || info.config?.payload_schema,
+            };
+        }, 'getCollectionStats');
+    }
+    /**
+     * Delete memories by IDs - wrapper for CLI usage.
+     */
+    async deleteMemories(ids) {
+        return this.executeWithRetry(async () => {
+            await this.client.delete(COLLECTION_NAME, {
+                points: ids,
+            });
+        }, 'deleteMemories');
+    }
 }
 export const MemoryType = {
     EPISODIC: 'episodic',

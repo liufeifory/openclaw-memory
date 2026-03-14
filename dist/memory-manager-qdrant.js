@@ -462,5 +462,33 @@ export class MemoryManager {
         }
         console.log('[MemoryManager] Shutting down');
     }
+    /**
+     * List recent memories (for CLI usage).
+     */
+    async listMemories(limit = 10) {
+        return this.db.scrollMemories(limit);
+    }
+    /**
+     * Delete memories by IDs (for CLI usage).
+     */
+    async deleteMemories(ids) {
+        return this.db.deleteMemories(ids);
+    }
+    /**
+     * Clear all memories (for CLI usage).
+     */
+    async clearAllMemories() {
+        const result = await this.db.scrollMemories(1000);
+        const ids = result.points.map(p => p.id);
+        if (ids.length > 0) {
+            await this.db.deleteMemories(ids);
+        }
+    }
+    /**
+     * Get collection stats (for CLI usage).
+     */
+    async getCollectionStats() {
+        return this.db.getCollectionStats();
+    }
 }
 //# sourceMappingURL=memory-manager-qdrant.js.map

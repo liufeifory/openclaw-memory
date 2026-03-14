@@ -585,6 +585,49 @@ export class QdrantDatabase {
       });
     }, 'createPayloadIndex');
   }
+
+  /**
+   * Scroll through memories - wrapper for CLI usage.
+   */
+  async scrollMemories(limit: number = 100): Promise<{
+    points: Array<{ id: number; payload: Record<string, any> }>;
+  }> {
+    const points = await this.scroll(undefined, limit);
+    return { points };
+  }
+
+  /**
+   * Get collection stats - wrapper for CLI usage.
+   */
+  async getCollectionStats(): Promise<{
+    points_count: number;
+    indexed_vectors_count: number;
+    segments_count: number;
+    status: string;
+    payload_schema?: Record<string, any>;
+  }> {
+    return this.executeWithRetry(async () => {
+      const info = await this.client.getCollection(COLLECTION_NAME);
+      return {
+        points_count: info.points_count || 0,
+        indexed_vectors_count: info.indexed_vectors_count || 0,
+        segments_count: info.segments_count || 0,
+        status: info.status,
+        payload_schema: (info as any).payload_schema || (info as any).config?.payload_schema,
+      };
+    }, 'getCollectionStats');
+  }
+
+  /**
+   * Delete memories by IDs - wrapper for CLI usage.
+   */
+  async deleteMemories(ids: number[]): Promise<void> {
+    return this.executeWithRetry(async () => {
+      await this.client.delete(COLLECTION_NAME, {
+        points: ids,
+      });
+    }, 'deleteMemories');
+  }
 }
 
 export const MemoryType = {

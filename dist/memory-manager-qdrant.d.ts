@@ -163,5 +163,32 @@ export declare class MemoryManager {
      * Shutdown and cleanup resources.
      */
     shutdown(): Promise<void>;
+    /**
+     * List recent memories (for CLI usage).
+     */
+    listMemories(limit?: number): Promise<{
+        points: Array<{
+            id: number;
+            payload: Record<string, any>;
+        }>;
+    }>;
+    /**
+     * Delete memories by IDs (for CLI usage).
+     */
+    deleteMemories(ids: number[]): Promise<void>;
+    /**
+     * Clear all memories (for CLI usage).
+     */
+    clearAllMemories(): Promise<void>;
+    /**
+     * Get collection stats (for CLI usage).
+     */
+    getCollectionStats(): Promise<{
+        points_count: number;
+        indexed_vectors_count: number;
+        segments_count: number;
+        status: string;
+        payload_schema?: Record<string, any>;
+    }>;
 }
 //# sourceMappingURL=memory-manager-qdrant.d.ts.map

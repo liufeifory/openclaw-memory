@@ -628,4 +628,42 @@ export class MemoryManager {
     }
     console.log('[MemoryManager] Shutting down');
   }
+
+  /**
+   * List recent memories (for CLI usage).
+   */
+  async listMemories(limit: number = 10): Promise<{ points: Array<{ id: number; payload: Record<string, any> }> }> {
+    return this.db.scrollMemories(limit);
+  }
+
+  /**
+   * Delete memories by IDs (for CLI usage).
+   */
+  async deleteMemories(ids: number[]): Promise<void> {
+    return this.db.deleteMemories(ids);
+  }
+
+  /**
+   * Clear all memories (for CLI usage).
+   */
+  async clearAllMemories(): Promise<void> {
+    const result = await this.db.scrollMemories(1000);
+    const ids = result.points.map(p => p.id);
+    if (ids.length > 0) {
+      await this.db.deleteMemories(ids as number[]);
+    }
+  }
+
+  /**
+   * Get collection stats (for CLI usage).
+   */
+  async getCollectionStats(): Promise<{
+    points_count: number;
+    indexed_vectors_count: number;
+    segments_count: number;
+    status: string;
+    payload_schema?: Record<string, any>;
+  }> {
+    return this.db.getCollectionStats();
+  }
 }
