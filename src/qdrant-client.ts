@@ -451,10 +451,11 @@ export class QdrantDatabase {
   private buildFilter(filter: Record<string, any>) {
     const conditions: any[] = [];
 
-    if (filter.type) {
+    // Support both 'type' and 'memory_type' field names
+    if (filter.type || filter.memory_type) {
       conditions.push({
         key: 'memory_type',
-        match: { value: filter.type },
+        match: { value: filter.type || filter.memory_type },
       });
     }
 

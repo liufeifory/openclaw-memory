@@ -362,10 +362,11 @@ export class QdrantDatabase {
     }
     buildFilter(filter) {
         const conditions = [];
-        if (filter.type) {
+        // Support both 'type' and 'memory_type' field names
+        if (filter.type || filter.memory_type) {
             conditions.push({
                 key: 'memory_type',
-                match: { value: filter.type },
+                match: { value: filter.type || filter.memory_type },
             });
         }
         // Session isolation filter
