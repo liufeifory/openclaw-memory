@@ -34,6 +34,18 @@ Memories:
 JSON:`;
 
 const MERGE_PROMPT = `Merge these similar memories into ONE permanent fact.
+
+IMPORTANT - ENTITY PRESERVATION:
+Preserve all technical entities verbatim, including:
+- File names (e.g., src/db/connection.ts)
+- Class names (e.g., DatabaseService)
+- Function names (e.g., getConnectionPool)
+- Constants (e.g., MAX_POOL_SIZE=50)
+- API endpoints (e.g., /api/v1/users)
+- IDs, paths, configuration keys
+
+These entities MUST appear exactly as-is in the summary.
+
 Rules:
 - Preserve all technical details and specific information
 - Do not over-generalize or lose fidelity
@@ -43,6 +55,7 @@ Rules:
 Output JSON format:
 {
   "merged_content": "the merged permanent fact",
+  "entities": ["list", "of", "preserved", "entities"],
   "confidence": 0.0-1.0,
   "reason": "brief explanation of merge decision"
 }
@@ -50,6 +63,7 @@ Output JSON format:
 If memories should NOT be merged (different technical details, conflicting info), output:
 {
   "merged_content": null,
+  "entities": [],
   "confidence": 0.0,
   "reason": "why they cannot be merged"
 }
@@ -67,6 +81,7 @@ export interface ClusteredMemory {
 
 export interface MergeResult {
   mergedContent: string | null;
+  entities: string[];  // Preserved technical entities
   confidence: number;
   reason: string;
 }
@@ -81,6 +96,15 @@ export class SemanticClusterer {
   private endpoint: string;
   private limiter: LLMLimiter;
   private conflictDetector: ConflictDetector;
+
+  // Regex patterns for entity extraction
+  private entityPatterns = [
+    { name: 'constant', regex: /\b[A-Z_]{3,}\b/g },
+    { name: 'filePath', regex: /\b[\w.-]+\.(ts|js|py|go|rs|java|tsx|jsx)\b/g },
+    { name: 'className', regex: /\b[A-Z][a-zA-Z]*(Service|Controller|Repository|Manager|Factory|Builder|Config|Configurator)\b/g },
+    { name: 'apiEndpoint', regex: /\/api\/[\w/-]+/g },
+    { name: 'packageName', regex: /\b[a-z][a-z0-9.-]*::[a-z][a-z0-9-]*\b/g },
+  ];
 
   constructor(endpoint: string = 'http://localhost:8081', limiter?: LLMLimiter) {
     this.endpoint = endpoint;
@@ -137,6 +161,7 @@ export class SemanticClusterer {
 
   /**
    * Merge a cluster of similar memories into one permanent fact.
+   * Extracts entities first to ensure preservation.
    */
   async mergeCluster(
     cluster: ClusteredMemory,
@@ -145,17 +170,26 @@ export class SemanticClusterer {
     if (cluster.memories.length < 2) {
       return {
         mergedContent: cluster.memories[0] || null,
+        entities: this.extractEntities([cluster.memories[0] || '']),
         confidence: 1.0,
         reason: 'single memory',
       };
     }
 
+    // Extract entities BEFORE merge to ensure preservation
+    const extractedEntities = this.extractEntities(cluster.memories);
+
     const memoriesText = cluster.memories
       .map((m, i) => `[${i}] ${m}`)
       .join('\n');
 
+    // Add entity preservation instruction
+    const entitiesContext = extractedEntities.length > 0
+      ? `\nDetected entities that must be preserved verbatim:\n- ${extractedEntities.join('\n- ')}`
+      : '';
+
     const prompt = MERGE_PROMPT
-      .replace('{{memories}}', memoriesText);
+      .replace('{{memories}}', memoriesText) + entitiesContext;
 
     try {
       const result = await this.limiter.execute(async () => {
@@ -178,6 +212,7 @@ export class SemanticClusterer {
       console.error('[SemanticClusterer] Merge failed:', error.message);
       return {
         mergedContent: null,
+        entities: [],
         confidence: 0.0,
         reason: `Merge error: ${error.message}`,
       };
@@ -210,6 +245,27 @@ export class SemanticClusterer {
   }
 
   /**
+   * Extract technical entities from memories using regex patterns.
+   * Used to preserve entities during summarization.
+   */
+  private extractEntities(memories: string[]): string[] {
+    const entities = new Set<string>();
+
+    for (const memory of memories) {
+      for (const pattern of this.entityPatterns) {
+        const matches = memory.match(pattern.regex);
+        if (matches) {
+          for (const match of matches) {
+            entities.add(match);
+          }
+        }
+      }
+    }
+
+    return Array.from(entities);
+  }
+
+  /**
    * Parse merge result JSON from LLM output.
    */
   private parseMergeResult(output: string): MergeResult {
@@ -219,6 +275,7 @@ export class SemanticClusterer {
         const parsed = JSON.parse(jsonMatch[0]);
         return {
           mergedContent: parsed.merged_content ?? null,
+          entities: Array.isArray(parsed.entities) ? parsed.entities : [],
           confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.0,
           reason: parsed.reason || 'No reason provided',
         };
@@ -229,6 +286,7 @@ export class SemanticClusterer {
 
     return {
       mergedContent: null,
+      entities: [],
       confidence: 0.0,
       reason: 'Failed to parse JSON output',
     };

@@ -20,10 +20,11 @@ Memories:
 Ranking (indices only, e.g., "2 0 1"): `;
 
 const DIVERSITY_PENALTY = 0.15;  // Penalty for duplicate content
+const CLUSTER_DIVERSITY_PENALTY = 0.2;  // Penalty for same-cluster results
 const SCORE_THRESHOLD = 0.7;     // Minimum score to keep result
 const INITIAL_K = 20;            // Initial retrieval count (high recall)
 
-export { INITIAL_K, SCORE_THRESHOLD, DIVERSITY_PENALTY };
+export { INITIAL_K, SCORE_THRESHOLD, DIVERSITY_PENALTY, CLUSTER_DIVERSITY_PENALTY };
 
 export interface RerankResult {
   id: number;
@@ -35,6 +36,7 @@ export interface RerankResult {
   importance?: number;
   created_at?: Date;
   access_count?: number;
+  cluster_id?: string;  // For cluster diversity checking
 }
 
 export interface RerankInput {
@@ -46,6 +48,7 @@ export interface RerankInput {
   importance?: number;
   created_at?: Date;
   access_count?: number;
+  cluster_id?: string;  // For cluster diversity checking
 }
 
 export interface RerankConfig {
@@ -166,23 +169,29 @@ export class Reranker {
 
   /**
    * Apply diversity penalty to reduce duplicate content in top results.
-   * If two consecutive results are semantically similar, penalize the later one.
+   * Penalizes both semantically similar content AND same-cluster results.
    */
   private applyDiversityPenalty(results: RerankResult[]): RerankResult[] {
     if (results.length <= 1) return results;
 
     const penalized: RerankResult[] = [];
     const usedContents: string[] = [];
+    const usedClusters: Set<string> = new Set();
 
     for (const result of results) {
       let penalty = 0;
       const contentLower = result.content.toLowerCase();
 
-      // Check similarity against already selected top results
+      // Check text similarity against already selected top results
       for (const used of usedContents) {
         if (this.isContentSimilar(contentLower, used)) {
           penalty += DIVERSITY_PENALTY;
         }
+      }
+
+      // Check cluster diversity (stronger penalty)
+      if (result.cluster_id && usedClusters.has(result.cluster_id)) {
+        penalty += CLUSTER_DIVERSITY_PENALTY;
       }
 
       // Apply penalty
@@ -193,9 +202,12 @@ export class Reranker {
 
       penalized.push(penalizedResult);
 
-      // Track content for diversity checking (only track top results)
+      // Track content and cluster for diversity checking (only track top results)
       if (usedContents.length < 5) {
         usedContents.push(contentLower);
+      }
+      if (result.cluster_id) {
+        usedClusters.add(result.cluster_id);
       }
     }
 

@@ -8,9 +8,10 @@
  */
 import { LLMLimiter } from './llm-limiter.js';
 declare const DIVERSITY_PENALTY = 0.15;
+declare const CLUSTER_DIVERSITY_PENALTY = 0.2;
 declare const SCORE_THRESHOLD = 0.7;
 declare const INITIAL_K = 20;
-export { INITIAL_K, SCORE_THRESHOLD, DIVERSITY_PENALTY };
+export { INITIAL_K, SCORE_THRESHOLD, DIVERSITY_PENALTY, CLUSTER_DIVERSITY_PENALTY };
 export interface RerankResult {
     id: number;
     content: string;
@@ -20,6 +21,7 @@ export interface RerankResult {
     importance?: number;
     created_at?: Date;
     access_count?: number;
+    cluster_id?: string;
 }
 export interface RerankInput {
     id: number;
@@ -30,6 +32,7 @@ export interface RerankInput {
     importance?: number;
     created_at?: Date;
     access_count?: number;
+    cluster_id?: string;
 }
 export interface RerankConfig {
     topK?: number;
@@ -54,7 +57,7 @@ export declare class Reranker {
     rerank(query: string, results: RerankInput[], options?: RerankConfig): Promise<RerankResult[]>;
     /**
      * Apply diversity penalty to reduce duplicate content in top results.
-     * If two consecutive results are semantically similar, penalize the later one.
+     * Penalizes both semantically similar content AND same-cluster results.
      */
     private applyDiversityPenalty;
     /**

@@ -18,6 +18,7 @@ export interface ClusteredMemory {
 }
 export interface MergeResult {
     mergedContent: string | null;
+    entities: string[];
     confidence: number;
     reason: string;
 }
@@ -30,6 +31,7 @@ export declare class SemanticClusterer {
     private endpoint;
     private limiter;
     private conflictDetector;
+    private entityPatterns;
     constructor(endpoint?: string, limiter?: LLMLimiter);
     /**
      * Cluster memories by semantic similarity.
@@ -41,6 +43,7 @@ export declare class SemanticClusterer {
     }>): Promise<ClusterResult>;
     /**
      * Merge a cluster of similar memories into one permanent fact.
+     * Extracts entities first to ensure preservation.
      */
     mergeCluster(cluster: ClusteredMemory, existingMergedMemories?: Array<{
         id: number;
@@ -50,6 +53,11 @@ export declare class SemanticClusterer {
      * Parse cluster JSON from LLM output.
      */
     private parseClusters;
+    /**
+     * Extract technical entities from memories using regex patterns.
+     * Used to preserve entities during summarization.
+     */
+    private extractEntities;
     /**
      * Parse merge result JSON from LLM output.
      */

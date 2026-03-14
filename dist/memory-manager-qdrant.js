@@ -116,6 +116,12 @@ export class MemoryManager {
             const scoreB = (b.similarity ?? b.score) * (b.importance ?? 0.5);
             return scoreB - scoreA;
         });
+        // Absolute threshold check: if top similarity < 0.6, return empty
+        // This prevents memory hallucination (injecting irrelevant memories)
+        if (filtered.length === 0 || (filtered[0].similarity ?? filtered[0].score) < 0.6) {
+            console.log(`[MemoryManager] Retrieval threshold not met, returning empty (top similarity: ${(filtered[0]?.similarity ?? filtered[0]?.score)?.toFixed(2)})`);
+            return [];
+        }
         return filtered;
     }
     /**
