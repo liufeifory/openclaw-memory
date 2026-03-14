@@ -29,6 +29,35 @@ export declare class QdrantDatabase {
         success: boolean;
         reason?: string;
     }>;
+    /**
+     * Search using BM25 (keyword-based full-text search).
+     */
+    searchBM25(query: string, limit?: number, filter?: Record<string, any>): Promise<Array<{
+        id: number;
+        score: number;
+        payload: Record<string, any>;
+    }>>;
+    /**
+     * Hybrid search: combine BM25 and vector search with reciprocal rank fusion.
+     */
+    searchHybrid(query: string, embedding: number[], limit?: number, filter?: Record<string, any>, bm25Weight?: number): Promise<Array<{
+        id: number;
+        score: number;
+        payload: Record<string, any>;
+        bm25Score?: number;
+        vectorScore?: number;
+    }>>;
+    /**
+     * Build sparse vector from tokens for BM25.
+     */
+    private buildSparseVector;
+    /**
+     * Simple hash function for tokens.
+     */
+    private hashToken;
+    /**
+     * Search using vector similarity.
+     */
     search(embedding: number[], limit?: number, filter?: Record<string, any>): Promise<Array<{
         id: number;
         score: number;
@@ -64,6 +93,27 @@ export declare class QdrantDatabase {
     }>>;
     private buildFilter;
     delete(id: number): Promise<void>;
+    /**
+     * Hierarchical search: Reflection -> Semantic -> Episodic.
+     * Returns memories organized by hierarchy level.
+     */
+    searchHierarchical(embedding: number[], filter?: Record<string, any>, reflectionLimit?: number, semanticLimit?: number, episodicLimit?: number): Promise<{
+        reflections: Array<{
+            id: number;
+            score: number;
+            payload: Record<string, any>;
+        }>;
+        semantics: Array<{
+            id: number;
+            score: number;
+            payload: Record<string, any>;
+        }>;
+        episodic: Array<{
+            id: number;
+            score: number;
+            payload: Record<string, any>;
+        }>;
+    }>;
     count(): Promise<number>;
     getStats(): Promise<{
         total_points: number;

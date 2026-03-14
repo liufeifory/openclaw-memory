@@ -171,42 +171,38 @@ export class MemoryManager {
     }
     /**
      * Run importance decay during maintenance window.
-     * Formula: importance *= exp(-λt) where λ = 0.05 (half-life ~14 days)
+     * Formula: importance *= exp(-age/30d) - 30 day half-life
      * Updates Qdrant payloads with decayed importance values.
      */
     async runImportanceDecay() {
         console.log('[MemoryManager] Running importance decay...');
         const now = Date.now();
-        const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-        const lambda = 0.05; // Decay rate
-        // Get all memories older than 1 day (skip very recent ones)
-        const allMemories = await this.memoryStore.getSemantic(100);
+        const halfLifeDays = 30; // 30 day half-life
+        const lambda = Math.log(2) / halfLifeDays; // λ = ln(2) / half-life
+        // Get all memories from Qdrant
+        const allMemories = await this.db.scroll(undefined, 100);
         let updatedCount = 0;
         for (const memory of allMemories) {
-            const ageMs = now - memory.created_at.getTime();
-            // Skip memories less than 1 day old
-            if (ageMs < 24 * 60 * 60 * 1000) {
+            const ageMs = now - new Date(memory.payload.created_at).getTime();
+            const ageDays = ageMs / (1000 * 60 * 60 * 24);
+            // Skip very recent memories (< 1 day)
+            if (ageDays < 1) {
                 continue;
             }
-            // Calculate decay factor
-            const days = ageMs / (1000 * 60 * 60 * 24);
-            const decayFactor = Math.exp(-lambda * days);
-            const newImportance = memory.importance * decayFactor;
-            // Only update if significant change (> 1% difference)
-            if (Math.abs(memory.importance - newImportance) > 0.01) {
-                // Update in Qdrant
-                const point = await this.db.get(memory.id);
-                if (point && point.payload) {
-                    await this.db.updatePayload(memory.id, {
-                        ...point.payload,
-                        importance: newImportance,
-                        updated_at: new Date().toISOString(),
-                    });
-                    updatedCount++;
-                }
+            // Calculate decay factor: importance *= e^(-λt)
+            const decayFactor = Math.exp(-lambda * ageDays);
+            const oldImportance = memory.payload.importance || 0.5;
+            const newImportance = oldImportance * decayFactor;
+            // Only update if significant change (> 5% difference)
+            if (Math.abs(oldImportance - newImportance) > 0.05) {
+                await this.db.updatePayload(memory.id, {
+                    importance: Math.max(newImportance, 0.1), // Floor at 0.1
+                    updated_at: new Date().toISOString(),
+                });
+                updatedCount++;
             }
         }
-        console.log(`[MemoryManager] Decay applied: ${updatedCount}/${allMemories.length} memories updated`);
+        console.log(`[MemoryManager] Decay applied: ${updatedCount}/${allMemories.length} memories updated (30d half-life)`);
     }
     /**
      * Retrieve memories relevant to a query.
@@ -296,6 +292,86 @@ export class MemoryManager {
             console.log(`[MemoryManager] Type distribution:`, funnel.typeDistribution);
         }
         return filtered;
+    }
+    /**
+     * Retrieve memories using hybrid search (BM25 + Vector).
+     * @param query - The search query
+     * @param sessionId - Optional session ID for session isolation
+     * @param topK - Maximum number of results to return
+     * @param threshold - Minimum score threshold
+     * @param bm25Weight - Weight for BM25 score (0.5 = equal weighting)
+     */
+    async retrieveHybrid(query, sessionId, topK = 5, threshold = 0.6, bm25Weight = 0.5) {
+        // Generate embedding for query
+        const embedding = await this.embedding.embed(query);
+        // Build filter
+        const filter = {};
+        if (sessionId)
+            filter.session_id = sessionId;
+        // Hybrid search with RRF fusion
+        const hybridResults = await this.db.searchHybrid(query, embedding, topK * 2, filter, bm25Weight);
+        // Convert to MemoryWithSimilarity format
+        const results = hybridResults.map(r => ({
+            id: r.id,
+            content: r.payload.content || r.payload.summary || '',
+            importance: r.payload.importance || 0.5,
+            similarity: r.score,
+            type: r.payload.memory_type,
+            created_at: new Date(r.payload.created_at),
+            access_count: r.payload.access_count || 0,
+            session_id: r.payload.session_id,
+        }));
+        // Apply time decay and importance filtering
+        const now = new Date();
+        for (const mem of results) {
+            const daysSinceCreation = (now.getTime() - mem.created_at.getTime()) / (1000 * 60 * 60 * 24);
+            const timeDecay = Math.exp(-Math.log(2) / 30 * daysSinceCreation); // 30d half-life
+            mem.similarity *= timeDecay;
+        }
+        // Filter by threshold and importance
+        const filtered = results.filter(r => r.similarity >= threshold && r.importance >= 0.3);
+        // Sort by combined score
+        filtered.sort((a, b) => (b.similarity * b.importance) - (a.similarity * a.importance));
+        console.log(`[MemoryManager] Hybrid retrieval: ${filtered.length}/${results.length} results (BM25 weight: ${bm25Weight})`);
+        return filtered.slice(0, topK);
+    }
+    /**
+     * Retrieve memories using hierarchical search (Reflection -> Semantic -> Episodic).
+     * @param query - The search query
+     * @param sessionId - Optional session ID for session isolation
+     * @param reflectionLimit - Max reflection memories
+     * @param semanticLimit - Max semantic memories
+     * @param episodicLimit - Max episodic memories
+     */
+    async retrieveHierarchical(query, sessionId, reflectionLimit = 3, semanticLimit = 5, episodicLimit = 10) {
+        // Generate embedding for query
+        const embedding = await this.embedding.embed(query);
+        // Build filter
+        const filter = {};
+        if (sessionId)
+            filter.session_id = sessionId;
+        // Hierarchical search
+        const hierarchicalResults = await this.db.searchHierarchical(embedding, filter, reflectionLimit, semanticLimit, episodicLimit);
+        // Convert to MemoryWithSimilarity format
+        const convertResults = (results, defaultType) => {
+            return results.map(r => ({
+                id: r.id,
+                content: r.payload.content || r.payload.summary || '',
+                importance: r.payload.importance || 0.5,
+                similarity: r.score,
+                type: (r.payload.memory_type || defaultType),
+                created_at: new Date(r.payload.created_at),
+                access_count: r.payload.access_count || 0,
+                session_id: r.payload.session_id,
+            }));
+        };
+        const result = {
+            reflections: convertResults(hierarchicalResults.reflections, 'reflection'),
+            semantics: convertResults(hierarchicalResults.semantics, 'semantic'),
+            episodic: convertResults(hierarchicalResults.episodic, 'episodic'),
+        };
+        console.log(`[MemoryManager] Hierarchical retrieval: ${result.reflections.length} reflections, ${result.semantics.length} semantics, ${result.episodic.length} episodic`);
+        return result;
     }
     /**
      * Build context string for LLM.

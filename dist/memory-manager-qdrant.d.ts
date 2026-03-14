@@ -74,7 +74,7 @@ export declare class MemoryManager {
     private runIdleClustering;
     /**
      * Run importance decay during maintenance window.
-     * Formula: importance *= exp(-λt) where λ = 0.05 (half-life ~14 days)
+     * Formula: importance *= exp(-age/30d) - 30 day half-life
      * Updates Qdrant payloads with decayed importance values.
      */
     private runImportanceDecay;
@@ -89,6 +89,28 @@ export declare class MemoryManager {
      * @returns Relevant memories sorted by combined score
      */
     retrieveRelevant(query: string, sessionId: string | undefined, topK?: number, threshold?: number, enableFunnelStats?: boolean): Promise<MemoryWithSimilarity[]>;
+    /**
+     * Retrieve memories using hybrid search (BM25 + Vector).
+     * @param query - The search query
+     * @param sessionId - Optional session ID for session isolation
+     * @param topK - Maximum number of results to return
+     * @param threshold - Minimum score threshold
+     * @param bm25Weight - Weight for BM25 score (0.5 = equal weighting)
+     */
+    retrieveHybrid(query: string, sessionId: string | undefined, topK?: number, threshold?: number, bm25Weight?: number): Promise<MemoryWithSimilarity[]>;
+    /**
+     * Retrieve memories using hierarchical search (Reflection -> Semantic -> Episodic).
+     * @param query - The search query
+     * @param sessionId - Optional session ID for session isolation
+     * @param reflectionLimit - Max reflection memories
+     * @param semanticLimit - Max semantic memories
+     * @param episodicLimit - Max episodic memories
+     */
+    retrieveHierarchical(query: string, sessionId: string | undefined, reflectionLimit?: number, semanticLimit?: number, episodicLimit?: number): Promise<{
+        reflections: MemoryWithSimilarity[];
+        semantics: MemoryWithSimilarity[];
+        episodic: MemoryWithSimilarity[];
+    }>;
     /**
      * Build context string for LLM.
      */

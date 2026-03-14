@@ -76,12 +76,16 @@ export class QdrantDatabase {
         console.log('[Qdrant] Collection created:', COLLECTION_NAME);
       }
 
-      // Create BM25 payload index for text search
-      const bm25IndexExists = await this.indexExists('content');
-      if (!bm25IndexExists) {
-        await this.createPayloadIndex('content');
-        result.changes.push('Created BM25 payload index on content field');
-        result.migrated = true;
+      // Create BM25 payload index for text search (optional, skip if not supported)
+      try {
+        const bm25IndexExists = await this.indexExists('content');
+        if (!bm25IndexExists) {
+          await this.createPayloadIndex('content');
+          result.changes.push('Created BM25 payload index on content field');
+          result.migrated = true;
+        }
+      } catch (error: any) {
+        console.warn('[Qdrant] BM25 index creation not supported, skipping:', error.message);
       }
 
       // Check schema version

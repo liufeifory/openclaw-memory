@@ -15,6 +15,7 @@
     "test:features": "node dist/test-features.js",
     "migrate": "node dist/migrate.js",
     "profile": "node dist/profile.js",
+    "test:v27": "node dist/test-v27.js",
     "clean": "rm -rf dist/"
   },
   "dependencies": {
