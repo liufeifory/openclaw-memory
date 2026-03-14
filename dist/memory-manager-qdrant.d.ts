@@ -3,6 +3,17 @@
  */
 import { MigrationResult } from './qdrant-client.js';
 import type { MemoryWithSimilarity } from './memory-store-qdrant.js';
+export interface RetrievalFunnelStats {
+    initialCount: number;
+    afterTimeDecay: number;
+    afterRerank: number;
+    afterThreshold: number;
+    afterImportance: number;
+    finalCount: number;
+    avgSimilarity: number;
+    avgImportance: number;
+    typeDistribution: Record<string, number>;
+}
 export interface MemoryManagerConfig {
     qdrant: {
         url: string;
@@ -38,8 +49,13 @@ export declare class MemoryManager {
     /**
      * Retrieve memories relevant to a query.
      * Uses vector search + reranking + diversity + time decay.
+     * @param query - The search query
+     * @param topK - Maximum number of results to return
+     * @param threshold - Minimum similarity threshold
+     * @param enableFunnelStats - Whether to log funnel statistics
+     * @returns Relevant memories sorted by combined score
      */
-    retrieveRelevant(query: string, topK?: number, threshold?: number): Promise<MemoryWithSimilarity[]>;
+    retrieveRelevant(query: string, topK?: number, threshold?: number, enableFunnelStats?: boolean): Promise<MemoryWithSimilarity[]>;
     /**
      * Build context string for LLM.
      */

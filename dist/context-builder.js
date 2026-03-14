@@ -21,8 +21,8 @@ export class ContextBuilder {
     buildContext(sessionId, relevantMemories, reflectionMemories = [], recentConversation, preferences) {
         const context = [];
         // Calculate slot allocation based on approximate line counts
-        // Assuming ~50 lines total budget
-        const totalLines = 50;
+        // Assuming ~4000 tokens budget (~300 lines, ~13 tokens/line)
+        const totalLines = 300;
         const reflectionLines = Math.floor(totalLines * this.reflectionRatio);
         const preferenceLines = Math.floor(totalLines * this.preferenceRatio);
         const memoryLines = Math.floor(totalLines * this.memoryRatio);
@@ -30,7 +30,7 @@ export class ContextBuilder {
         // Add reflection memories (highest priority, fixed count)
         if (reflectionMemories.length > 0) {
             context.push('## Reflections');
-            for (const ref of reflectionMemories.slice(0, Math.min(3, reflectionLines))) {
+            for (const ref of reflectionMemories.slice(0, Math.min(5, reflectionLines / 2))) {
                 context.push(`- ${ref.summary}`);
             }
             context.push('');
@@ -55,7 +55,7 @@ export class ContextBuilder {
         const nonReflectionMemories = relevantMemories.filter(m => m.type !== 'reflection');
         if (nonReflectionMemories.length > 0) {
             context.push('## Relevant Memories');
-            const displayMemories = nonReflectionMemories.slice(0, Math.min(this.maxMemories, memoryLines));
+            const displayMemories = nonReflectionMemories.slice(0, Math.min(15, memoryLines / 2));
             for (const mem of displayMemories) {
                 context.push(`- [${mem.type}] ${mem.content}`);
             }

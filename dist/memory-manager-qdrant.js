@@ -75,12 +75,29 @@ export class MemoryManager {
     /**
      * Retrieve memories relevant to a query.
      * Uses vector search + reranking + diversity + time decay.
+     * @param query - The search query
+     * @param topK - Maximum number of results to return
+     * @param threshold - Minimum similarity threshold
+     * @param enableFunnelStats - Whether to log funnel statistics
+     * @returns Relevant memories sorted by combined score
      */
-    async retrieveRelevant(query, topK = 5, threshold = 0.6) {
+    async retrieveRelevant(query, topK = 5, threshold = 0.6, enableFunnelStats = true) {
+        const funnel = {
+            initialCount: 0,
+            afterTimeDecay: 0,
+            afterRerank: 0,
+            afterThreshold: 0,
+            afterImportance: 0,
+            finalCount: 0,
+            avgSimilarity: 0,
+            avgImportance: 0,
+            typeDistribution: {},
+        };
         // Generate embedding for query
         const embedding = await this.embedding.embed(query);
         // Search all memories with high recall (K=20)
         const searchResults = await this.memoryStore.search(embedding, INITIAL_K, threshold);
+        funnel.initialCount = searchResults.length;
         // Apply time decay to similarity scores
         const now = new Date();
         for (const mem of searchResults) {
@@ -98,18 +115,24 @@ export class MemoryManager {
             // Final similarity with time decay
             mem.similarity = baseSimilarity * timeDecay;
         }
+        funnel.afterTimeDecay = searchResults.length;
         // Rerank with diversity enabled and threshold filtering
         const reranked = await this.reranker.rerank(query, searchResults, {
             topK: topK,
             threshold: 0.7, // Higher threshold for better precision
             enableDiversity: true,
         });
+        funnel.afterRerank = reranked.length;
         // Increment access count for ALL retrieved memories
         for (const mem of reranked) {
             await this.memoryStore.incrementAccess(mem.id, mem.type);
         }
+        // Filter by threshold
+        const afterThreshold = reranked.filter(r => (r.similarity ?? r.score) >= 0.6);
+        funnel.afterThreshold = afterThreshold.length;
         // Filter by importance (Task 1.B.2: filter out importance < 0.3)
-        const filtered = reranked.filter(r => (r.importance ?? 0.5) >= 0.3);
+        const filtered = afterThreshold.filter(r => (r.importance ?? 0.5) >= 0.3);
+        funnel.afterImportance = filtered.length;
         // Sort by combined score (similarity × importance)
         filtered.sort((a, b) => {
             const scoreA = (a.similarity ?? a.score) * (a.importance ?? 0.5);
@@ -121,6 +144,19 @@ export class MemoryManager {
         if (filtered.length === 0 || (filtered[0].similarity ?? filtered[0].score) < 0.6) {
             console.log(`[MemoryManager] Retrieval threshold not met, returning empty (top similarity: ${(filtered[0]?.similarity ?? filtered[0]?.score)?.toFixed(2)})`);
             return [];
+        }
+        // Calculate statistics
+        funnel.finalCount = filtered.length;
+        funnel.avgSimilarity = filtered.reduce((sum, m) => sum + (m.similarity ?? m.score ?? 0), 0) / filtered.length;
+        funnel.avgImportance = filtered.reduce((sum, m) => sum + (m.importance ?? 0.5), 0) / filtered.length;
+        for (const mem of filtered) {
+            funnel.typeDistribution[mem.type] = (funnel.typeDistribution[mem.type] || 0) + 1;
+        }
+        // Log funnel statistics
+        if (enableFunnelStats) {
+            console.log(`[MemoryManager] Funnel: ${funnel.initialCount} → ${funnel.afterTimeDecay} → ${funnel.afterRerank} → ${funnel.afterThreshold} → ${funnel.afterImportance} → ${funnel.finalCount}`);
+            console.log(`[MemoryManager] Avg similarity: ${funnel.avgSimilarity.toFixed(2)}, Avg importance: ${funnel.avgImportance.toFixed(2)}`);
+            console.log(`[MemoryManager] Type distribution:`, funnel.typeDistribution);
         }
         return filtered;
     }
