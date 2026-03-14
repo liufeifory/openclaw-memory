@@ -50,6 +50,7 @@ let memoryFilter: MemoryFilter | null = null;
 let preferenceExtractor: PreferenceExtractor | null = null;
 let summarizer: Summarizer | null = null;
 let globalLimiter: LLMLimiter | null = null;
+let savedConfig: MemoryPluginConfig | null = null;  // Store config from init
 
 function getMemoryManager(config: MemoryPluginConfig): PgMemoryManager | QdrantMemoryManager {
   if (!memoryManager) {
@@ -90,6 +91,9 @@ const memoryPlugin = {
   kind: 'memory',
 
   async init(config: MemoryPluginConfig) {
+    // Store config for later use in register
+    savedConfig = config;
+
     // Initialize memory manager on plugin load
     const mm = getMemoryManager(config);
 
@@ -105,13 +109,22 @@ const memoryPlugin = {
   },
 
   register(api: any) {
-    // Get config from OpenClaw
-    const config = api.getConfig?.() as MemoryPluginConfig | undefined;
+    // Get plugin config from OpenClaw - use api.pluginConfig property (not getConfig method)
+    const pluginConfig = api.pluginConfig as any;
+
+    // Debug: log what we received
+    console.log('[openclaw-memory] Plugin config from api.pluginConfig:', JSON.stringify(pluginConfig, null, 2));
+
+    // Handle both formats: {enabled, config} or direct config
+    const config = pluginConfig?.config || pluginConfig;
 
     if (!config) {
       console.warn('[openclaw-memory] No config found, plugin disabled');
       return;
     }
+
+    // Debug: log resolved config
+    console.log('[openclaw-memory] Resolved config:', JSON.stringify(config, null, 2));
 
     // Check for either pgvector or qdrant config
     const hasPgConfig = 'database' in config && !!config.database;
