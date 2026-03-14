@@ -29,9 +29,13 @@ export declare class MemoryStore {
      */
     getReflection(limit?: number): Promise<ReflectionMemory[]>;
     /**
+     * Add reflection memory.
+     */
+    addReflection(summary: string, importance?: number): Promise<number>;
+    /**
      * Increment access count for a memory.
      */
-    incrementAccess(memoryId: number, type: 'episodic' | 'semantic'): Promise<void>;
+    incrementAccess(memoryId: number, type: 'episodic' | 'semantic' | 'reflection'): Promise<void>;
     /**
      * Get memory statistics.
      */

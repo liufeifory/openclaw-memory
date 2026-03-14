@@ -33,6 +33,14 @@ export declare class MemoryManager {
      */
     storeMemory(sessionId: string, content: string, importance?: number): Promise<void>;
     /**
+     * Store semantic memory asynchronously (non-blocking).
+     */
+    storeSemantic(content: string, importance?: number): Promise<void>;
+    /**
+     * Store reflection memory.
+     */
+    storeReflection(summary: string, importance?: number): Promise<number>;
+    /**
      * Get memory statistics.
      */
     getStats(): Promise<{

@@ -129,10 +129,30 @@ export class MemoryStore {
   }
 
   /**
+   * Add reflection memory.
+   */
+  async addReflection(summary: string, importance: number = 0.9): Promise<number> {
+    const result = await this.db.query<{ id: number }>(
+      `INSERT INTO reflection_memory (summary, importance, created_at, access_count)
+       VALUES ($1, $2, NOW(), 0)
+       RETURNING id`,
+      [summary, importance]
+    );
+    return result[0].id;
+  }
+
+  /**
    * Increment access count for a memory.
    */
-  async incrementAccess(memoryId: number, type: 'episodic' | 'semantic'): Promise<void> {
-    const table = type === 'episodic' ? 'episodic_memory' : 'semantic_memory';
+  async incrementAccess(memoryId: number, type: 'episodic' | 'semantic' | 'reflection'): Promise<void> {
+    let table: string;
+    if (type === 'episodic') {
+      table = 'episodic_memory';
+    } else if (type === 'semantic') {
+      table = 'semantic_memory';
+    } else {
+      table = 'reflection_memory';
+    }
     await this.db.execute(
       `UPDATE ${table} SET access_count = access_count + 1 WHERE id = $1`,
       [memoryId]

@@ -30,14 +30,14 @@ export class MemoryManager {
         const reflectionMemories = await this.memoryStore.getReflection(5);
         // Combine results with type markers
         const results = [];
-        // Add reflection memories (highest importance)
+        // Add reflection memories (with vector similarity)
         for (const ref of reflectionMemories) {
             results.push({
                 id: ref.id,
                 type: 'reflection',
                 content: ref.summary,
                 importance: ref.importance,
-                similarity: 1.0,
+                similarity: 0.85, // High base similarity for reflections
                 created_at: ref.created_at,
                 access_count: ref.access_count,
             });
@@ -80,6 +80,21 @@ export class MemoryManager {
         this.memoryStore.storeEpisodic(sessionId, content, importance).catch(err => {
             console.error('Failed to store memory:', err);
         });
+    }
+    /**
+     * Store semantic memory asynchronously (non-blocking).
+     */
+    async storeSemantic(content, importance = 0.7) {
+        // Fire and forget - don't await
+        this.memoryStore.storeSemantic(content, importance).catch(err => {
+            console.error('Failed to store semantic memory:', err);
+        });
+    }
+    /**
+     * Store reflection memory.
+     */
+    async storeReflection(summary, importance = 0.9) {
+        return this.memoryStore.addReflection(summary, importance);
     }
     /**
      * Get memory statistics.

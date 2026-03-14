@@ -17,6 +17,8 @@ export declare class MemoryManager {
     private embedding;
     private memoryStore;
     private contextBuilder;
+    private reranker;
+    private conflictDetector;
     constructor(config: MemoryManagerConfig);
     /**
      * Initialize the memory manager (connect to Qdrant).
@@ -24,6 +26,7 @@ export declare class MemoryManager {
     initialize(): Promise<void>;
     /**
      * Retrieve memories relevant to a query.
+     * Uses vector search + reranking for better results.
      */
     retrieveRelevant(query: string, topK?: number, threshold?: number): Promise<MemoryWithSimilarity[]>;
     /**
@@ -35,6 +38,10 @@ export declare class MemoryManager {
      * Uses internal queue to avoid blocking the conversation flow.
      */
     storeMemory(sessionId: string, content: string, importance?: number): Promise<void>;
+    /**
+     * Store semantic memory asynchronously (non-blocking).
+     */
+    storeSemantic(content: string, importance?: number): Promise<void>;
     /**
      * Store reflection memory.
      */

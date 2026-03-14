@@ -10,8 +10,14 @@
  */
 import { MemoryManager as PgMemoryManager } from './memory-manager.js';
 import { MemoryManager as QdrantMemoryManager } from './memory-manager-qdrant.js';
+import { MemoryFilter } from './memory-filter.js';
+import { PreferenceExtractor } from './preference-extractor.js';
+import { Summarizer } from './summarizer.js';
 // Global instance for reuse across requests
 let memoryManager = null;
+let memoryFilter = null;
+let preferenceExtractor = null;
+let summarizer = null;
 function getMemoryManager(config) {
     if (!memoryManager) {
         if (config.backend === 'qdrant') {
@@ -22,6 +28,24 @@ function getMemoryManager(config) {
         }
     }
     return memoryManager;
+}
+function getMemoryFilter(llamaEndpoint) {
+    if (!memoryFilter) {
+        memoryFilter = new MemoryFilter(llamaEndpoint);
+    }
+    return memoryFilter;
+}
+function getPreferenceExtractor(llamaEndpoint) {
+    if (!preferenceExtractor) {
+        preferenceExtractor = new PreferenceExtractor(llamaEndpoint);
+    }
+    return preferenceExtractor;
+}
+function getSummarizer(llamaEndpoint) {
+    if (!summarizer) {
+        summarizer = new Summarizer(llamaEndpoint);
+    }
+    return summarizer;
 }
 const memoryPlugin = {
     id: 'openclaw-memory',
@@ -53,6 +77,13 @@ const memoryPlugin = {
         }
         // Initialize memory manager
         const mm = getMemoryManager(config);
+        // Initialize 1B model helpers (Llama-3.2-1B-Instruct on port 8081)
+        const llamaEndpoint = config.embedding?.endpoint?.replace('8080', '8081') ?? 'http://localhost:8081';
+        const filter = getMemoryFilter(llamaEndpoint);
+        const extractor = getPreferenceExtractor(llamaEndpoint);
+        const summarizer = getSummarizer(llamaEndpoint);
+        // Conversation buffer for summarization
+        const conversationBuffers = new Map();
         // Register memory_search tool
         api.registerTool((ctx) => {
             const memorySearchTool = {
@@ -89,8 +120,59 @@ const memoryPlugin = {
                 const memories = await mm.retrieveRelevant(message);
                 // Build context
                 const context = mm.buildContext(sessionId, memories, recentConversation);
-                // Store message asynchronously (fire and forget)
-                mm.storeMemory(sessionId, message);
+                // Smart storage: use 1B model to classify and filter
+                const filterResult = await filter.classify(message);
+                if (filterResult.shouldStore && filterResult.memoryType) {
+                    // Check for conflicts if storing semantic memory
+                    if (filterResult.memoryType === 'semantic') {
+                        // Search for similar memories to check for conflicts
+                        const similar = await mm.retrieveRelevant(message, 5, 0.85);
+                        if (similar.length > 0) {
+                            // Conflict detection would go here (implemented in memory-manager)
+                            console.log(`[Memory] Classified as ${filterResult.category}, importance: ${filterResult.importance}`);
+                        }
+                    }
+                    // Store with classified importance and type
+                    if (filterResult.memoryType === 'episodic') {
+                        mm.storeMemory(sessionId, message, filterResult.importance);
+                    }
+                    else {
+                        // Semantic memory - store without session ID
+                        mm.storeSemantic(message, filterResult.importance);
+                    }
+                }
+                else {
+                    console.log(`[Memory] Skipped: ${filterResult.category} - ${filterResult.reason}`);
+                }
+                // Add to conversation buffer for summarization
+                if (!conversationBuffers.has(sessionId)) {
+                    conversationBuffers.set(sessionId, []);
+                }
+                const buffer = conversationBuffers.get(sessionId);
+                buffer.push(`User: ${message}`);
+                // Summarize every 20 turns
+                if (buffer.length >= 20) {
+                    const summary = await summarizer.summarize(buffer);
+                    if (!summary.isEmpty) {
+                        mm.storeReflection(`Summary: ${summary.summary}`, 0.8);
+                        console.log('[Memory] Conversation summarized');
+                    }
+                    buffer.length = 0; // Clear buffer
+                }
+                // Extract preferences periodically
+                if (buffer.length % 10 === 0 && buffer.length > 0) {
+                    const profile = await extractor.extract(buffer);
+                    if (profile.likes.length > 0 || profile.dislikes.length > 0) {
+                        console.log('[Memory] Extracted preferences:', profile);
+                        // Store extracted preferences as semantic memories
+                        for (const like of profile.likes) {
+                            mm.storeSemantic(`User likes: ${like}`, 0.7);
+                        }
+                        for (const dislike of profile.dislikes) {
+                            mm.storeSemantic(`User dislikes: ${dislike}`, 0.7);
+                        }
+                    }
+                }
                 return context;
             }
             catch (error) {

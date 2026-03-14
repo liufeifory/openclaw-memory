@@ -79,10 +79,28 @@ export class MemoryStore {
         return results;
     }
     /**
+     * Add reflection memory.
+     */
+    async addReflection(summary, importance = 0.9) {
+        const result = await this.db.query(`INSERT INTO reflection_memory (summary, importance, created_at, access_count)
+       VALUES ($1, $2, NOW(), 0)
+       RETURNING id`, [summary, importance]);
+        return result[0].id;
+    }
+    /**
      * Increment access count for a memory.
      */
     async incrementAccess(memoryId, type) {
-        const table = type === 'episodic' ? 'episodic_memory' : 'semantic_memory';
+        let table;
+        if (type === 'episodic') {
+            table = 'episodic_memory';
+        }
+        else if (type === 'semantic') {
+            table = 'semantic_memory';
+        }
+        else {
+            table = 'reflection_memory';
+        }
         await this.db.execute(`UPDATE ${table} SET access_count = access_count + 1 WHERE id = $1`, [memoryId]);
     }
     /**
