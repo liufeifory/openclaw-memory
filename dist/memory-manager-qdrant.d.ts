@@ -135,21 +135,31 @@ export declare class MemoryManager {
     storeMemory(sessionId: string, content: string, importance?: number): Promise<void>;
     /**
      * Store semantic memory asynchronously (non-blocking).
+     * @param content - Memory content
+     * @param importance - Importance score
+     * @param sessionId - Optional session ID for session isolation
      */
-    storeSemantic(content: string, importance?: number): Promise<void>;
+    storeSemantic(content: string, importance?: number, sessionId?: string): Promise<void>;
     /**
      * Store semantic memory with conflict detection.
      * Marks conflicting memories as superseded (not deleted).
+     * @param content - Memory content
+     * @param importance - Importance score
+     * @param similarityThreshold - Similarity threshold for conflict detection
+     * @param sessionId - Optional session ID for session isolation
      */
-    storeSemanticWithConflictCheck(content: string, importance?: number, similarityThreshold?: number): Promise<{
+    storeSemanticWithConflictCheck(content: string, importance?: number, similarityThreshold?: number, sessionId?: string): Promise<{
         stored: boolean;
         conflictDetected: boolean;
         supersededId?: number;
     }>;
     /**
      * Store reflection memory.
+     * @param summary - Reflection summary
+     * @param importance - Importance score
+     * @param sessionId - Optional session ID for session isolation
      */
-    storeReflection(summary: string, importance?: number): Promise<number>;
+    storeReflection(summary: string, importance?: number, sessionId?: string): Promise<number>;
     /**
      * Get memory statistics.
      */

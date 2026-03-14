@@ -568,21 +568,29 @@ export class MemoryManager {
 
   /**
    * Store semantic memory asynchronously (non-blocking).
+   * @param content - Memory content
+   * @param importance - Importance score
+   * @param sessionId - Optional session ID for session isolation
    */
-  async storeSemantic(content: string, importance: number = 0.7): Promise<void> {
+  async storeSemantic(content: string, importance: number = 0.7, sessionId?: string): Promise<void> {
     this.memoryStore.enqueueStorage(async () => {
-      await this.memoryStore.storeSemantic(content, importance);
+      await this.memoryStore.storeSemantic(content, importance, sessionId);
     });
   }
 
   /**
    * Store semantic memory with conflict detection.
    * Marks conflicting memories as superseded (not deleted).
+   * @param content - Memory content
+   * @param importance - Importance score
+   * @param similarityThreshold - Similarity threshold for conflict detection
+   * @param sessionId - Optional session ID for session isolation
    */
   async storeSemanticWithConflictCheck(
     content: string,
     importance: number = 0.7,
-    similarityThreshold: number = 0.85
+    similarityThreshold: number = 0.85,
+    sessionId?: string
   ): Promise<{ stored: boolean; conflictDetected: boolean; supersededId?: number }> {
     // Search for similar memories
     const embedding = await this.embedding.embed(content);
@@ -605,7 +613,7 @@ export class MemoryManager {
         );
         // Still store the new memory, but mark the old one as superseded
         this.memoryStore.enqueueStorage(async () => {
-          await this.memoryStore.storeSemantic(content, importance);
+          await this.memoryStore.storeSemantic(content, importance, sessionId);
         });
         return {
           stored: true,
@@ -617,16 +625,19 @@ export class MemoryManager {
 
     // No conflict, store normally
     this.memoryStore.enqueueStorage(async () => {
-      await this.memoryStore.storeSemantic(content, importance);
+      await this.memoryStore.storeSemantic(content, importance, sessionId);
     });
     return { stored: true, conflictDetected: false };
   }
 
   /**
    * Store reflection memory.
+   * @param summary - Reflection summary
+   * @param importance - Importance score
+   * @param sessionId - Optional session ID for session isolation
    */
-  async storeReflection(summary: string, importance: number = 0.9): Promise<number> {
-    return this.memoryStore.addReflection(summary, importance);
+  async storeReflection(summary: string, importance: number = 0.9, sessionId?: string): Promise<number> {
+    return this.memoryStore.addReflection(summary, importance, sessionId);
   }
 
   /**

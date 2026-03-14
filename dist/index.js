@@ -175,7 +175,7 @@ const memoryPlugin = {
                 if (filterResult.shouldStore && filterResult.memoryType) {
                     if (filterResult.memoryType === 'semantic') {
                         if (mm instanceof QdrantMemoryManager) {
-                            await mm.storeSemanticWithConflictCheck(message, filterResult.importance, 0.85);
+                            await mm.storeSemanticWithConflictCheck(message, filterResult.importance, 0.85, sessionId);
                         }
                         else {
                             await mm.storeSemantic(message, filterResult.importance);
@@ -198,20 +198,20 @@ const memoryPlugin = {
                     const userProfile = await extractor.extract(buffer);
                     // Store likes as semantic memories
                     for (const like of userProfile.likes) {
-                        await mm.storeSemantic(like, 0.8);
+                        await mm.storeSemantic(like, 0.8, sessionId);
                         // 同步写入本地文件
                         appendToLocalMemory(`[PREFERENCE-LIKE] ${like}`);
                     }
                     // Store dislikes as semantic memories
                     for (const dislike of userProfile.dislikes) {
-                        await mm.storeSemantic(dislike, 0.8);
+                        await mm.storeSemantic(dislike, 0.8, sessionId);
                         // 同步写入本地文件
                         appendToLocalMemory(`[PREFERENCE-DISLIKE] ${dislike}`);
                     }
                     // 生成摘要
                     const summaryResult = await summarizer.summarize(buffer);
                     if (summaryResult.summary) {
-                        await mm.storeReflection(summaryResult.summary, 0.9);
+                        await mm.storeReflection(summaryResult.summary, 0.9, sessionId);
                         // 同步写入本地文件
                         appendToLocalMemory(`[REFLECTION] ${summaryResult.summary}`);
                     }

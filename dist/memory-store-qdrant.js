@@ -102,8 +102,11 @@ export class MemoryStore {
     /**
      * Store semantic memory with embedding.
      * Checks for near-duplicate content before storing.
+     * @param content - Memory content
+     * @param importance - Importance score (0-1)
+     * @param sessionId - Optional session ID for session isolation
      */
-    async storeSemantic(content, importance = 0.7) {
+    async storeSemantic(content, importance = 0.7, sessionId) {
         // Check for duplicates first
         const dedupeResult = await this.checkDuplicate(content);
         if (dedupeResult.isDuplicate) {
@@ -114,14 +117,19 @@ export class MemoryStore {
         const now = Date.now();
         const embedding = await this.embedding.embed(content);
         // Store in Qdrant with version metadata (clean payload first)
-        await this.db.upsert(memoryId, embedding, cleanPayload({
+        const payload = {
             type: MemoryType.SEMANTIC,
             content: content,
             importance: importance,
             access_count: 0,
             created_at: new Date().toISOString(),
             version: now,
-        }));
+        };
+        // Add session_id if provided (for session isolation)
+        if (sessionId) {
+            payload.session_id = sessionId;
+        }
+        await this.db.upsert(memoryId, embedding, cleanPayload(payload));
         this.semanticMemories.set(memoryId, {
             id: memoryId,
             content,
@@ -192,18 +200,50 @@ export class MemoryStore {
             .slice(0, topK);
     }
     /**
-     * Get all semantic memories.
+     * Get semantic memories with optional session filtering.
+     * @param limit - Maximum number of results
+     * @param sessionId - Optional session ID for session isolation
      */
-    async getSemantic(limit = 20) {
+    async getSemantic(limit = 20, sessionId) {
+        // If sessionId provided, search from Qdrant with session filter
+        if (sessionId) {
+            // Get embedding for session-based search (use empty query to get all semantic memories)
+            const embedding = await this.embedding.embed('general knowledge fact');
+            const results = await this.search(embedding, limit, 0.5, 'semantic', false, sessionId);
+            return results.map(r => ({
+                id: r.id,
+                content: r.content,
+                importance: r.importance,
+                access_count: r.access_count,
+                created_at: r.created_at,
+            }));
+        }
+        // No session filter - return from in-memory cache
         const results = Array.from(this.semanticMemories.values())
             .sort((a, b) => b.importance - a.importance)
             .slice(0, limit);
         return results;
     }
     /**
-     * Get all reflection memories.
+     * Get reflection memories with optional session filtering.
+     * @param limit - Maximum number of results
+     * @param sessionId - Optional session ID for session isolation
      */
-    async getReflection(limit = 5) {
+    async getReflection(limit = 5, sessionId) {
+        // If sessionId provided, search from Qdrant with session filter
+        if (sessionId) {
+            // Get embedding for session-based search (use empty query to get all reflection memories)
+            const embedding = await this.embedding.embed('reflection insight summary');
+            const results = await this.search(embedding, limit, 0.5, 'reflection', false, sessionId);
+            return results.map(r => ({
+                id: r.id,
+                summary: r.content,
+                importance: r.importance,
+                access_count: r.access_count,
+                created_at: r.created_at,
+            }));
+        }
+        // No session filter - return from in-memory cache
         const results = Array.from(this.reflectionMemories.values())
             .sort((a, b) => b.importance - a.importance)
             .slice(0, limit);
@@ -211,20 +251,28 @@ export class MemoryStore {
     }
     /**
      * Add reflection memory (in-memory only, also stored in Qdrant).
+     * @param summary - Reflection summary
+     * @param importance - Importance score (0-1)
+     * @param sessionId - Optional session ID for session isolation
      */
-    async addReflection(summary, importance = 0.9) {
+    async addReflection(summary, importance = 0.9, sessionId) {
         const memoryId = ++this.idCounter;
         const now = Date.now();
         const embedding = await this.embedding.embed(summary);
         // Store in Qdrant with version metadata (clean payload first)
-        await this.db.upsert(memoryId, embedding, cleanPayload({
+        const payload = {
             type: MemoryType.REFLECTION,
             summary: summary,
             importance: importance,
             access_count: 0,
             created_at: new Date().toISOString(),
             version: now,
-        }));
+        };
+        // Add session_id if provided (for session isolation)
+        if (sessionId) {
+            payload.session_id = sessionId;
+        }
+        await this.db.upsert(memoryId, embedding, cleanPayload(payload));
         const reflection = {
             id: memoryId,
             summary,

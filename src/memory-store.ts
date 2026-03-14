@@ -110,8 +110,12 @@ export class MemoryStore {
 
   /**
    * Get all semantic memories.
+   * @param limit - Maximum number of results
+   * @param sessionId - Optional session ID for session isolation (not applicable for semantic memories in PostgreSQL)
    */
-  async getSemantic(limit: number = 20): Promise<SemanticMemory[]> {
+  async getSemantic(limit: number = 20, sessionId?: string): Promise<SemanticMemory[]> {
+    // PostgreSQL version: semantic memories are global (no session isolation by design)
+    // sessionId parameter kept for API compatibility with Qdrant version
     const results = await this.db.query<SemanticMemory>(
       `SELECT * FROM semantic_memory
        ORDER BY importance DESC
@@ -123,8 +127,12 @@ export class MemoryStore {
 
   /**
    * Get all reflection memories.
+   * @param limit - Maximum number of results
+   * @param sessionId - Optional session ID for session isolation (not applicable for reflection memories in PostgreSQL)
    */
-  async getReflection(limit: number = 5): Promise<ReflectionMemory[]> {
+  async getReflection(limit: number = 5, sessionId?: string): Promise<ReflectionMemory[]> {
+    // PostgreSQL version: reflection memories are global (no session isolation by design)
+    // sessionId parameter kept for API compatibility with Qdrant version
     const results = await this.db.query<ReflectionMemory>(
       `SELECT * FROM reflection_memory
        ORDER BY importance DESC

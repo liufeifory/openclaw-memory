@@ -66,8 +66,12 @@ export class MemoryStore {
     }
     /**
      * Get all semantic memories.
+     * @param limit - Maximum number of results
+     * @param sessionId - Optional session ID for session isolation (not applicable for semantic memories in PostgreSQL)
      */
-    async getSemantic(limit = 20) {
+    async getSemantic(limit = 20, sessionId) {
+        // PostgreSQL version: semantic memories are global (no session isolation by design)
+        // sessionId parameter kept for API compatibility with Qdrant version
         const results = await this.db.query(`SELECT * FROM semantic_memory
        ORDER BY importance DESC
        LIMIT $1`, [limit]);
@@ -75,8 +79,12 @@ export class MemoryStore {
     }
     /**
      * Get all reflection memories.
+     * @param limit - Maximum number of results
+     * @param sessionId - Optional session ID for session isolation (not applicable for reflection memories in PostgreSQL)
      */
-    async getReflection(limit = 5) {
+    async getReflection(limit = 5, sessionId) {
+        // PostgreSQL version: reflection memories are global (no session isolation by design)
+        // sessionId parameter kept for API compatibility with Qdrant version
         const results = await this.db.query(`SELECT * FROM reflection_memory
        ORDER BY importance DESC
        LIMIT $1`, [limit]);

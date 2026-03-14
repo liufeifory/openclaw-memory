@@ -23,12 +23,16 @@ export declare class MemoryStore {
     searchEpisodic(embedding: number[], topK?: number, threshold?: number, sessionId?: string): Promise<MemoryWithSimilarity[]>;
     /**
      * Get all semantic memories.
+     * @param limit - Maximum number of results
+     * @param sessionId - Optional session ID for session isolation (not applicable for semantic memories in PostgreSQL)
      */
-    getSemantic(limit?: number): Promise<SemanticMemory[]>;
+    getSemantic(limit?: number, sessionId?: string): Promise<SemanticMemory[]>;
     /**
      * Get all reflection memories.
+     * @param limit - Maximum number of results
+     * @param sessionId - Optional session ID for session isolation (not applicable for reflection memories in PostgreSQL)
      */
-    getReflection(limit?: number): Promise<ReflectionMemory[]>;
+    getReflection(limit?: number, sessionId?: string): Promise<ReflectionMemory[]>;
     /**
      * Add reflection memory.
      */

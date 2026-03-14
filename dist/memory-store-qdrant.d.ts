@@ -57,8 +57,11 @@ export declare class MemoryStore {
     /**
      * Store semantic memory with embedding.
      * Checks for near-duplicate content before storing.
+     * @param content - Memory content
+     * @param importance - Importance score (0-1)
+     * @param sessionId - Optional session ID for session isolation
      */
-    storeSemantic(content: string, importance?: number): Promise<number>;
+    storeSemantic(content: string, importance?: number, sessionId?: string): Promise<number>;
     /**
      * Check if content is a near-duplicate of existing memory.
      * Uses vector similarity with high threshold (0.95).
@@ -71,17 +74,24 @@ export declare class MemoryStore {
      */
     search(embedding: number[], topK?: number, threshold?: number, memoryType?: string, includeSuperseded?: boolean, sessionId?: string): Promise<MemoryWithSimilarity[]>;
     /**
-     * Get all semantic memories.
+     * Get semantic memories with optional session filtering.
+     * @param limit - Maximum number of results
+     * @param sessionId - Optional session ID for session isolation
      */
-    getSemantic(limit?: number): Promise<SemanticMemory[]>;
+    getSemantic(limit?: number, sessionId?: string): Promise<SemanticMemory[]>;
     /**
-     * Get all reflection memories.
+     * Get reflection memories with optional session filtering.
+     * @param limit - Maximum number of results
+     * @param sessionId - Optional session ID for session isolation
      */
-    getReflection(limit?: number): Promise<ReflectionMemory[]>;
+    getReflection(limit?: number, sessionId?: string): Promise<ReflectionMemory[]>;
     /**
      * Add reflection memory (in-memory only, also stored in Qdrant).
+     * @param summary - Reflection summary
+     * @param importance - Importance score (0-1)
+     * @param sessionId - Optional session ID for session isolation
      */
-    addReflection(summary: string, importance?: number): Promise<number>;
+    addReflection(summary: string, importance?: number, sessionId?: string): Promise<number>;
     /**
      * Increment access count for a memory (also updates Qdrant payload).
      */

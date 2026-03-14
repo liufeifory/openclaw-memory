@@ -415,17 +415,24 @@ export class MemoryManager {
     }
     /**
      * Store semantic memory asynchronously (non-blocking).
+     * @param content - Memory content
+     * @param importance - Importance score
+     * @param sessionId - Optional session ID for session isolation
      */
-    async storeSemantic(content, importance = 0.7) {
+    async storeSemantic(content, importance = 0.7, sessionId) {
         this.memoryStore.enqueueStorage(async () => {
-            await this.memoryStore.storeSemantic(content, importance);
+            await this.memoryStore.storeSemantic(content, importance, sessionId);
         });
     }
     /**
      * Store semantic memory with conflict detection.
      * Marks conflicting memories as superseded (not deleted).
+     * @param content - Memory content
+     * @param importance - Importance score
+     * @param similarityThreshold - Similarity threshold for conflict detection
+     * @param sessionId - Optional session ID for session isolation
      */
-    async storeSemanticWithConflictCheck(content, importance = 0.7, similarityThreshold = 0.85) {
+    async storeSemanticWithConflictCheck(content, importance = 0.7, similarityThreshold = 0.85, sessionId) {
         // Search for similar memories
         const embedding = await this.embedding.embed(content);
         const similar = await this.memoryStore.search(embedding, 5, similarityThreshold);
@@ -439,7 +446,7 @@ export class MemoryManager {
                 console.log(`[Memory] Conflict detected: "${content.substring(0, 50)}..." supersedes memory ${conflictResult.oldMemoryId}`);
                 // Still store the new memory, but mark the old one as superseded
                 this.memoryStore.enqueueStorage(async () => {
-                    await this.memoryStore.storeSemantic(content, importance);
+                    await this.memoryStore.storeSemantic(content, importance, sessionId);
                 });
                 return {
                     stored: true,
@@ -450,15 +457,18 @@ export class MemoryManager {
         }
         // No conflict, store normally
         this.memoryStore.enqueueStorage(async () => {
-            await this.memoryStore.storeSemantic(content, importance);
+            await this.memoryStore.storeSemantic(content, importance, sessionId);
         });
         return { stored: true, conflictDetected: false };
     }
     /**
      * Store reflection memory.
+     * @param summary - Reflection summary
+     * @param importance - Importance score
+     * @param sessionId - Optional session ID for session isolation
      */
-    async storeReflection(summary, importance = 0.9) {
-        return this.memoryStore.addReflection(summary, importance);
+    async storeReflection(summary, importance = 0.9, sessionId) {
+        return this.memoryStore.addReflection(summary, importance, sessionId);
     }
     /**
      * Get memory statistics.
