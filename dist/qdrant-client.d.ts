@@ -30,6 +30,10 @@ export declare class QdrantDatabase {
         reason?: string;
     }>;
     /**
+     * Build sparse vector from content for BM25.
+     */
+    private buildSparseVectorFromContent;
+    /**
      * Search using BM25 (keyword-based full-text search).
      */
     searchBM25(query: string, limit?: number, filter?: Record<string, any>): Promise<Array<{

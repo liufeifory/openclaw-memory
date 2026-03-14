@@ -162,18 +162,49 @@ export class QdrantDatabase {
       }
     }
 
+    // Build sparse vector for BM25 if content exists
+    const content = payload.content || payload.text || '';
+    const sparseVector = content ? this.buildSparseVectorFromContent(content) : null;
+
     return this.executeWithRetry(async () => {
+      const point: any = {
+        id: id,
+        vector: embedding,
+        payload: enhancedPayload,
+      };
+      // Add sparse vector for BM25
+      if (sparseVector) {
+        point.vectors = {
+          '': embedding,  // Dense vector
+          'bm25': sparseVector,  // Sparse vector for BM25
+        };
+        delete point.vector;  // Use vectors instead of vector
+      }
       await this.client.upsert(COLLECTION_NAME, {
-        points: [
-          {
-            id: id,
-            vector: embedding,
-            payload: enhancedPayload,
-          },
-        ],
+        points: [point],
       });
       return { success: true };
     }, 'upsert');
+  }
+
+  /**
+   * Build sparse vector from content for BM25.
+   */
+  private buildSparseVectorFromContent(content: string): { indices: number[]; values: number[] } {
+    const tokens = content.toLowerCase().split(/\s+/).filter(w => w.length > 1);
+    const termFreq = new Map<string, number>();
+    for (const token of tokens) {
+      termFreq.set(token, (termFreq.get(token) || 0) + 1);
+    }
+
+    const indices: number[] = [];
+    const values: number[] = [];
+    for (const [token, freq] of termFreq.entries()) {
+      indices.push(this.hashToken(token));
+      values.push(freq);
+    }
+
+    return { indices, values };
   }
 
   /**
@@ -532,9 +563,10 @@ export class QdrantDatabase {
   async indexExists(fieldName: string): Promise<boolean> {
     try {
       const info = await this.client.getCollection(COLLECTION_NAME);
-      // Access payload schema via index signature
+      // Access payload schema - Qdrant 1.17.0 returns it at root level of result
       const schemaInfo = info as any;
-      const indexes = schemaInfo.config?.payload_schema || {};
+      // Try both locations: result.payload_schema or result.config.payload_schema
+      const indexes = schemaInfo.payload_schema || schemaInfo.config?.payload_schema || {};
       return !!indexes[fieldName];
     } catch {
       return false;
