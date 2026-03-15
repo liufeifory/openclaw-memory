@@ -114,7 +114,7 @@ export class HybridRetriever {
       // Step 2: Extract entities from query
       const entities = await this.extractEntitiesFromQuery(query);
       const entityIds = await Promise.all(entities.map(e => this.getEntityIdByName(e.name)));
-      const validEntityIds = entityIds.filter(id => id !== 0);
+      const validEntityIds = entityIds.filter(id => id !== 0 && !isNaN(id));
 
       // Step 3: Graph traversal search (find memories via entities)
       let graphResults: MemoryResult[] = [];
@@ -386,7 +386,8 @@ export class HybridRetriever {
         const idField = data[0].id;
         if (typeof idField === 'string') {
           const parts = idField.split(':');
-          return parseInt(parts[parts.length - 1], 10);
+          const parsedId = parseInt(parts[parts.length - 1], 10);
+          return isNaN(parsedId) ? 0 : parsedId;
         } else if (typeof idField === 'number') {
           return idField;
         } else if (idField && typeof idField === 'object' && idField.id) {
@@ -410,7 +411,8 @@ export class HybridRetriever {
     }
     if (typeof id === 'string') {
       const parts = id.split(':');
-      return parseInt(parts[parts.length - 1], 10);
+      const parsedId = parseInt(parts[parts.length - 1], 10);
+      return isNaN(parsedId) ? 0 : parsedId;
     }
     if (id && typeof id === 'object' && id.id !== undefined) {
       return this.extractId(id.id);
