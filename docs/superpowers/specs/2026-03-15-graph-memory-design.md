@@ -70,6 +70,55 @@ SELECT ->mentions<-memory->mentions->entity AS related_topics FROM entity:python
 | **并发控制** | 限制模型提取任务并发数 = 1 | M4 运行 8B 模型时 GPU 满载，顺序处理比并发更快（L2 缓存命中率高） |
 | **向量索引** | 使用 MTREE 而非 HNSW | 内存占用更小，对高带宽内存友好，为 LLM 腾出运行空间 |
 
+### 1.4.1 16GB 内存分配策略
+
+**针对 16GB M4 设备的"势力范围"划分：**
+
+| 组件 | 内存占用 | 说明 |
+|------|----------|------|
+| LLM (Llama-3.1-8B Q4_K_M) | 5.5GB - 6GB | 实体提取主模型 |
+| macOS 系统与基础应用 | 3GB - 4GB | 系统预留 |
+| SurrealDB (RocksDB 缓存) | 2GB - 3GB | 数据库缓存 |
+| 剩余缓冲 | 3GB - 5GB | Node.js 运行时 + 系统动态调配（防止 Swap） |
+
+**配置建议：**
+```typescript
+// Ollama 配置
+const ollamaConfig = {
+  '3b-model': { keepAlive: -1 },  // 1B 模型永久驻留，用于极速分类
+  '8b-model': { keepAlive: 300 }, // 8B 模型 5 分钟后释放
+};
+
+// SurrealDB 内存限制
+const dbConfig = {
+  maxMemory: 4 * 1024 * 1024 * 1024, // 4GB 上限
+};
+```
+
+### 1.4.2 深度织网：实体 -> 实体关联
+
+**在 16GB 内存支撑下，RELATE 逻辑可以不只是"记忆->实体"，还可以增加"实体->实体"的权重计算：**
+
+**自动共现建边：** 如果两个实体（比如 `M4 芯片` 和 `统一内存`）频繁出现在同一个 memory_chunk 中，自动在它们之间建立 `related_to` 边。
+
+```sql
+-- 这种查询在 16GB 内存下跑起来飞快
+LET $from = (SELECT id FROM entity WHERE name = 'M4 芯片');
+LET $to = (SELECT id FROM entity WHERE name = '统一内存');
+-- 建立关联并累加权重，这能让记忆系统产生"逻辑联想"
+RELATE $from->related_to->$to SET weight += 1, last_seen = time::now();
+```
+
+**效果：** 系统能够从"Python 经常和 FastAPI 一起出现"推导出"Python → related_to → FastAPI"的关联。
+
+### 1.4.3 16GB M4 专项优化
+
+| 优化项 | 配置 | 效果 |
+|--------|------|------|
+| **RocksDB Block Cache** | 文件存储模式自动管理 | 更多索引留在内存，避免读取 SSD |
+| **KV 存储并行度** | 写入并发限制 = 4（性能核数量） | 占满性能核进行计算，能效核处理 UI 和 1B 模型 |
+| **MTREE 内存常驻** | 无需设置高磁盘交换频率 | 1536 维向量检索响应速度 5ms - 10ms |
+
 ### 1.5 系统定位
 
 **Stage 1: Entity-Indexed Vector RAG（本次实现）**
@@ -777,7 +826,68 @@ async processQueue() {
 
 **效果：** 用户感觉回复秒开，背后的"知识织网"在后台安静完成。
 
-#### 7.2.3 针对 M4 神经引擎的并发控制
+#### 7.2.2 16GB 内存配置调优
+
+**针对 16GB M4 设备的激进配置：**
+
+| 组件 | 配置 | 说明 |
+|------|------|------|
+| **LLM (Llama-3.1-8B)** | Q4_K_M 量化，占用 5.5-6GB | Keep-alive: 5m（5 分钟无任务后释放） |
+| **1B 小模型** | Keep-alive: -1（永久驻留） | 用于极速分类、过滤、搜索预处理 |
+| **SurrealDB** | 内存上限 4GB | RocksDB Block Cache 自动管理 |
+| **写入并发** | 限制为 4 | 占满 4 个性能核，能效核处理 UI |
+
+```typescript
+// Ollama 配置
+const ollamaConfig = {
+  '8b-model': {
+    keepAlive: 300,  // 5 分钟
+    quantization: 'Q4_K_M',
+  },
+  '1b-model': {
+    keepAlive: -1,   // 永久驻留
+  },
+};
+
+// SurrealDB 配置
+const dbConfig = {
+  maxMemory: 4 * 1024 * 1024 * 1024,  // 4GB
+  engine: 'rocksdb',
+  max_connections: 5,
+};
+
+// RELATE 写入并发（4 个性能核）
+const BATCH_SIZE = 50;
+const WRITE_CONCURRENCY = 4;
+```
+
+#### 7.2.3 深度织网：实体共现关联
+
+**在 16GB 内存支撑下，RELATE 逻辑可以不只是"记忆→实体"，还可以增加"实体→实体"的自动共现建边：**
+
+```typescript
+async function buildEntityCooccurrence(memoryId: number, entities: Entity[]) {
+  // 遍历实体对，建立共现关系
+  for (let i = 0; i < entities.length; i++) {
+    for (let j = i + 1; j < entities.length; j++) {
+      const entA = entities[i];
+      const entB = entities[j];
+
+      // 在 SurrealDB 中累加权重
+      await db.query(`
+        LET $from = (SELECT id FROM entity WHERE name = $nameA);
+        LET $to = (SELECT id FROM entity WHERE name = $nameB);
+        RELATE $from->related_to->$to
+          SET weight += 1, last_seen = time::now();
+      `, { nameA: entA.name, nameB: entB.name });
+    }
+  }
+}
+```
+
+**效果：** 系统能够从"Python 经常和 FastAPI 一起出现"推导出 `Python → related_to → FastAPI` 的关联，让记忆系统产生"逻辑联想"能力。
+
+#### 7.2.4 针对 M4 神经引擎的并发控制
 
 **策略：** 限制模型提取任务的并发数为 1
 
@@ -811,7 +921,7 @@ class EntityExtractor {
 }
 ```
 
-#### 7.2.4 向量索引优化 (MTREE)
+#### 7.2.5 向量索引优化 (MTREE)
 
 **策略：** 使用 SurrealDB 的 MTREE 索引而不是传统的 HNSW
 
