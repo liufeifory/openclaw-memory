@@ -1,7 +1,7 @@
 # 图数据记忆网络设计文档
 
 **日期:** 2026-03-15
-**版本:** 1.0
+**版本:** 2.0
 **状态:** 待审核
 
 ---
@@ -21,6 +21,34 @@
 - 实体不宜过细，倾向于"能跨文档关联"的关键词
 - 保证检索的确定性（实体匹配）和联想性（图路径遍历）
 - 异步处理，不阻塞主存储流程
+
+### 1.3 系统定位与演进路线
+
+**当前定位：Entity-Indexed Vector RAG (GraphRAG Stage 1)**
+
+| 能力 | Stage 1 | Stage 2 | Stage 3 |
+|------|---------|---------|---------|
+| 实体精准召回 | ✔ | ✔ | ✔ |
+| 实体跨文档关联 | ✔ | ✔ | ✔ |
+| 知识推理 (Entity→Entity) | ❌ | ✔ | ✔ |
+| 知识扩展 (图遍历) | ❌ | ✔ | ✔ |
+| Topic 抽象层 | ❌ | ❌ | ✔ |
+
+**演进路线:**
+
+```
+Stage 0: Vector RAG (现有系统)
+  └─ memory + vector search + reranker
+
+Stage 1: Entity Index (本次实现)
+  └─ entity + memory_entity + hybrid retrieval
+
+Stage 2: Graph Layer (后续)
+  └─ entity_relation + entity_alias + co-occurrence mining
+
+Stage 3: Topic Layer (长期)
+  └─ topic cluster + scalable graph
+```
 
 ---
 
@@ -133,7 +161,7 @@ Reranker 重排序
 ### 4.1 实体表 (entity) - 扩展现有
 
 **注意:** 现有代码中 `entity` 表 (`src/surrealdb-client.ts:132-136`) 只有基础字段。
-本设计需要扩展该表，添加 `description`、`mention_count`、`last_mentioned_at` 字段。
+本设计需要扩展该表，添加 `description`、`mention_count`、`memory_count`、`embedding` 等字段。
 迁移策略见第 10 节。
 
 ```sql
@@ -147,13 +175,35 @@ DEFINE FIELD entity_type ON TABLE entity TYPE string;  -- TECH, CONCEPT, PROJECT
 -- 扩展字段（需要迁移添加）
 DEFINE FIELD description ON TABLE entity TYPE option<string>;  -- 实体描述/定义
 DEFINE FIELD mention_count ON TABLE entity TYPE int DEFAULT 0;  -- 被提及次数
+DEFINE FIELD memory_count ON TABLE entity TYPE int DEFAULT 0;  -- 关联的记忆数量（用于重要性排序）
 DEFINE FIELD last_mentioned_at ON TABLE entity TYPE option<datetime>;  -- 最后提及时间
+DEFINE FIELD embedding ON TABLE entity TYPE option<array<number>>;  -- 实体向量表示（用于语义检索）
 
 -- 索引
 DEFINE INDEX idx_entity_name ON TABLE entity FIELDS name;
 DEFINE INDEX idx_entity_type ON TABLE entity FIELDS entity_type;
 DEFINE INDEX idx_entity_normalized ON TABLE entity FIELDS normalized_name;
+DEFINE INDEX idx_entity_memory_count ON TABLE entity FIELDS memory_count;  -- 支持按重要性排序
+DEFINE INDEX idx_entity_vector ON TABLE entity FIELDS embedding HNSW DIMENSION 1024 DISTANCE COSINE;  -- 向量检索
 ```
+
+**实体停用表 (entity_stoplist):**
+
+为防止低价值实体污染索引，使用停用表过滤：
+
+```json
+// entity_stoplist.json
+{
+  "generic_terms": ["system", "method", "example", "function", "代码", "功能", "模块"],
+  "threshold_confidence": 0.6,
+  "threshold_memory_count": 1
+}
+```
+
+提取实体时过滤规则：
+1. 匹配 stoplist 的术语直接过滤
+2. confidence < 0.6 的实体过滤
+3. memory_count = 0 且 mention_count < 2 的实体标记为候选（不用于检索）
 
 ### 4.3 实体类型常量
 
@@ -185,6 +235,9 @@ DEFINE FIELD entity_id ON TABLE memory_entity TYPE int;
 -- 相关性评分
 DEFINE FIELD relevance_score ON TABLE memory_entity TYPE float;  -- 0.0-1.0，实体与记忆的相关性
 
+-- 位置信息（可选，Stage 1 预留）
+DEFINE FIELD position ON TABLE memory_entity TYPE option<string>;  -- title | body | tag
+
 -- 审计字段
 DEFINE FIELD created_at ON TABLE memory_entity TYPE datetime;
 
@@ -193,6 +246,21 @@ DEFINE INDEX idx_memory_entity_memory ON TABLE memory_entity FIELDS memory_id;
 DEFINE INDEX idx_memory_entity_entity ON TABLE memory_entity FIELDS entity_id;
 DEFINE INDEX idx_memory_entity_composite ON TABLE memory_entity FIELDS memory_id, entity_id;
 DEFINE INDEX idx_memory_entity_score ON TABLE memory_entity FIELDS entity_id, relevance_score;  -- 支持按相关性排序查询
+```
+
+**实体检索 TopK 限制:**
+
+为防止高关联实体（如 "Python"）导致候选集爆炸，检索时限制单个实体返回的记忆数量：
+
+```typescript
+// 单个实体最多返回 20 条记忆
+const ENTITY_MEMORY_LIMIT = 20;
+
+SELECT memory_id, relevance_score
+FROM memory_entity
+WHERE entity_id = $entity_id
+ORDER BY relevance_score DESC
+LIMIT $ENTITY_MEMORY_LIMIT;
 ```
 
 ### 4.3 实体 - 实体关系表 (entity_relation) - 预留（第二阶段）
@@ -225,7 +293,22 @@ DEFINE INDEX idx_entity_relation_to ON TABLE entity_relation FIELDS to_entity_id
 **职责:**
 - 从文本中提取五类实体
 - 使用 LLM 进行语义提取（非纯 regex）
+- 两阶段提取：regex pre-filter → LLM refine
 - 返回结构化的实体列表
+
+**两阶段提取流程:**
+
+```
+文本输入
+   ↓
+regex / keyword pre-filter
+   ↓
+候选实体列表
+   ↓
+LLM refine (验证 + 分类)
+   ↓
+最终实体列表 (带 confidence)
+```
 
 **接口:**
 ```typescript
@@ -237,10 +320,16 @@ interface ExtractedEntity {
 }
 
 class EntityExtractor {
-  constructor(llmEndpoint: string, limiter: LLMLimiter);
+  constructor(
+    llmEndpoint: string,
+    limiter: LLMLimiter,
+    stoplist: string[]  // 停用实体列表
+  );
 
   /**
-   * 从文本中提取实体
+   * 两阶段实体提取
+   * 1. regex pre-filter 提取候选
+   * 2. LLM refine 验证和分类
    */
   extract(text: string): Promise<ExtractedEntity[]>;
 
@@ -248,6 +337,11 @@ class EntityExtractor {
    * 批量提取（优化 LLM 调用）
    */
   extractBatch(texts: string[]): Promise<Map<number, ExtractedEntity[]>>;
+
+  /**
+   * 从候选实体中过滤停用词
+   */
+  private filterStopwords(entities: ExtractedEntity[]): ExtractedEntity[];
 }
 ```
 
@@ -668,10 +762,68 @@ async initialize(): Promise<MigrationResult> {
 
 ### 10.2 第二阶段（后续可选）
 
-1. 创建 entity_relation 表
-2. 实现基于共现频率的自动关系发现
-3. 实现图遍历查询（最短路径、邻居扩展）
-4. 支持显式关系查询接口
+**Schema 迁移:**
+
+1. **创建 entity_alias 表** - 处理同义词
+   ```sql
+   DEFINE TABLE entity_alias SCHEMAFULL;
+   DEFINE FIELD alias ON TABLE entity_alias TYPE string;
+   DEFINE FIELD entity_id ON TABLE entity_alias TYPE int;
+   DEFINE FIELD verified ON TABLE entity_alias TYPE bool DEFAULT false;  -- 是否经过人工确认
+   DEFINE INDEX idx_entity_alias ON TABLE entity_alias FIELDS alias;
+   ```
+
+2. **创建 entity_relation 表** - 共现关系
+   ```sql
+   DEFINE TABLE entity_relation SCHEMAFULL;
+   DEFINE FIELD from_entity_id ON TABLE entity_relation TYPE int;
+   DEFINE FIELD to_entity_id ON TABLE entity_relation TYPE int;
+   DEFINE FIELD relation_type ON TABLE entity_relation TYPE string;  -- related-to, used-for, is-a
+   DEFINE FIELD weight ON TABLE entity_relation TYPE float;  -- 共现权重
+   DEFINE FIELD evidence_memory_ids ON TABLE entity_relation TYPE array<int>;
+   DEFINE FIELD llm_verified ON TABLE entity_relation TYPE bool DEFAULT false;  -- LLM 验证关系类型
+   ```
+
+3. **创建 topic 表** - Topic 抽象层
+   ```sql
+   DEFINE TABLE topic SCHEMAFULL;
+   DEFINE FIELD name ON TABLE topic TYPE string;
+   DEFINE FIELD parent_entity_id ON TABLE topic TYPE option<int>;
+   DEFINE FIELD description ON TABLE topic TYPE option<string>;
+   ```
+
+**关系挖掘流程:**
+
+```
+memory_entity 共现统计
+   ↓
+候选关系 (weight > threshold)
+   ↓
+LLM 关系分类 (relation_type)
+   ↓
+写入 entity_relation
+```
+
+### 10.3 第三阶段（长期优化）
+
+**Topic Layer 实现:**
+
+```
+Entity
+   ↓ (1:N)
+Topic
+   ↓ (1:N)
+Memory
+```
+
+检索流程增加 Topic Recall:
+```
+Query
+ ├ Vector Recall
+ ├ Entity Recall
+ ├ Graph Expansion (Entity → Entity → Memory)
+ └ Topic Recall (Entity → Topic → Memory)
+```
 
 ---
 
