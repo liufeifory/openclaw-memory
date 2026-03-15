@@ -222,6 +222,7 @@ export class MemoryStore {
         const embedding = await this.embedding.embed(summary);
         const payload = {
             type: MemoryType.REFLECTION,
+            content: summary, // Store summary in content field for consistency
             summary: summary,
             importance: importance,
             access_count: 0,
