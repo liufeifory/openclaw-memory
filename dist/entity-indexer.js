@@ -1,0 +1,437 @@
+/**
+ * Entity Indexer - Graph Explosion Protection
+ *
+ * Features:
+ * 1. Entity Frequency Filtering - MIN_MENTION_COUNT = 3
+ * 2. Super Node Freezing - MAX_MEMORY_LINKS = 500
+ * 3. TTL Pruning - TTL_DAYS = 90, PRUNE_INTERVAL_DAYS = 7
+ * 4. Write Backpressure - Dynamic index interval (5-60 seconds)
+ * 5. Alias Merging - Detect and merge aliases to canonical names
+ *
+ * Uses GRAPH_PROTECTION constants from surrealdb-client.ts
+ */
+import { GRAPH_PROTECTION } from './surrealdb-client.js';
+import { EntityExtractor } from './entity-extractor.js';
+/**
+ * Entity Indexer with graph explosion protection
+ */
+export class EntityIndexer {
+    queue = [];
+    processing = false;
+    totalIndexed = 0;
+    totalFrozen = 0;
+    totalPruned = 0;
+    totalMerged = 0;
+    // Entity mention tracking for frequency filtering
+    entityMentions = new Map();
+    // Alias pairs for merging
+    aliasPairs = [];
+    // Backpressure control
+    currentIndexIntervalMs = 5000; // Base: 5 seconds
+    minIntervalMs = 5000; // 5 seconds
+    maxIntervalMs = 60000; // 60 seconds
+    pressureThreshold = 100; // Queue size threshold for pressure
+    // TTL configuration
+    ttlDays = GRAPH_PROTECTION.TTL_DAYS;
+    pruneIntervalDays = GRAPH_PROTECTION.PRUNE_INTERVAL_DAYS;
+    // Database client (lazy initialized)
+    db = null;
+    // Entity extractor for processing queue items
+    extractor;
+    constructor(db) {
+        this.db = db || null;
+        this.extractor = new EntityExtractor();
+        // Start background queue processor
+        this.startBackgroundProcessor();
+        // Start TTL pruning scheduler
+        this.startTTLPruningScheduler();
+    }
+    /**
+     * Set database client
+     */
+    setDatabase(db) {
+        this.db = db;
+    }
+    /**
+     * Add an alias pair for merging
+     */
+    addAliasPair(alias, canonical) {
+        this.aliasPairs.push({ alias, canonical });
+    }
+    /**
+     * 1. queueForIndexing - Add memory to indexing queue
+     */
+    queueForIndexing(memoryId, content) {
+        const queueItem = {
+            memoryId,
+            content,
+            addedAt: Date.now(),
+            retryCount: 0,
+        };
+        this.queue.push(queueItem);
+        // Extract entities and track mentions for frequency filtering
+        this.trackEntityMentions(memoryId, content);
+        console.log(`[EntityIndexer] Queued memory ${memoryId} for indexing (queue size: ${this.queue.length})`);
+    }
+    /**
+     * Track entity mentions for frequency filtering
+     */
+    trackEntityMentions(memoryId, content) {
+        // Use regex extraction for quick mention tracking (no LLM)
+        const entities = this.extractor.layer1_RegexMatch(content);
+        for (const entity of entities) {
+            const entityId = entity.name.toLowerCase();
+            if (!this.entityMentions.has(entityId)) {
+                this.entityMentions.set(entityId, []);
+            }
+            const mentions = this.entityMentions.get(entityId);
+            mentions.push({
+                entityId,
+                memoryId,
+                timestamp: Date.now(),
+            });
+            // Keep only recent mentions (last 24 hours) to prevent memory bloat
+            const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+            const recentMentions = mentions.filter(m => m.timestamp > oneDayAgo);
+            this.entityMentions.set(entityId, recentMentions);
+        }
+    }
+    /**
+     * 2. checkEntityFrequency - Check if entity meets minimum mention count
+     * Returns the current mention count for the entity
+     */
+    async checkEntityFrequency(entityId) {
+        const mentions = this.entityMentions.get(entityId.toLowerCase());
+        if (!mentions) {
+            return 0;
+        }
+        return mentions.length;
+    }
+    /**
+     * 3. checkSuperNode - Check if entity should be frozen (Super Node protection)
+     * Returns true if entity should be frozen
+     */
+    async checkSuperNode(entityId) {
+        if (!this.db) {
+            // Without DB, use mention count as proxy
+            const mentionCount = await this.checkEntityFrequency(entityId);
+            // If mentions exceed threshold, consider it a potential super node
+            return mentionCount >= GRAPH_PROTECTION.MAX_MEMORY_LINKS;
+        }
+        try {
+            // Query entity's current link count from database
+            const entityRecordId = `entity:${entityId}`;
+            const result = await this.db.query(`SELECT relation_count FROM ${entityRecordId}`);
+            let data = [];
+            if (Array.isArray(result) && result.length > 0) {
+                if (Array.isArray(result[0])) {
+                    data = result[0] || [];
+                }
+                else if (result[0]?.result) {
+                    data = result[0].result || [];
+                }
+            }
+            if (data && data.length > 0) {
+                const relationCount = data[0].relation_count || 0;
+                return relationCount >= GRAPH_PROTECTION.MAX_MEMORY_LINKS;
+            }
+            return false;
+        }
+        catch (error) {
+            console.error(`[EntityIndexer] checkSuperNode failed for ${entityId}:`, error.message);
+            return false;
+        }
+    }
+    /**
+     * 4. runTTLPruning - Prune entities not accessed in TTL_DAYS
+     * Returns number of entities pruned
+     */
+    async runTTLPruning() {
+        if (!this.db) {
+            console.log('[EntityIndexer] TTL Pruning skipped: no database connection');
+            return 0;
+        }
+        try {
+            const ttlDate = new Date();
+            ttlDate.setDate(ttlDate.getDate() - this.ttlDays);
+            const ttlISOString = ttlDate.toISOString();
+            // Find entities not accessed since TTL date
+            const sql = `UPDATE entity SET is_active = false WHERE last_accessed < '${ttlISOString}' AND is_active = true`;
+            const result = await this.db.query(sql);
+            // Count affected entities (approximation)
+            let prunedCount = 0;
+            if (Array.isArray(result) && result.length > 0) {
+                if (Array.isArray(result[0])) {
+                    prunedCount = result[0].length;
+                }
+                else if (result[0]?.result) {
+                    prunedCount = result[0].result?.length || 0;
+                }
+            }
+            this.totalPruned += prunedCount;
+            console.log(`[EntityIndexer] TTL Pruning: pruned ${prunedCount} entities older than ${this.ttlDays} days`);
+            return prunedCount;
+        }
+        catch (error) {
+            console.error('[EntityIndexer] TTL Pruning failed:', error.message);
+            return 0;
+        }
+    }
+    /**
+     * 5. runAliasMerge - Merge alias entities to canonical names
+     * Returns number of aliases merged
+     */
+    async runAliasMerge() {
+        if (!this.db || this.aliasPairs.length === 0) {
+            console.log('[EntityIndexer] Alias Merge skipped: no database or alias pairs');
+            return 0;
+        }
+        let mergedCount = 0;
+        try {
+            for (const { alias, canonical } of this.aliasPairs) {
+                // Find alias entity
+                const aliasResult = await this.db.query(`SELECT * FROM entity WHERE name = '${alias}' LIMIT 1`);
+                let aliasData = [];
+                if (Array.isArray(aliasResult) && aliasResult.length > 0) {
+                    if (Array.isArray(aliasResult[0])) {
+                        aliasData = aliasResult[0] || [];
+                    }
+                    else if (aliasResult[0]?.result) {
+                        aliasData = aliasResult[0].result || [];
+                    }
+                }
+                if (aliasData.length === 0) {
+                    continue; // Alias entity not found
+                }
+                const aliasEntity = aliasData[0];
+                const aliasId = this.extractId(aliasEntity.id);
+                // Find or create canonical entity
+                const canonicalResult = await this.db.query(`SELECT * FROM entity WHERE name = '${canonical}' LIMIT 1`);
+                let canonicalData = [];
+                if (Array.isArray(canonicalResult) && canonicalResult.length > 0) {
+                    if (Array.isArray(canonicalResult[0])) {
+                        canonicalData = canonicalResult[0] || [];
+                    }
+                    else if (canonicalResult[0]?.result) {
+                        canonicalData = canonicalResult[0].result || [];
+                    }
+                }
+                let canonicalId;
+                if (canonicalData.length > 0) {
+                    canonicalId = this.extractId(canonicalData[0].id);
+                }
+                else {
+                    // Create canonical entity
+                    canonicalId = await this.db.upsertEntity(canonical, 'merged');
+                }
+                // Transfer links from alias to canonical
+                await this.transferEntityLinks(aliasId, canonicalId);
+                // Delete alias entity
+                await this.db.query(`DELETE entity:${aliasId}`);
+                mergedCount++;
+                this.totalMerged += mergedCount;
+                console.log(`[EntityIndexer] Merged alias "${alias}" -> "${canonical}"`);
+            }
+            return mergedCount;
+        }
+        catch (error) {
+            console.error('[EntityIndexer] Alias Merge failed:', error.message);
+            return 0;
+        }
+    }
+    /**
+     * Transfer links from one entity to another
+     */
+    async transferEntityLinks(fromEntityId, toEntityId) {
+        if (!this.db)
+            return;
+        try {
+            // Update memory_entity edges to point to new entity
+            const sql = `UPDATE memory_entity SET entity = entity:${toEntityId} WHERE entity = entity:${fromEntityId}`;
+            await this.db.query(sql);
+        }
+        catch (error) {
+            console.error('[EntityIndexer] transferEntityLinks failed:', error.message);
+        }
+    }
+    /**
+     * Simulate high pressure for testing backpressure
+     */
+    simulateHighPressure() {
+        // Artificially increase queue size to trigger backpressure
+        for (let i = 0; i < this.pressureThreshold + 10; i++) {
+            this.queue.push({
+                memoryId: i,
+                content: `Test content ${i}`,
+                addedAt: Date.now(),
+                retryCount: 0,
+            });
+        }
+        this.adjustBackpressure();
+    }
+    /**
+     * Get current index interval
+     */
+    getCurrentIndexInterval() {
+        return this.currentIndexIntervalMs;
+    }
+    /**
+     * Adjust backpressure based on queue size
+     */
+    adjustBackpressure() {
+        const queueSize = this.queue.length;
+        if (queueSize > this.pressureThreshold * 2) {
+            // High pressure: max interval
+            this.currentIndexIntervalMs = this.maxIntervalMs;
+        }
+        else if (queueSize > this.pressureThreshold) {
+            // Medium pressure: scale interval
+            const ratio = (queueSize - this.pressureThreshold) / this.pressureThreshold;
+            this.currentIndexIntervalMs = Math.min(this.maxIntervalMs, this.minIntervalMs + (this.maxIntervalMs - this.minIntervalMs) * ratio);
+        }
+        else {
+            // Low pressure: min interval
+            this.currentIndexIntervalMs = this.minIntervalMs;
+        }
+        console.log(`[EntityIndexer] Backpressure adjusted interval to ${this.currentIndexIntervalMs}ms (queue: ${queueSize})`);
+    }
+    /**
+     * 6. processQueue - Process indexing queue in background
+     */
+    async processQueue() {
+        if (this.processing || this.queue.length === 0) {
+            return;
+        }
+        this.processing = true;
+        try {
+            while (this.queue.length > 0) {
+                const item = this.queue.shift();
+                try {
+                    await this.processItem(item);
+                    this.totalIndexed++;
+                }
+                catch (error) {
+                    console.error(`[EntityIndexer] Failed to process item ${item.memoryId}:`, error.message);
+                    // Retry logic
+                    if (item.retryCount < 3) {
+                        item.retryCount++;
+                        this.queue.push(item);
+                    }
+                }
+                // Apply backpressure delay
+                await this.sleep(this.currentIndexIntervalMs);
+            }
+        }
+        finally {
+            this.processing = false;
+            this.adjustBackpressure();
+        }
+    }
+    /**
+     * Process a single queue item
+     */
+    async processItem(item) {
+        if (!this.db) {
+            throw new Error('Database not connected');
+        }
+        // Extract entities from content
+        const entities = await this.extractor.extract(item.content);
+        if (entities.length === 0) {
+            return; // No entities to index
+        }
+        for (const entity of entities) {
+            // Check entity frequency
+            const frequency = await this.checkEntityFrequency(entity.name);
+            if (frequency < GRAPH_PROTECTION.MIN_MENTION_COUNT) {
+                console.log(`[EntityIndexer] Skipping "${entity.name}": frequency ${frequency} < ${GRAPH_PROTECTION.MIN_MENTION_COUNT}`);
+                continue;
+            }
+            // Check if entity is a super node
+            const isSuperNode = await this.checkSuperNode(entity.name);
+            if (isSuperNode) {
+                console.log(`[EntityIndexer] Skipping "${entity.name}": entity is frozen (super node)`);
+                this.totalFrozen++;
+                continue;
+            }
+            // Upsert entity and create link
+            const entityId = await this.db.upsertEntity(entity.name, entity.source || 'unknown');
+            await this.db.linkMemoryEntity(item.memoryId, entityId, entity.confidence);
+            console.log(`[EntityIndexer] Indexed entity "${entity.name}" (${entityId}) for memory ${item.memoryId}`);
+        }
+        // Mark memory as indexed
+        await this.db.query(`UPDATE memory:${item.memoryId} SET is_indexed = true`);
+    }
+    /**
+     * Start background queue processor
+     */
+    startBackgroundProcessor() {
+        setInterval(async () => {
+            if (!this.processing && this.queue.length > 0) {
+                this.processQueue().catch(console.error);
+            }
+        }, this.currentIndexIntervalMs);
+    }
+    /**
+     * Start TTL pruning scheduler (runs every PRUNE_INTERVAL_DAYS)
+     */
+    startTTLPruningScheduler() {
+        const pruneIntervalMs = this.pruneIntervalDays * 24 * 60 * 60 * 1000;
+        setInterval(async () => {
+            await this.runTTLPruning().catch(console.error);
+        }, pruneIntervalMs);
+        console.log(`[EntityIndexer] TTL Pruning scheduled every ${this.pruneIntervalDays} days`);
+    }
+    /**
+     * Get indexer statistics
+     */
+    getStats() {
+        return {
+            queueSize: this.queue.length,
+            totalIndexed: this.totalIndexed,
+            totalFrozen: this.totalFrozen,
+            totalPruned: this.totalPruned,
+            totalMerged: this.totalMerged,
+            currentIntervalMs: this.currentIndexIntervalMs,
+        };
+    }
+    /**
+     * Clear the indexing queue
+     */
+    clearQueue() {
+        this.queue = [];
+        console.log('[EntityIndexer] Queue cleared');
+    }
+    /**
+     * Reset statistics
+     */
+    resetStats() {
+        this.totalIndexed = 0;
+        this.totalFrozen = 0;
+        this.totalPruned = 0;
+        this.totalMerged = 0;
+        console.log('[EntityIndexer] Stats reset');
+    }
+    /**
+     * Utility: sleep for milliseconds
+     */
+    sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+    /**
+     * Utility: extract numeric ID from various ID formats
+     */
+    extractId(id) {
+        if (typeof id === 'number') {
+            return id;
+        }
+        if (typeof id === 'string') {
+            const parts = id.split(':');
+            return parseInt(parts[parts.length - 1], 10);
+        }
+        if (id && typeof id === 'object' && id.id !== undefined) {
+            return this.extractId(id.id);
+        }
+        return 0;
+    }
+}
+//# sourceMappingURL=entity-indexer.js.map

@@ -37,6 +37,8 @@ export declare class MemoryManager {
     private importanceLearning;
     private clusterer;
     private summarizer;
+    private hybridRetriever;
+    private entityIndexer;
     private idleClusteringInterval?;
     private activeSessions;
     private sessionBuffers;
@@ -76,7 +78,8 @@ export declare class MemoryManager {
      */
     private runImportanceDecay;
     /**
-     * Retrieve memories relevant to a query.
+     * Retrieve memories relevant to a query using HybridRetriever.
+     * Combines vector search + graph traversal + reranking.
      */
     retrieveRelevant(query: string, sessionId: string | undefined, topK?: number, threshold?: number, enableFunnelStats?: boolean): Promise<MemoryWithSimilarity[]>;
     /**
