@@ -3,6 +3,7 @@
  */
 import { SurrealDatabase } from './surrealdb-client.js';
 import { EmbeddingService } from './embedding.js';
+import { EntityIndexer } from './entity-indexer.js';
 export interface Memory {
     id: number;
     content: string;
@@ -38,11 +39,16 @@ export interface DedupeCheckResult {
 export declare class MemoryStore {
     private db;
     private embedding;
+    private entityIndexer;
     private episodicMemories;
     private semanticMemories;
     private reflectionMemories;
     private idCounter;
     constructor(db: SurrealDatabase, embedding: EmbeddingService);
+    /**
+     * Set entity indexer for graph indexing.
+     */
+    setEntityIndexer(indexer: EntityIndexer): void;
     /**
      * Store episodic memory with embedding.
      * Checks for near-duplicate content within the same session.

@@ -78,6 +78,11 @@ export declare class MemoryManager {
      */
     private runImportanceDecay;
     /**
+     * Run TTL pruning - remove entities not accessed in TTL_DAYS.
+     * Called weekly during idle maintenance.
+     */
+    private runTtlPruning;
+    /**
      * Retrieve memories relevant to a query using HybridRetriever.
      * Combines vector search + graph traversal + reranking.
      */

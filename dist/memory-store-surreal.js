@@ -28,6 +28,7 @@ function cleanPayload(payload) {
 export class MemoryStore {
     db;
     embedding;
+    entityIndexer = null;
     // In-memory stores for non-vector data
     episodicMemories = new Map();
     semanticMemories = new Map();
@@ -36,6 +37,13 @@ export class MemoryStore {
     constructor(db, embedding) {
         this.db = db;
         this.embedding = embedding;
+    }
+    /**
+     * Set entity indexer for graph indexing.
+     */
+    setEntityIndexer(indexer) {
+        this.entityIndexer = indexer;
+        console.log('[MemoryStore] EntityIndexer set');
     }
     /**
      * Store episodic memory with embedding.
@@ -67,6 +75,10 @@ export class MemoryStore {
             access_count: 0,
             created_at: new Date(),
         });
+        // Add to entity indexing queue
+        if (this.entityIndexer) {
+            this.entityIndexer.queueForIndexing(memoryId, content);
+        }
         return memoryId;
     }
     /**
@@ -118,6 +130,10 @@ export class MemoryStore {
             access_count: 0,
             created_at: new Date(),
         });
+        // Add to entity indexing queue
+        if (this.entityIndexer) {
+            this.entityIndexer.queueForIndexing(memoryId, content);
+        }
         return memoryId;
     }
     /**
