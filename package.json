@@ -16,6 +16,7 @@
     "test:graph": "node dist/test-graph-operations.js",
     "profile": "node dist/profile.js",
     "test:v27": "node dist/test-v27.js",
+    "test:entity-extractor": "node dist/test-entity-extractor.js",
     "clean": "rm -rf dist/"
   },
   "dependencies": {
