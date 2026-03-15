@@ -4,6 +4,7 @@
 
 import { SurrealDatabase, MemoryType } from './surrealdb-client.js';
 import { EmbeddingService } from './embedding.js';
+import { EntityIndexer } from './entity-indexer.js';
 
 export interface Memory {
   id: number;
@@ -71,6 +72,7 @@ function cleanPayload(payload: Record<string, any>): Record<string, any> {
 export class MemoryStore {
   private db: SurrealDatabase;
   private embedding: EmbeddingService;
+  private entityIndexer: EntityIndexer | null = null;
 
   // In-memory stores for non-vector data
   private episodicMemories = new Map<number, EpisodicMemory>();
@@ -81,6 +83,14 @@ export class MemoryStore {
   constructor(db: SurrealDatabase, embedding: EmbeddingService) {
     this.db = db;
     this.embedding = embedding;
+  }
+
+  /**
+   * Set entity indexer for graph indexing.
+   */
+  setEntityIndexer(indexer: EntityIndexer): void {
+    this.entityIndexer = indexer;
+    console.log('[MemoryStore] EntityIndexer set');
   }
 
   /**
@@ -118,6 +128,11 @@ export class MemoryStore {
       access_count: 0,
       created_at: new Date(),
     });
+
+    // Add to entity indexing queue
+    if (this.entityIndexer) {
+      this.entityIndexer.queueForIndexing(memoryId, content);
+    }
 
     return memoryId;
   }
@@ -179,6 +194,11 @@ export class MemoryStore {
       access_count: 0,
       created_at: new Date(),
     });
+
+    // Add to entity indexing queue
+    if (this.entityIndexer) {
+      this.entityIndexer.queueForIndexing(memoryId, content);
+    }
 
     return memoryId;
   }

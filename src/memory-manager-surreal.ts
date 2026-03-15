@@ -62,6 +62,7 @@ export class MemoryManager {
     lastClustering: 0,
     lastDecay: 0,
     lastSummarization: 0,
+    lastTtlPruning: 0,
   };
 
   constructor(config: MemoryManagerConfig) {
@@ -82,6 +83,9 @@ export class MemoryManager {
     // Initialize EntityIndexer and HybridRetriever
     this.entityIndexer = new EntityIndexer(this.db);
     this.hybridRetriever = new HybridRetriever(this.db, this.embedding, this.entityIndexer, this.reranker);
+
+    // Set EntityIndexer on MemoryStore for storage integration
+    this.memoryStore.setEntityIndexer(this.entityIndexer);
   }
 
   /**
@@ -122,6 +126,18 @@ export class MemoryManager {
         if (now - this.maintenanceHistory.lastDecay > 600000) {
           await this.runImportanceDecay();
           this.maintenanceHistory.lastDecay = now;
+        }
+
+        // Process entity indexing queue every 2 minutes (handled by EntityIndexer background processor)
+        // Log indexer stats for monitoring
+        const indexerStats = this.entityIndexer.getStats();
+        console.log(`[MemoryManager] EntityIndexer stats: queue=${indexerStats.queueSize}, indexed=${indexerStats.totalIndexed}, frozen=${indexerStats.totalFrozen}, pruned=${indexerStats.totalPruned}`);
+
+        // Run TTL pruning every 7 days
+        const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+        if (now - this.maintenanceHistory.lastTtlPruning > sevenDaysMs) {
+          await this.runTtlPruning();
+          this.maintenanceHistory.lastTtlPruning = now;
         }
 
       } catch (error: any) {
@@ -263,6 +279,16 @@ export class MemoryManager {
     }
 
     console.log(`[MemoryManager] Decay applied: ${updatedCount}/${allMemories.length} memories updated`);
+  }
+
+  /**
+   * Run TTL pruning - remove entities not accessed in TTL_DAYS.
+   * Called weekly during idle maintenance.
+   */
+  private async runTtlPruning(): Promise<void> {
+    console.log('[MemoryManager] Running TTL pruning...');
+    const prunedCount = await this.entityIndexer.runTTLPruning();
+    console.log(`[MemoryManager] TTL pruning completed: ${prunedCount} entities pruned`);
   }
 
   /**
