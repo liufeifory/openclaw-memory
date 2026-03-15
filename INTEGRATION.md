@@ -1,339 +1,483 @@
-# OpenClaw PostgreSQL 记忆系统集成指南
+# OpenClaw Memory Plugin - 集成指南
 
-## 概述
-
-OpenClaw 默认使用**基于文件的记忆系统** (`MEMORY.md` 和 `memory/YYYY-MM-DD.md`)。
-
-本指南说明如何用 **PostgreSQL + pgvector 记忆系统** 替换默认文件记忆。
-
-## 架构对比
-
-### 默认文件记忆系统
-```
-OpenClaw → MEMORY.md (文件)
-         └→ memory/YYYY-MM-DD.md (每日日志)
-```
-
-**限制：**
-- 仅关键词匹配
-- 无语义检索
-- 记忆之间无关联
-
-### PostgreSQL 记忆系统（本插件）
-```
-OpenClaw → Memory Plugin → PostgreSQL + pgvector
-                    └→ 向量相似度搜索
-                    └→ 重要性学习
-                    └→ 自动反思生成
-```
-
-**优势：**
-- 语义检索（理解意思，不只是关键词）
-- 动态重要性评分
-- 自动记忆提升和反思
+> 🔌 将记忆系统集成到 OpenClaw 和其他系统
 
 ---
 
-## 安装步骤
+## 📋 概述
 
-### 1. 安装依赖
+本指南说明如何将 OpenClaw Memory 集成到：
 
-```bash
-pip install flask flask-cors psycopg2-binary requests
-```
+1. **OpenClaw 主程序** - 作为记忆插件
+2. **其他 AI 框架** - 作为独立服务
+3. **自定义应用** - 通过 HTTP API 或 Node.js 模块
 
-### 2. 初始化数据库
+---
 
-```bash
-# 连接到 PostgreSQL
-psql -U postgres
+## 🧩 集成到 OpenClaw
 
-# 创建数据库
-CREATE DATABASE openclaw;
+### 方式一：插件槽位（推荐）
 
-# 启用 pgvector 扩展
-\c openclaw
-CREATE EXTENSION IF NOT EXISTS vector;
-
-# 执行 schema 创建表
-\i /Users/liufei/.openclaw/plugins/openclaw-memory/schema.sql
-```
-
-### 3. 配置数据库连接
+**步骤 1：安装插件**
 
 ```bash
-# 设置环境变量
-export MEMORY_DB_HOST=localhost
-export MEMORY_DB_PORT=5432
-export MEMORY_DB_NAME=openclaw
-export MEMORY_DB_USER=postgres
-export MEMORY_DB_PASS=your_password
+cd ~/.openclaw/plugins
+git clone https://github.com/liufeifory/openclaw-memory.git
+cd openclaw-memory
+npm install && npm run build
 ```
 
-### 4. 启动记忆服务
+**步骤 2：配置插件槽位**
 
-```bash
-# 方式 A：前台运行
-python3 memory_server.py --port 8080
-
-# 方式 B：后台运行
-nohup python3 memory_server.py --port 8080 > memory.log 2>&1 &
-
-# 方式 C：使用 systemd (推荐生产环境)
-# 见 systemd/README.md
-```
-
-### 5. 在 OpenClaw 中配置
-
-编辑 `~/.openclaw/openclaw.json`：
+编辑 `~/.openclaw/config.json`：
 
 ```json
 {
   "plugins": {
-    "enabled": true,
     "slots": {
       "memory": "openclaw-memory"
     },
-    "entries": {
-      "openclaw-memory": {
-        "enabled": true,
-        "config": {
-          "postgresql": {
-            "host": "localhost",
-            "port": 5432,
-            "database": "openclaw",
-            "user": "postgres",
-            "password": "your_password"
-          }
-        }
+    "openclaw-memory": {
+      "backend": "pgvector",
+      "database": {
+        "host": "localhost",
+        "port": 5432,
+        "database": "openclaw_memory",
+        "user": "liufei",
+        "password": ""
+      },
+      "embedding": {
+        "endpoint": "http://localhost:8080"
       }
     }
   }
 }
 ```
 
-**关键字段说明：**
-
-| 字段 | 说明 |
-|------|------|
-| `plugins.enabled` | 启用插件系统 |
-| `plugins.slots.memory` | 指定记忆插件（替换默认的 `memory-core`） |
-| `plugins.entries.openclaw-memory` | 插件配置 |
-
-### 6. 重启 OpenClaw
+**步骤 3：重启 OpenClaw**
 
 ```bash
-# 重启 OpenClaw 网关
 openclaw restart
 ```
 
----
+### 方式二：手动加载
 
-## 验证安装
+如果 OpenClaw 支持手动加载插件：
 
-### 测试记忆服务
+```typescript
+import memoryPlugin from './openclaw-memory/dist/index.js'
 
-```bash
-# 健康检查
-curl http://localhost:8080/health
-
-# 预期输出：
-# {"status":"healthy","service":"openclaw-memory"}
+await openclaw.loadPlugin(memoryPlugin, {
+  backend: 'pgvector',
+  database: { /* ... */ }
+})
 ```
-
-### 测试记忆搜索
-
-```bash
-# 使用脚本搜索
-python3 scripts/search.py "用户编程经验"
-
-# 或使用 API
-curl -X POST http://localhost:8080/memory/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "用户编程经验", "top_k": 5}'
-```
-
-### 在 OpenClaw 中测试
-
-启动 OpenClaw 对话，问一个问题（如"我之前说过什么关于 Python 的事？"），观察是否返回记忆相关内容。
 
 ---
 
-## API 参考
+## 🔌 集成到其他 AI 框架
 
-### POST /memory/search
+### 作为 HTTP 服务
 
-搜索记忆。
+记忆服务提供独立的 HTTP API，可被任何框架调用。
 
-**请求：**
-```json
-{
-  "query": "用户编程经验",
-  "top_k": 10,
-  "threshold": 0.6
+**启动服务：**
+
+```bash
+cd ~/.openclaw/plugins/openclaw-memory
+python3 memory_server.py --port 8082
+```
+
+**API 端点：**
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/health` | GET | 健康检查 |
+| `/memory/store` | POST | 存储记忆 |
+| `/memory/search` | POST | 搜索记忆 |
+| `/memory/stats` | GET | 统计信息 |
+| `/memory/maintenance` | POST | 运行维护 |
+
+**示例（Python）：**
+
+```python
+import requests
+
+# 存储记忆
+requests.post('http://localhost:8082/memory/store', json={
+    'session_id': 'session-123',
+    'content': '用户喜欢 TypeScript',
+    'importance': 0.8
+})
+
+# 搜索记忆
+response = requests.post('http://localhost:8082/memory/search', json={
+    'query': '编程语言偏好',
+    'top_k': 5,
+    'threshold': 0.6
+})
+memories = response.json()['memories']
+```
+
+**示例（JavaScript）：**
+
+```javascript
+// 存储记忆
+await fetch('http://localhost:8082/memory/store', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    session_id: 'session-123',
+    content: '用户喜欢 TypeScript',
+    importance: 0.8
+  })
+})
+
+// 搜索记忆
+const response = await fetch('http://localhost:8082/memory/search', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    query: '编程语言偏好',
+    top_k: 5,
+    threshold: 0.6
+  })
+})
+const { memories } = await response.json()
+```
+
+---
+
+## 📦 作为 Node.js 模块使用
+
+### 安装
+
+```bash
+npm install ~/.openclaw/plugins/openclaw-memory
+```
+
+### 基本用法
+
+```typescript
+import { MemoryManager } from './openclaw-memory/dist/memory-manager.js'
+
+// 初始化
+const mm = new MemoryManager({
+  backend: 'pgvector',
+  database: {
+    host: 'localhost',
+    port: 5432,
+    database: 'openclaw_memory',
+    user: 'liufei',
+    password: ''
+  },
+  embedding: {
+    endpoint: 'http://localhost:8080'
+  }
+})
+
+// 存储记忆
+await mm.storeMemory('session-123', '用户喜欢 TypeScript', 0.8)
+
+// 搜索记忆
+const memories = await mm.retrieveRelevant('编程语言偏好', 'session-123', 5, 0.6)
+console.log(memories)
+
+// 关闭
+await mm.shutdown()
+```
+
+### 使用 Qdrant 后端
+
+```typescript
+import { MemoryManager as QdrantMM } from './openclaw-memory/dist/memory-manager-qdrant.js'
+
+const mm = new QdrantMM({
+  backend: 'qdrant',
+  qdrant: {
+    url: 'http://localhost:6333'
+  },
+  embedding: {
+    endpoint: 'http://localhost:8080'
+  }
+})
+```
+
+---
+
+## 🔗 集成到 LangChain
+
+```python
+from langchain.memory import ConversationBufferMemory
+import requests
+
+class MemoryPluginMemory(ConversationBufferMemory):
+    """使用 OpenClaw Memory 插件的 LangChain 记忆类"""
+    
+    def __init__(self, memory_endpoint='http://localhost:8082'):
+        super().__init__()
+        self.endpoint = memory_endpoint
+    
+    def save_context(self, inputs, outputs):
+        # 存储用户输入
+        requests.post(f'{self.endpoint}/memory/store', json={
+            'session_id': self.chat_id,
+            'content': inputs.get('input', ''),
+            'importance': 0.7
+        })
+    
+    def load_memory_variables(self, inputs):
+        # 检索相关记忆
+        response = requests.post(f'{self.endpoint}/memory/search', json={
+            'query': inputs.get('input', ''),
+            'top_k': 3,
+            'threshold': 0.6
+        })
+        memories = response.json().get('memories', [])
+        
+        # 构建上下文字符串
+        context = '\n'.join([m['content'] for m in memories])
+        return {'history': context}
+```
+
+**使用：**
+
+```python
+from langchain.chat_models import ChatOpenAI
+from langchain.chains import ConversationChain
+
+memory = MemoryPluginMemory()
+llm = ChatOpenAI()
+chain = ConversationChain(llm=llm, memory=memory)
+
+chain.run('你好')
+```
+
+---
+
+## 🔗 集成到 LlamaIndex
+
+```python
+from llama_index.core import VectorStoreIndex, StorageContext
+from llama_index.core.memory import ChatMemoryBuffer
+import requests
+
+class MemoryPluginVectorStore:
+    """使用 OpenClaw Memory 插件的 LlamaIndex 向量存储"""
+    
+    def __init__(self, endpoint='http://localhost:8082'):
+        self.endpoint = endpoint
+    
+    def add(self, nodes):
+        for node in nodes:
+            requests.post(f'{self.endpoint}/memory/store', json={
+                'session_id': 'llamaindex',
+                'content': node.text,
+                'importance': 0.8
+            })
+    
+    def query(self, query_str, top_k=5):
+        response = requests.post(f'{self.endpoint}/memory/search', json={
+            'query': query_str,
+            'top_k': top_k,
+            'threshold': 0.5
+        })
+        return response.json().get('memories', [])
+```
+
+**使用：**
+
+```python
+from llama_index.core import Settings
+
+Settings.memory = ChatMemoryBuffer.from_defaults()
+# 自定义向量存储
+```
+
+---
+
+## 🌐 集成到自定义 Web 应用
+
+### 前端调用示例（React）
+
+```typescript
+import { useState } from 'react'
+
+function useMemory() {
+  const [memories, setMemories] = useState([])
+  
+  const search = async (query: string) => {
+    const response = await fetch('http://localhost:8082/memory/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query,
+        top_k: 5,
+        threshold: 0.6
+      })
+    })
+    const data = await response.json()
+    setMemories(data.memories)
+    return data.memories
+  }
+  
+  const store = async (content: string, importance = 0.7) => {
+    await fetch('http://localhost:8082/memory/store', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: 'web-app',
+        content,
+        importance
+      })
+    })
+  }
+  
+  return { memories, search, store }
 }
 ```
 
-**响应：**
-```json
-{
-  "query": "用户编程经验",
-  "count": 3,
-  "memories": [
-    {
-      "type": "episodic",
-      "content": "用户今天学习了 Python 装饰器",
-      "importance": 0.75,
-      "similarity": 0.85
+### 后端中间件（Express）
+
+```typescript
+import express from 'express'
+import fetch from 'node-fetch'
+
+const app = express()
+const MEMORY_ENDPOINT = 'http://localhost:8082'
+
+// 中间件：自动注入记忆上下文
+app.use(async (req, res, next) => {
+  if (req.body.message) {
+    try {
+      const response = await fetch(`${MEMORY_ENDPOINT}/memory/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: req.body.message,
+          top_k: 3,
+          threshold: 0.6
+        })
+      })
+      const { memories } = await response.json()
+      req.memoryContext = memories
+    } catch (e) {
+      console.error('Memory search failed:', e)
     }
-  ]
-}
-```
+  }
+  next()
+})
 
-### POST /memory/store
-
-存储记忆。
-
-**请求：**
-```json
-{
-  "session_id": "session-123",
-  "content": "用户想学习 Rust",
-  "importance": 0.6
-}
-```
-
-### GET /memory/stats
-
-获取统计信息。
-
-### POST /memory/maintenance
-
-运行维护任务（衰减、提升、反思生成）。
-
----
-
-## 配置选项
-
-### 记忆服务配置
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--port` | 8080 | 监听端口 |
-| `--host` | 0.0.0.0 | 监听地址 |
-| `--debug` | false | 调试模式 |
-
-### 环境变量
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `MEMORY_DB_HOST` | localhost | PostgreSQL 主机 |
-| `MEMORY_DB_PORT` | 5432 | PostgreSQL 端口 |
-| `MEMORY_DB_NAME` | openclaw | 数据库名 |
-| `MEMORY_DB_USER` | postgres | 数据库用户 |
-| `MEMORY_DB_PASS` | (空) | 数据库密码 |
-
----
-
-## 故障排查
-
-### 1. 服务无法启动
-
-**检查 PostgreSQL 是否运行：**
-```bash
-pg_isready
-```
-
-**检查 pgvector 是否安装：**
-```sql
-\c openclaw
-\dx | grep vector
-```
-
-### 2. 搜索返回空结果
-
-**可能原因：**
-- 记忆库为空（正常，开始使用后会有数据）
-- 阈值设置过高（默认 0.6）
-- Embedding 服务未运行
-
-**检查 embedding 服务：**
-```bash
-curl http://localhost:8080/embedding -X POST -d '{"input":"test"}'
-```
-
-### 3. OpenClaw 不加载插件
-
-**检查配置：**
-```bash
-openclaw plugins list
-```
-
-**查看日志：**
-```bash
-tail -f ~/.openclaw/logs/gateway.log
+// 路由：存储用户输入
+app.post('/api/chat', async (req, res) => {
+  // 存储记忆
+  await fetch(`${MEMORY_ENDPOINT}/memory/store`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: req.session.id,
+      content: req.body.message,
+      importance: 0.7
+    })
+  })
+  
+  // 使用记忆上下文生成响应
+  const context = req.memoryContext?.map(m => m.content).join('\n') || ''
+  // ... 调用 LLM
+})
 ```
 
 ---
 
-## 回滚到文件记忆
+## 🔐 安全集成
 
-如需恢复默认文件记忆系统：
+### API 密钥认证
+
+如果 Qdrant 启用了 API 密钥：
 
 ```json
 {
   "plugins": {
-    "slots": {
-      "memory": "memory-core"
+    "openclaw-memory": {
+      "backend": "qdrant",
+      "qdrant": {
+        "url": "http://localhost:6333",
+        "apiKey": "your-api-key"
+      }
     }
   }
 }
 ```
 
-然后重启 OpenClaw。
+### 数据库认证
 
----
+PostgreSQL 配置密码：
 
-## 高级用法
-
-### 直接导入 Python 模块
-
-如果 OpenClaw 支持 Python 技能：
-
-```python
-import sys
-sys.path.insert(0, "/Users/liufei/.openclaw/plugins/openclaw-memory")
-
-from database import Database
-from memory_manager import MemoryManager
-
-db = Database(DB_CONFIG)
-mm = MemoryManager(db)
-
-# 搜索
-memories = mm.retrieve_relevant("查询内容")
-
-# 存储
-mm.async_store("session-id", "记忆内容")
+```json
+{
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "openclaw_memory",
+    "user": "openclaw",
+    "password": "your_secure_password"
+  }
+}
 ```
 
-### 批量导入现有记忆
+### 环境变量（推荐用于生产）
 
-```python
-# TODO: 实现批量导入脚本
-# 读取 MEMORY.md 和 memory/*.md 文件
-# 存入 PostgreSQL
+```bash
+export MEMORY_DB_HOST=localhost
+export MEMORY_DB_PORT=5432
+export MEMORY_DB_NAME=openclaw_memory
+export MEMORY_DB_USER=openclaw
+export MEMORY_DB_PASS=your_secure_password
+export MEMORY_QDRANT_API_KEY=your-api-key
 ```
 
 ---
 
-## 总结
+## 🧪 测试集成
 
-| 步骤 | 命令 |
-|------|------|
-| 1. 安装依赖 | `pip install flask flask-cors psycopg2-binary` |
-| 2. 初始化数据库 | `psql -U postgres -f schema.sql` |
-| 3. 配置环境变量 | `export MEMORY_DB_*` |
-| 4. 启动服务 | `python3 memory_server.py` |
-| 5. 配置 OpenClaw | 编辑 `openclaw.json` |
-| 6. 重启 | `openclaw restart` |
+### 健康检查
+
+```bash
+curl http://localhost:8082/health
+# 预期：{"status":"ok"}
+```
+
+### 端到端测试
+
+```bash
+# 1. 存储记忆
+curl -X POST http://localhost:8082/memory/store \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"test","content":"测试记忆","importance":0.8}'
+
+# 2. 搜索记忆
+curl -X POST http://localhost:8082/memory/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"测试","top_k":5,"threshold":0.6}'
+
+# 3. 查看统计
+curl http://localhost:8082/memory/stats
+```
+
+---
+
+## 📚 相关文档
+
+- [README.md](README.md) - 快速开始
+- [QUICKSTART.md](QUICKSTART.md) - 5 分钟上手
+- [CONFIG.md](CONFIG.md) - 配置详解
+- [ARCHITECTURE.md](ARCHITECTURE.md) - 架构说明
+
+---
+
+<div align="center">
+
+**最后更新：** 2026-03-15  
+**版本：** 2.1.0
+
+</div>

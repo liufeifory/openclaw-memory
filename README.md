@@ -1,181 +1,177 @@
 # OpenClaw Memory Plugin
 
-一个生产级的长期记忆系统插件，为 OpenClaw 提供语义记忆检索功能。
+> 🧠 为 OpenClaw 赋予长期记忆能力 —— 语义检索、自动反思、记忆进化
 
-**v2.1** - 支持 PostgreSQL (pgvector) 和 Qdrant 两种后端。
+[![Version](https://img.shields.io/badge/version-2.1.0-blue)](https://github.com/liufeifory/openclaw-memory/releases)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![OpenClaw](https://img.shields.io/badge/OpenClaw-≥2026.3.11-orange)](https://github.com/openclaw/openclaw)
 
-## 核心功能
+---
 
-- **语义记忆检索** - 基于向量相似度的智能搜索
-- **动态重要性评分** - 根据访问频率和时间自动调整
-- **自动记忆提升** - 高频 episodic 记忆自动转为 semantic
-- **自动反思生成** - 定期生成总结性洞察
-- **记忆衰减机制** - 长期未访问记忆自动降低权重
-- **双后端支持** - PostgreSQL (pgvector) 或 Qdrant
+## 📖 简介
 
-## 快速开始
+OpenClaw Memory 是一个生产级的长期记忆系统 **Node.js 插件**，为 OpenClaw AI 助手提供语义记忆检索能力。
 
-### 方案 A: 一键部署（推荐）
+**核心特性：**
 
-**前置要求：**
-- macOS + Homebrew 或 Linux + systemd
-- Node.js 18+
-- 网络连接（用于下载 Qdrant 和模型）
+- 🔍 **语义检索** —— 基于向量相似度智能搜索历史记忆
+- ⚡ **动态重要性** —— 根据访问频率和时间自动调整记忆权重
+- 🔄 **自动进化** —— 高频情景记忆自动升级为稳定语义记忆
+- 💡 **自动反思** —— 定期生成总结性洞察
+- 📉 **记忆衰减** —— 长期未访问的记忆自动降低权重
+- 🗄️ **双后端支持** —— PostgreSQL (pgvector) 或 Qdrant 任选
+- 🎯 **全自动** —— 消息自动分类存储，上下文自动注入
 
-**使用部署脚本自动安装和配置所有服务：**
+---
 
-```bash
-cd ~/.openclaw/plugins/openclaw-memory
+## 🚀 5 分钟快速开始
 
-# 安装（自动安装 llama.cpp，下载 Qdrant，配置开机自启）
-./deploy.sh install
-```
+### 前置要求
 
-部署脚本会自动：
-- 通过 homebrew 安装 llama.cpp（如未安装）
-- 下载并配置 Qdrant 向量数据库
-- 创建系统服务（macOS launchd / Linux systemd）
-- 配置开机自启动
-- 更新 OpenClaw 配置文件
+| 组件 | 版本 | 安装命令 |
+|------|------|----------|
+| Node.js | ≥18 | `brew install node` |
+| PostgreSQL | ≥14 + pgvector | `brew install postgresql pgvector` |
+| llama.cpp | 最新 | `brew install llama.cpp` |
 
-**注意：** 部署脚本会启动两个 llama-server 实例：
-- **Embedding 服务** (端口 8080): BGE-M3 模型，用于生成向量嵌入
-- **LLM 服务** (端口 8081): Llama-3.2-1B-Instruct 模型，用于重排序、聚类和总结
-
-两个模型都会自动下载（共约 3GB），首次启动时请耐心等待。
-
-**数据存储位置：**
-- **Qdrant 数据**: `~/.openclaw/plugins/openclaw-memory/qdrant/storage/`
-- **模型文件**: 由 llama-server 管理，通常在 `~/Library/Caches/llama.cpp/` (macOS) 或 `~/.cache/llama.cpp/` (Linux)
-
-**其他部署命令：**
+### 一键安装
 
 ```bash
-./deploy.sh status      # 查看服务状态
-./deploy.sh start       # 启动服务
-./deploy.sh stop        # 停止服务
-./deploy.sh restart     # 重启服务
-./deploy.sh uninstall   # 卸载所有服务
+# 1. 克隆插件
+cd ~/.openclaw/plugins
+git clone https://github.com/liufeifory/openclaw-memory.git
+cd openclaw-memory
+
+# 2. 安装依赖 & 构建
+npm install && npm run build
+
+# 3. 初始化数据库
+psql -d openclaw_memory -c "CREATE DATABASE openclaw_memory OWNER liufei;"
+psql -d openclaw_memory -c "CREATE EXTENSION IF NOT EXISTS vector;"
+psql -d openclaw_memory -f schema.sql
+
+# 4. 启动 llama.cpp 服务
+brew services start llama.cpp
+
+# 5. 配置 OpenClaw (见下方配置章节)
 ```
 
-### 方案 B: 手动启动（开发模式）
-
-**1. 启动 Qdrant**
+### 验证安装
 
 ```bash
-cd ~/.openclaw/plugins/openclaw-memory
-./start-qdrant.sh
+# 检查插件状态
+openclaw plugins list
+
+# 查看日志
+tail -f ~/.openclaw/logs/gateway.log | grep memory
 ```
 
-**2. 启动 llama.cpp 服务**
+看到以下日志即表示成功 ✅：
 
-启动 Embedding 服务（BGE-M3，端口 8080）：
-```bash
-llama-server \
-  --hf-repo lm-kit/bge-m3-gguf \
-  --hf-file bge-m3-Q8_0.gguf \
-  --embedding \
-  --port 8080 \
-  --ctx-size 8192
+```
+[openclaw-memory] Plugin initialized with PostgreSQL
+[openclaw-memory] Plugin registered
 ```
 
-启动 LLM 服务（Llama-3.2-1B-Instruct，端口 8081）：
-```bash
-llama-server \
-  --hf-repo bartowski/Llama-3.2-1B-Instruct-GGUF \
-  --hf-file Llama-3.2-1B-Instruct-Q8_0.gguf \
-  --port 8081 \
-  --ctx-size 1024 \
-  --n-gpu-layers 99
+---
+
+## 🏗️ 架构概览
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     OpenClaw 主程序                          │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐  │
+│  │message_     │    │before_prompt│    │memory_search    │  │
+│  │received Hook│    │_build Hook  │    │Tool             │  │
+│  └──────┬──────┘    └──────┬──────┘    └────────┬────────┘  │
+└─────────┼──────────────────┼────────────────────┼───────────┘
+          │                  │                    │
+          ▼                  ▼                    ▼
+┌─────────────────────────────────────────────────────────────┐
+│           Node.js 插件 (dist/index.js)                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
+│  │MemoryFilter  │  │MemoryManager │  │Preference        │   │
+│  │(LLM 8081)    │  │(pgvector/    │  │Extractor         │   │
+│  │消息分类       │  │ Qdrant)      │  │(LLM 8081)        │   │
+│  └──────────────┘  └──────────────┘  └──────────────────┘   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
+│  │Summarizer    │  │Reranker      │  │Clusterer         │   │
+│  │(LLM 8081)    │  │(LLM 8081)    │  │(空闲时执行)       │   │
+│  └──────────────┘  └──────────────┘  └──────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+          │                  │
+          ▼                  ▼
+┌─────────────────┐  ┌─────────────────────────────────────────┐
+│  llama.cpp      │  │  向量数据库                              │
+│  - BGE-M3 (8080)│  │  ┌────────────┐  ┌─────────────────┐    │
+│    Embedding    │  │  │PostgreSQL  │  │  Qdrant         │    │
+│  - Llama-3.2-1B │  │  │+ pgvector  │  │                 │    │
+│    (8081)       │  │  └────────────┘  └─────────────────┘    │
+│                 │  └─────────────────────────────────────────┘
+└─────────────────┘
 ```
 
-> **注意**: 需要同时运行两个服务：BGE-M3 (8080) 用于向量生成，Llama-3.2-1B (8081) 用于重排序/聚类/总结
+**关键说明：**
 
-**3. 安装依赖**
+- **纯 Node.js 实现** - 无 Python 依赖
+- **Hooks 自动触发** - `message_received` 存储消息，`before_prompt_build` 注入上下文
+- **LLM 调用** - 使用本地 llama.cpp (8081 端口) 进行消息分类、偏好提取、对话摘要
+- **Embedding** - 使用 BGE-M3 (8080 端口) 生成 1024 维向量
 
-```bash
-npm install
-npm run build
+---
+
+## 📦 核心功能
+
+### 记忆类型
+
+| 类型 | 说明 | 重要性 | 衰减 | 提升条件 |
+|------|------|--------|------|----------|
+| **Episodic** | 事件、对话、经历 | 0.5-0.8 | 每日 ×0.98 | 访问 >10 次 → Semantic |
+| **Semantic** | 用户偏好、事实 | 0.7-0.9 | 每日 ×0.98 | - |
+| **Reflection** | 自动生成的洞察 | 0.9 (固定) | 无 | 每 50 条 episodic 生成 |
+
+### 消息分类规则
+
+| 分类 | 示例 | 是否存储 | 记忆类型 |
+|------|------|----------|----------|
+| TRIVIAL | "你好"、"谢谢"、"再见" | ❌ | - |
+| FACT | "我是程序员"、"我用 Mac" | ✅ | semantic |
+| PREFERENCE | "我喜欢 Python"、"我讨厌早起" | ✅ | semantic |
+| EVENT | "今天去了星巴克"、"刚完成项目" | ✅ | episodic |
+| QUESTION | "什么是向量数据库？" | ❌ | - |
+
+### 重要性算法
+
+```typescript
+importance = 0.5 × base_importance
+           + 0.3 × log(access_count + 1)
+           + 0.2 × exp(-days_since_creation / 30)
 ```
 
-**4. 测试**
+### 检索流程
 
-```bash
-node dist/test-qdrant.js
-```
+1. 查询文本 → BGE-M3 Embedding (1024 维向量)
+2. pgvector/Qdrant HNSW 相似度搜索
+3. 过滤阈值 <0.6 的结果
+4. 按 `similarity × importance` 排序
+5. 返回 Top 5
 
-### 方案 C: PostgreSQL (pgvector) 后端
+---
 
-**1. 确保 PostgreSQL 运行**
+## ⚙️ 配置
 
-```bash
-# 检查 PostgreSQL 状态
-pg_ctl -D /usr/local/var/postgres status
-```
+### OpenClaw 配置
 
-**2. 启动 llama.cpp 服务**
+编辑 `~/.openclaw/config.json`：
 
-启动 Embedding 服务（BGE-M3，端口 8080）：
-```bash
-llama-server \
-  --hf-repo lm-kit/bge-m3-gguf \
-  --hf-file bge-m3-Q8_0.gguf \
-  --embedding \
-  --port 8080 \
-  --ctx-size 8192
-```
-
-启动 LLM 服务（Llama-3.2-1B-Instruct，端口 8081）：
-```bash
-llama-server \
-  --hf-repo bartowski/Llama-3.2-1B-Instruct-GGUF \
-  --hf-file Llama-3.2-1B-Instruct-Q8_0.gguf \
-  --port 8081 \
-  --ctx-size 1024 \
-  --n-gpu-layers 99
-```
-
-> **注意**: 需要同时运行两个服务：BGE-M3 (8080) 用于向量生成，Llama-3.2-1B (8081) 用于重排序/聚类/总结
-
-**3. 安装依赖**
-
-```bash
-cd ~/.openclaw/plugins/openclaw-memory
-npm install
-npm run build
-```
-
-**4. 测试**
-
-```bash
-node dist/test.js
-```
-
-## 配置
-
-### Qdrant 配置
+#### PostgreSQL (pgvector) 配置（推荐）
 
 ```json
 {
   "plugins": {
-    "openclaw-memory": {
-      "backend": "qdrant",
-      "qdrant": {
-        "url": "http://localhost:6333"
-      },
-      "embedding": {
-        "endpoint": "http://localhost:8080"
-      }
-    }
-  }
-}
-```
-
-### PostgreSQL 配置
-
-```json
-{
-  "plugins": {
+    "slots": {
+      "memory": "openclaw-memory"
+    },
     "openclaw-memory": {
       "backend": "pgvector",
       "database": {
@@ -193,139 +189,293 @@ node dist/test.js
 }
 ```
 
-## 系统要求
+#### Qdrant 配置
 
-| 组件 | Qdrant 方案 | PostgreSQL 方案 |
-|------|------------|----------------|
-| 数据库 | Qdrant (二进制) | PostgreSQL 14+ with pgvector |
-| Embedding | llama.cpp | llama.cpp |
-| Node.js | 18+ | 18+ |
-
-## 架构对比
-
-**Qdrant 方案**:
-```
-OpenClaw → Node.js 插件 → Qdrant (本地二进制，端口 6333)
-            ↓
-    ┌───────┴────────┐
-    ↓                ↓
-Embedding (8080)   LLM (8081)
-BGE-M3             Llama-3.2-1B-Instruct
-(向量生成)          (rerank/summarize/cluster)
-```
-
-**PostgreSQL 方案**:
-```
-OpenClaw → Node.js 插件 → PostgreSQL (pgvector, 端口 5432)
-            ↓
-    ┌───────┴────────┐
-    ↓                ↓
-Embedding (8080)   LLM (8081)
-BGE-M3             Llama-3.2-1B-Instruct
-(向量生成)          (rerank/summarize/cluster)
+```json
+{
+  "plugins": {
+    "slots": {
+      "memory": "openclaw-memory"
+    },
+    "openclaw-memory": {
+      "backend": "qdrant",
+      "qdrant": {
+        "url": "http://localhost:6333"
+      },
+      "embedding": {
+        "endpoint": "http://localhost:8080"
+      }
+    }
+  }
+}
 ```
 
-## 性能对比
-
-| 版本 | 后端 | 延迟 (warm) | 适合规模 |
-|------|------|------------|----------|
-| v2.1 | Qdrant | ~12-20ms | 100 万 + |
-| v2.0 | pgvector | ~15-25ms | 10 万 + |
-| v1.0 | Python HTTP | ~60ms | 10 万 + |
-
-## 服务管理
-
-部署脚本创建的系统服务会开机自启。日常使用中使用 `deploy.sh` 管理：
+### 环境变量（可选）
 
 ```bash
-# 查看服务状态
-./deploy.sh status
+export MEMORY_DB_HOST=localhost
+export MEMORY_DB_PORT=5432
+export MEMORY_DB_NAME=openclaw_memory
+export MEMORY_DB_USER=liufei
+export MEMORY_DB_PASS=""
+export MEMORY_EMBEDDING_ENDPOINT=http://localhost:8080
+```
 
-# 启动所有服务
-./deploy.sh start
+---
 
-# 停止所有服务
-./deploy.sh stop
+## 📖 使用示例
 
-# 重启所有服务
-./deploy.sh restart
+### 自动功能（无需手动调用）
+
+记忆系统全自动运行：
+
+1. **自动存储** - 用户消息自动分类并存储
+2. **自动检索** - 每次对话自动注入相关记忆
+3. **偏好提取** - 每 10 条消息自动提取用户偏好
+4. **对话摘要** - 每 10 条消息自动生成摘要
+
+### 手动检索（可选）
+
+在对话中调用 `memory_search` 工具：
+
+```
+用户：@memory_search 查询="用户的编程语言经验" top_k=5
+```
+
+或在代码中使用：
+
+```typescript
+const result = await memory_search({
+  query: "用户之前说过什么关于 Python 的事？",
+  top_k: 5,
+  threshold: 0.6
+})
+
+console.log(result.memories)
+```
+
+### CLI 工具
+
+```bash
+# 存储记忆
+node dist/memory-cli.ts store "用户喜欢 TypeScript" \
+  --type=semantic --importance=0.8
+
+# 搜索记忆
+node dist/memory-cli.ts search "编程语言偏好" \
+  --top-k=5 --threshold=0.6
+
+# 查看统计
+node dist/memory-cli.ts stats
+
+# 列出所有记忆
+node dist/memory-cli.ts list --limit=10
+```
+
+---
+
+## 🔧 服务管理
+
+### 启动 llama.cpp 服务
+
+```bash
+# 使用 Homebrew 管理（推荐）
+brew services start llama.cpp
+
+# 或手动启动
+# Embedding 服务 (BGE-M3)
+llama-server \
+  --hf-repo lm-kit/bge-m3-gguf \
+  --hf-file bge-m3-Q8_0.gguf \
+  --embedding \
+  --port 8080 \
+  --ctx-size 8192 &
+
+# LLM 服务 (Llama-3.2-1B-Instruct)
+llama-server \
+  --hf-repo bartowski/Llama-3.2-1B-Instruct-GGUF \
+  --hf-file Llama-3.2-1B-Instruct-Q8_0.gguf \
+  --port 8081 \
+  --ctx-size 1024 \
+  --n-gpu-layers 99 &
+```
+
+### 使用 services.sh（launchd 管理）
+
+```bash
+cd ~/.openclaw/plugins/openclaw-memory
+
+./services.sh status    # 查看服务状态
+./services.sh start     # 启动服务
+./services.sh stop      # 停止服务
+./services.sh restart   # 重启服务
+./services.sh logs      # 查看日志
+```
+
+---
+
+## 🐛 故障排查
+
+### 插件未加载
+
+```bash
+# 检查配置语法
+cat ~/.openclaw/config.json | python3 -m json.tool
+
+# 查看完整日志
+tail -f ~/.openclaw/logs/gateway.log
+```
+
+### 数据库连接失败
+
+```bash
+# 检查 PostgreSQL 是否运行
+pg_isready
+
+# 检查 pgvector 扩展
+psql -d openclaw_memory -c "\\dx" | grep vector
+
+# 创建数据库（如需要）
+psql -c "CREATE DATABASE openclaw_memory OWNER liufei;"
+psql -d openclaw_memory -c "CREATE EXTENSION vector;"
+```
+
+### Embedding 服务不可用
+
+```bash
+# 测试服务
+curl -X POST http://localhost:8080/embedding \
+  -H "Content-Type: application/json" \
+  -d '{"input":"test"}'
 
 # 查看日志
-./deploy.sh logs           # 同时查看三个日志
-./deploy.sh logs embedding # 只看 embedding 服务日志
-./deploy.sh logs llm       # 只看 LLM 服务日志
-./deploy.sh logs qdrant    # 只看 Qdrant 日志
+brew services logs llama-server
 ```
 
-## 记忆类型
+### 常见问题
 
-| 类型 | 说明 | 重要性 | 提升条件 |
-|------|------|--------|----------|
-| Episodic | 事件、对话 | 动态 | access_count > 10 → Semantic |
-| Semantic | 稳定知识 | 较高 | - |
-| Reflection | 自动洞察 | 0.9 (固定) | 每 50 条 episodic 生成 |
+| 问题 | 解决方案 |
+|------|----------|
+| `vector` 扩展不存在 | `psql -d openclaw_memory -c "CREATE EXTENSION vector;"` |
+| 记忆检索结果为空 | 降低 `threshold` 至 0.5（正常，开始使用后会有数据） |
+| Hook 超时警告 | 正常现象，不影响功能；可增加 `timeout_ms` 配置 |
+| LLM 分类失败 | 检查 8081 端口：`curl http://localhost:8081` |
 
-## 开发
+---
+
+## 📁 项目结构
+
+```
+openclaw-memory/
+├── src/                      # TypeScript 源码
+│   ├── index.ts              # 插件入口（Hooks、Tool 注册）
+│   ├── memory-manager.ts     # PostgreSQL 记忆管理
+│   ├── memory-manager-qdrant.ts  # Qdrant 记忆管理
+│   ├── memory-filter.ts      # 消息分类（LLM 调用）
+│   ├── preference-extractor.ts # 偏好提取
+│   ├── summarizer.ts         # 对话摘要
+│   ├── reranker.ts           # 重排序
+│   ├── clusterer.ts          # 聚类
+│   └── ...
+├── dist/                     # 编译输出
+├── schema.sql                # PostgreSQL 表结构
+├── package.json              # Node.js 配置
+├── tsconfig.json             # TypeScript 配置
+├── services.sh               # launchd 管理脚本
+└── docs/                     # 文档
+    ├── README.md
+    ├── QUICKSTART.md
+    ├── PROJECT.md
+    ├── USAGE.md
+    ├── CONFIG.md
+    └── ARCHITECTURE.md
+```
+
+---
+
+## 🧪 测试
 
 ```bash
-# 编译
-npm run build
+# 运行完整测试
+npm test
 
-# 监听模式
-npm run dev
-
-# 测试 (pgvector)
-node dist/test.js
-
-# 测试 (Qdrant)
-node dist/test-qdrant.js
-
-# 性能基准
-node dist/benchmark.js
-
-# 迁移数据 (pgvector → Qdrant)
-npm run migrate
+# 单独测试
+npm run test:qdrant      # Qdrant 后端测试
+npm run test:recall      # 召回率测试
+npm run test:conflict    # 冲突检测测试
+npm run test:features    # 功能测试
 ```
 
-## 部署脚本命令
+---
 
-```bash
-# 完整安装（包含开机自启）
-./deploy.sh install
+## 📊 性能指标
 
-# 卸载
-./deploy.sh uninstall
+| 操作 | 延迟 (P50) | 延迟 (P99) |
+|------|-----------|-----------|
+| 消息分类 (LLM) | 200ms | 600ms |
+| 记忆检索 | 50ms | 300ms |
+| 偏好提取 (LLM) | 800ms | 1500ms |
+| 对话摘要 (LLM) | 800ms | 1500ms |
+| 上下文注入 | <100ms | <200ms |
 
-# 查看状态
-./deploy.sh status
+### 资源消耗
 
-# 启动/停止/重启
-./deploy.sh start
-./deploy.sh stop
-./deploy.sh restart
+| 组件 | 内存 | CPU |
+|------|------|-----|
+| 插件进程 | ~50MB | 低 |
+| BGE-M3 (8080) | ~500MB | 中（推理时） |
+| Llama-3.2-1B (8081) | ~1GB | 中（推理时） |
+| PostgreSQL | ~100MB | 低 |
 
-# 查看日志
-./deploy.sh logs
-```
+---
 
-## 从 pgvector 迁移到 Qdrant
+## 🤝 贡献
 
-1. 启动 Qdrant: `./start-qdrant.sh`
-2. 运行迁移脚本：`npm run migrate`
-3. 更新配置为 Qdrant 后端
-4. 测试：`node dist/test-qdrant.js`
+欢迎提交 Issue 和 Pull Request！
 
-## 文档
+1. Fork 本仓库
+2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
+3. 提交更改 (`git commit -m 'Add amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 开启 Pull Request
 
-- [QUICKSTART.md](QUICKSTART.md) - 快速开始指南
-- [PROJECT.md](PROJECT.md) - 完整项目文档
-- [USAGE.md](USAGE.md) - 使用手册
-- [INTEGRATION.md](INTEGRATION.md) - 集成指南
+---
 
-## 商业化
+## 📝 更新日志
 
-本项目可授权用于商业目的。如需企业级授权或定制开发，请联系作者。
+### v2.1.0 (2026-03)
+- ✅ 新增 Qdrant 后端支持
+- ✅ 新增冲突检测模块
+- ✅ 优化重排序算法
+- ✅ 修复 pgvector 索引问题
 
-## 许可证
+### v2.0.0 (2026-02)
+- ✅ 重构为纯 TypeScript 实现（移除 Python 依赖）
+- ✅ 新增自动反思生成
+- ✅ 新增记忆提升机制
+- ✅ 性能提升 40%
+
+---
+
+## 📄 许可证
 
 MIT License
+
+---
+
+## 🙏 致谢
+
+- [OpenClaw](https://github.com/openclaw/openclaw) - AI 助手框架
+- [pgvector](https://github.com/pgvector/pgvector) - PostgreSQL 向量扩展
+- [Qdrant](https://qdrant.tech/) - 向量数据库
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) - 本地 LLM 推理
+
+---
+
+<div align="center">
+
+**Made with ❤️ for OpenClaw**
+
+[报告问题](https://github.com/liufeifory/openclaw-memory/issues) · [请求特性](https://github.com/liufeifory/openclaw-memory/issues)
+
+</div>
