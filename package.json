@@ -17,6 +17,7 @@
     "profile": "node dist/profile.js",
     "test:v27": "node dist/test-v27.js",
     "test:entity-extractor": "node dist/test-entity-extractor.js",
+    "test:entity-indexer": "node dist/test-entity-indexer.js",
     "clean": "rm -rf dist/"
   },
   "dependencies": {
