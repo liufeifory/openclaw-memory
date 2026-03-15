@@ -8,6 +8,12 @@ export interface SurrealConfig {
     username: string;
     password: string;
 }
+export declare const GRAPH_PROTECTION: {
+    MIN_MENTION_COUNT: number;
+    MAX_MEMORY_LINKS: number;
+    TTL_DAYS: number;
+    PRUNE_INTERVAL_DAYS: number;
+};
 export interface MigrationResult {
     success: boolean;
     migrated: boolean;
@@ -27,7 +33,7 @@ export declare class SurrealDatabase {
     constructor(config: SurrealConfig);
     initialize(): Promise<MigrationResult>;
     private createSchema;
-    private query;
+    query(sql: string): Promise<any>;
     private executeWithRetry;
     upsert(id: number, embedding: number[], payload: Record<string, any>, options?: {
         checkVersion?: boolean;
