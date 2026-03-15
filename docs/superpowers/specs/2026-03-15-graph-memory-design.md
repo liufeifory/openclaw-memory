@@ -1,12 +1,13 @@
 # 图数据记忆网络设计文档
 
 **日期:** 2026-03-15
-**版本:** 5.0 - 最终优化版
+**版本:** 6.0 - 三层漏斗 + 写入背压
 **状态:** 已完成 - 原生 SurrealDB 图能力设计
 
 ---
 
 **版本历史:**
+- **v6.0:** 三层漏斗提取策略 (Static Cache → 1B Pre-Filter → 8B Refine)、写入背压动态频率控制
 - **v5.0:** 添加共现阈值过滤 (CO_OCCURRENCE_THRESHOLD=3)、SurrealDB 内存从 4GB 下调至 3GB、Amnesia Mode 超时从 200ms 降至 100ms、CASCADE delete 说明
 - **v4.0:** 原生 SurrealDB 图能力设计
 
@@ -328,20 +329,198 @@ WHERE m.id IN (
 
 **职责:**
 - 从文本中提取关键词（实体）
-- 使用 LLM 进行语义提取
+- 使用三层漏斗策略，降低 80% GPU 负载
 
-**简化策略：LLM + 数据库唯一约束**
+### 三层漏斗提取策略 (The Funnel Strategy)
 
-| 原设计 | 简化后 |
-|--------|--------|
-| 三层缓存：已知实体缓存 → regex pre-filter → LLM refine | 直接 LLM 提取 |
-| 内存缓存管理 | 利用 SurrealDB `ON DUPLICATE KEY UPDATE` 去重 |
-| 复杂 Pipeline | 单一调用 |
+**设计原则:** 能用缓存和正则解决的，绝不调用 LLM。
 
-**理由:**
-- M4 芯片 + Llama-3.1-8B 足够快，不需要复杂的预过滤
-- 让模型做擅长的事（语义理解），数据库做擅长的事（去重）
-- 代码量减少 70%
+| 层级 | 策略 | 成本 | 覆盖率 |
+|------|------|------|--------|
+| **第一层：Static Cache / Regex** | 内存 Set + 字符串匹配 | 几乎零成本 | ~60% |
+| **第二层：1B 模型 Pre-Filter** | Yes/No 分类 | 极低成本 | ~30% |
+| **第三层：8B 模型 Refine** | 精准语义提取 | 高成本 | ~10% |
+
+**整体流程:**
+```
+文本输入
+    │
+    ▼
+┌─────────────────────────────────┐
+│ Layer 1: Static Cache / Regex   │  ← 已知实体直接命中，无需 LLM
+│ - 内存 Set 存储已存在实体名      │
+│ - CamelCase / [A-Z]{2,} 匹配   │
+└─────────────────────────────────┘
+    │
+    ├─ 全部命中 → 直接返回，跳过后续所有 LLM 调用 ✅
+    │
+    ├─ 部分未命中 → 进入 Layer 2
+    ▼
+┌─────────────────────────────────┐
+│ Layer 2: 1B 模型 Pre-Filter     │  ← 永久驻留，极低成本
+│ - 问 1B 模型："这段文本是否有    │
+│   新的专有名词？Yes/No"         │
+└─────────────────────────────────┘
+    │
+    ├─ 回答 No → 无需提取，返回空数组 ✅
+    │
+    ├─ 回答 Yes → 进入 Layer 3
+    ▼
+┌─────────────────────────────────┐
+│ Layer 3: 8B 模型 Refine         │  ← 高成本，但低频调用
+│ - 精准语义提取实体              │
+│ - 返回 {name, confidence}       │
+└─────────────────────────────────┘
+    │
+    ▼
+最终实体列表
+```
+
+**各层详细说明:**
+
+#### Layer 1: Static Cache / Regex（零成本过滤）
+
+**逻辑:** 从 SurrealDB 的 `entity` 表中导出所有已存在的 `name`，维护在内存的 `Set` 中。
+
+**实现:**
+```typescript
+class EntityExtractor {
+  private knownEntities = new Set<string>();
+  private lastCacheUpdate: Date | null = null;
+
+  constructor(db: SurrealDatabase) {
+    // 初始化时加载已知实体
+    this.loadKnownEntities();
+    // 定期刷新缓存（每 5 分钟）
+    setInterval(() => this.loadKnownEntities(), 5 * 60 * 1000);
+  }
+
+  private async loadKnownEntities() {
+    const entities = await db.select('entity');
+    this.knownEntities = new Set(entities.map(e => e.name.toLowerCase()));
+    this.lastCacheUpdate = new Date();
+  }
+
+  private layer1_RegexMatch(text: string): string[] {
+    const found: string[] = [];
+
+    // 简单字符串匹配
+    const words = text.match(/[A-Za-z0-9_-]+/g) || [];
+    for (const word of words) {
+      if (this.knownEntities.has(word.toLowerCase())) {
+        found.push(word);
+      }
+    }
+
+    // CamelCase 匹配（如 TypeScript、SurrealDB）
+    const camelCase = text.match(/[A-Z][a-z]+(?:[A-Z][a-z]+)*/g) || [];
+    for (const match of camelCase) {
+      if (!found.includes(match)) {
+        found.push(match);
+      }
+    }
+
+    // 全大写缩写匹配（如 API、SDK、LLM）
+    const acronyms = text.match(/[A-Z]{2,}/g) || [];
+    for (const acronym of acronyms) {
+      if (!found.includes(acronym)) {
+        found.push(acronym);
+      }
+    }
+
+    return found;
+  }
+}
+```
+
+**效果:**
+- 如果一个 Chunk 里的词全是已知实体，直接跳过后续所有 LLM 调用
+- 覆盖率约 60%，成本几乎为零
+
+#### Layer 2: 1B 模型 Pre-Filter（极低成本过滤）
+
+**逻辑:** 利用永久驻留的 1B 模型（M4 上 >100 t/s）进行快速分类。
+
+**Prompt:**
+```
+判断以下文本是否包含新的专有名词（技术名、项目名、概念名等）。
+
+如果包含可能值得索引的新实体，回答 "Yes"。
+如果是日常对话、通用词汇或无新内容，回答 "No"。
+
+文本：{text}
+
+回答（仅 Yes 或 No）:
+```
+
+**实现:**
+```typescript
+private async layer2_1BFilter(text: string): Promise<boolean> {
+  const response = await this.callLLM({
+    model: '1b-model',  // 永久驻留，极速
+    prompt: `判断以下文本是否包含新的专有名词...`,
+    maxTokens: 5,       // 只需 Yes/No
+  });
+
+  return response.trim().toLowerCase().includes('yes');
+}
+```
+
+**效果:**
+- 1B 模型处理速度极快且不怎么发热
+- 能过滤掉大量生活杂谈或无意义内容
+- 覆盖率约 30%，成本极低
+
+#### Layer 3: 8B 模型 Refine（高成本但低频）
+
+**逻辑:** 只有当第一层未完全覆盖且第二层认为有价值时，才唤醒 8B 模型。
+
+**Prompt:**
+```
+从以下文本中提取具有索引价值的实体。
+
+提取标准：
+1. 能跨文档关联的关键词
+2. 不包括常见通用词汇
+3. 倾向于专业术语、项目名、技术名、概念名
+
+文本：{text}
+
+返回 JSON:
+[{"name": "实体名", "confidence": 0.9}]
+```
+
+**实现:**
+```typescript
+private async layer3_8BRefine(text: string): Promise<ExtractedEntity[]> {
+  const response = await this.callLLM({
+    model: '8b-model',  // 高成本，按需唤醒
+    prompt: `从以下文本中提取具有索引价值的实体...`,
+    maxTokens: 500,
+  });
+
+  return JSON.parse(response);
+}
+```
+
+**效果:**
+- 进行精准的语义提取
+- 覆盖前两层无法处理的复杂情况
+- 仅约 10% 的输入会到达这一层
+
+### 性能对比
+
+| 策略 | GPU 负载 | 平均延迟 | 适用场景 |
+|------|----------|----------|----------|
+| 直接 8B 提取 (V5.0) | 100% | ~500ms | 低频摄取 |
+| 三层漏斗 (V6.0) | ~20% | ~50ms (90% 请求) | 高频摄取 |
+
+**算力验收指标:**
+- 已知话题的重复摄取不应触发 8B 推理
+- 90% 的请求应在 Layer 1 或 Layer 2 被过滤
+- 8B 模型调用频率 < 10%
+
+---
 
 **接口:**
 ```typescript
@@ -351,35 +530,17 @@ interface ExtractedEntity {
 }
 
 class EntityExtractor {
-  constructor(llmEndpoint: string, limiter: LLMLimiter);
+  constructor(
+    db: SurrealDatabase,
+    llmEndpoint: string,
+    limiter: LLMLimiter
+  );
 
   /**
-   * 从文本中提取实体
+   * 从文本中提取实体（三层漏斗策略）
    */
   extract(text: string): Promise<ExtractedEntity[]>;
 }
-```
-
-**LLM Prompt:**
-```
-从以下文本中提取具有索引价值的实体。
-
-提取标准：
-1. 能跨文档关联的关键词
-2. 不包括常见通用词汇
-
-实体类型：
-- TECH: 技术、工具、框架、库、硬件
-- CONCEPT: 抽象概念、方法论、算法
-- PROJECT: 项目名、任务名
-- PERSON: 人名
-- ORG: 组织、公司、团队
-- GENERAL: 其他关键名词
-
-文本：{text}
-
-返回 JSON:
-[{"name": "实体名", "type": "类型", "confidence": 0.9}]
 ```
 
 ### 4.2 实体索引服务 (EntityIndexer)
@@ -858,7 +1019,91 @@ async processQueue() {
 
 **效果：** 用户感觉回复秒开，背后的"知识织网"在后台安静完成。
 
-#### 7.2.2 16GB 内存配置调优
+#### 7.2.3 写入背压：动态频率控制（16GB M4 保护策略）
+
+**问题：** 16GB 内存在同时开启编译器、浏览器和 8B 模型时，容易触发内存交换（Swap），影响硬件寿命。
+
+**解决方案：** 根据系统负载动态调整后台 `processQueue` 的轮询频率。
+
+**实现:**
+```typescript
+class EntityIndexer {
+  private baseInterval = 5000;        // 基础轮询间隔：5 秒
+  private currentInterval = 5000;     // 当前实际间隔
+  private memoryThreshold = 0.80;     // 内存阈值：80%
+  private tempThreshold = 80;         // CPU 温度阈值：80°C
+
+  async processQueue(): Promise<{ indexed: number; failed: number }> {
+    // 动态调整轮询频率
+    await this.adjustPollingFrequency();
+
+    // 如果系统负载过高，跳过本次处理
+    if (this.currentInterval > this.baseInterval * 4) {
+      console.log('[EntityIndexer] System under heavy load, skipping this cycle');
+      return { indexed: 0, failed: 0 };
+    }
+
+    // ... 正常处理逻辑 ...
+  }
+
+  private async adjustPollingFrequency(): Promise<void> {
+    const memUsage = await this.getMemoryUsage();
+    const cpuTemp = await this.getCPUTemperature();
+
+    // 内存压力控制
+    if (memUsage > this.memoryThreshold) {
+      // 内存 > 80%，降低频率
+      this.currentInterval = Math.min(this.currentInterval * 2, 60000);
+      console.log(`[EntityIndexer] Memory pressure: ${(memUsage * 100).toFixed(1)}%, interval: ${this.currentInterval}ms`);
+    } else if (memUsage < 0.50 && this.currentInterval > this.baseInterval) {
+      // 内存 < 50%，逐步恢复
+      this.currentInterval = Math.max(this.currentInterval / 2, this.baseInterval);
+    }
+
+    // CPU 温度控制
+    if (cpuTemp > this.tempThreshold) {
+      // CPU > 80°C，大幅降低频率
+      this.currentInterval = Math.min(this.currentInterval * 4, 120000);
+      console.log(`[EntityIndexer] CPU temperature: ${cpuTemp}°C, interval: ${this.currentInterval}ms`);
+    }
+  }
+
+  private async getMemoryUsage(): Promise<number> {
+    const memInfo = os.totalmem();
+    const memFree = os.freemem();
+    return 1 - (memFree / memInfo);
+  }
+
+  private async getCPUTemperature(): Promise<number> {
+    try {
+      // macOS 读取 CPU 温度
+      const result = await exec('osxtemperature');
+      return parseFloat(result.stdout) || 0;
+    } catch {
+      return 0; // 无法读取时返回 0，不触发降频
+    }
+  }
+}
+```
+
+**背压策略:**
+
+| 系统状态 | 轮询间隔 | 说明 |
+|----------|----------|------|
+| 内存 < 50%, CPU < 60°C | 5 秒 | 正常处理 |
+| 内存 50%-80% | 10-20 秒 | 适度降频 |
+| 内存 > 80% | 20-60 秒 | 大幅降频 |
+| CPU > 80°C | 60-120 秒 | 保护模式 |
+| 内存 > 90% 或 CPU > 90°C | 暂停处理 | 紧急保护 |
+
+**理由:**
+- 16GB 内存虽然够用，但在多任务场景下容易触发 Swap
+- Swap 会严重降低 SSD 寿命，且性能急剧下降
+- 动态降频可以"牺牲"索引速度，保护硬件和用户体验
+
+---
+
+#### 7.2.4 16GB 内存配置调优
 
 **针对 16GB M4 设备的激进配置：**
 
@@ -1041,7 +1286,7 @@ async function indexMemory(memoryId: string, text: string) {
 2. **性能**：一次事务提交 vs 多次单独提交
 3. **容错**：失败不影响主流程，记录日志即可
 
-### 7.6 连接池管理
+### 7.6.4 连接池管理
 
 **配置建议:**
 ```typescript
@@ -1115,6 +1360,55 @@ test('should fall back to vector-only on graph timeout', async () => {
   const results = await retrieveWithGraphTimeout('TypeScript', 100);
   // Should return vector results even if graph query times out
   expect(results.length).toBeGreaterThan(0);
+});
+
+// 5. 三层漏斗：Layer 1 静态缓存命中
+test('should use static cache for known entities', async () => {
+  await upsertEntity('TypeScript');
+  await upsertEntity('SurrealDB');
+
+  const extractor = new EntityExtractor(db);
+  const entities = await extractor.extract('Using TypeScript with SurrealDB');
+
+  // Should find entities from static cache without calling LLM
+  expect(entities).toEqual([
+    { name: 'TypeScript', confidence: 1.0 },
+    { name: 'SurrealDB', confidence: 1.0 }
+  ]);
+  expect(extractor.getLayerStats().layer3Calls).toBe(0);  // 8B 模型未被调用
+});
+
+// 6. 三层漏斗：Layer 2 1B 模型过滤
+test('should use 1B model to filter low-value content', async () => {
+  const extractor = new EntityExtractor(db);
+
+  // Low-value content should be filtered by 1B model
+  const entities1 = await extractor.extract('今天天气不错，心情很好');
+  expect(entities1).toEqual([]);
+  expect(extractor.getLayerStats().layer3Calls).toBe(0);  // 8B 模型未被调用
+
+  // High-value content should pass to Layer 3
+  const entities2 = await extractor.extract('使用 Rust 重构性能关键模块');
+  expect(entities2.length).toBeGreaterThan(0);
+});
+
+// 7. 三层漏斗：算力验收指标
+test('should meet compute efficiency targets', async () => {
+  const extractor = new EntityExtractor(db);
+  const testCases = [
+    '已知实体 TypeScript 和 SurrealDB 的重复提及',  // Layer 1
+    '日常对话内容',  // Layer 2 过滤
+    '新的技术概念：WebAssembly SIMD',  // Layer 3
+  ];
+
+  for (const text of testCases) {
+    await extractor.extract(text);
+  }
+
+  const stats = extractor.getLayerStats();
+  expect(stats.layer1HitRate).toBeGreaterThan(0.6);  // Layer 1 命中率 > 60%
+  expect(stats.layer2FilterRate).toBeGreaterThan(0.3);  // Layer 2 过滤率 > 30%
+  expect(stats.layer3CallRate).toBeLessThan(0.1);  // Layer 3 调用率 < 10%
 });
 ```
 
@@ -1228,22 +1522,40 @@ Query
 
 ## 10. 验收标准
 
-1. **功能验收**
-   - [ ] 存储记忆时自动提取实体并建立索引
-   - [ ] 查询包含实体名称时精准召回相关记忆
-   - [ ] 支持通过实体联想检索相关背景知识
-   - [ ] 二度关联检索时正确应用权重过滤（relevance_score > 0.8）
-   - [ ] 图查询超时 100ms 时正确降级为纯向量检索
+### 1. 功能验收
 
-2. **性能验收**
-   - [ ] 记忆存储延迟增加 < 100ms（异步不阻塞）
-   - [ ] 混合检索延迟 < 纯向量检索的 1.5 倍
-   - [ ] 支持至少 10000 个实体的索引规模
+- [ ] 存储记忆时自动提取实体并建立索引
+- [ ] 查询包含实体名称时精准召回相关记忆
+- [ ] 支持通过实体联想检索相关背景知识
+- [ ] 二度关联检索时正确应用权重过滤（relevance_score > 0.8）
+- [ ] 图查询超时 100ms 时正确降级为纯向量检索
+- [ ] 三层漏斗策略正常运作（已知实体不触发 8B 推理）
 
-3. **质量验收**
-   - [ ] 单元测试覆盖率 > 80%
-   - [ ] 集成测试通过
-   - [ ] 文档完整
+### 2. 性能验收
+
+- [ ] 记忆存储延迟增加 < 100ms（异步不阻塞）
+- [ ] 混合检索延迟 < 纯向量检索的 1.5 倍
+- [ ] 支持至少 10000 个实体的索引规模
+
+### 3. 算力验收（三层漏斗策略）
+
+- [ ] **已知话题的重复摄取不应触发 8B 推理**
+- [ ] 90% 的请求应在 Layer 1 或 Layer 2 被过滤
+- [ ] 8B 模型调用频率 < 10%
+- [ ] Layer 1 静态缓存命中率 > 60%
+- [ ] Layer 2 1B 模型过滤成功率 > 30%
+
+### 4. 写入背压验收
+
+- [ ] 内存 > 80% 时自动降低轮询频率
+- [ ] CPU > 80°C 时自动降频或暂停处理
+- [ ] 高负载下不触发系统 Swap
+
+### 5. 质量验收
+
+- [ ] 单元测试覆盖率 > 80%
+- [ ] 集成测试通过
+- [ ] 文档完整
 
 ---
 
