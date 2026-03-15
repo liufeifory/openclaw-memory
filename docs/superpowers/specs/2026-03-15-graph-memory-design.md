@@ -1,8 +1,14 @@
 # 图数据记忆网络设计文档
 
 **日期:** 2026-03-15
-**版本:** 4.0
+**版本:** 5.0 - 最终优化版
 **状态:** 已完成 - 原生 SurrealDB 图能力设计
+
+---
+
+**版本历史:**
+- **v5.0:** 添加共现阈值过滤 (CO_OCCURRENCE_THRESHOLD=3)、SurrealDB 内存从 4GB 下调至 3GB、Amnesia Mode 超时从 200ms 降至 100ms、CASCADE delete 说明
+- **v4.0:** 原生 SurrealDB 图能力设计
 
 ---
 
@@ -89,9 +95,9 @@ const ollamaConfig = {
   '8b-model': { keepAlive: 300 }, // 8B 模型 5 分钟后释放
 };
 
-// SurrealDB 内存限制
+// SurrealDB 内存限制（16GB M4 优化：从 4GB 下调至 3GB）
 const dbConfig = {
-  maxMemory: 4 * 1024 * 1024 * 1024, // 4GB 上限
+  maxMemory: 3 * 1024 * 1024 * 1024, // 3GB 上限（为 macOS 缓冲腾出空间）
 };
 ```
 
@@ -171,8 +177,11 @@ DEFINE FIELD entity_type ON TABLE entity TYPE string DEFAULT 'ENTITY';
 ```
 从文本中提取具有索引价值的关键词（实体）。
 不需要分类，统一标记为 ENTITY。
+判断标准：是否能跨文档关联的专业术语、项目名、技术名、概念名。
 示例：TypeScript, SurrealDB, 向量索引，记忆系统
 ```
+
+**不再要求 LLM 判断类型**，只判断"是否具有索引价值"，8B 模型推理更快，输出更稳定。
 
 ---
 
@@ -228,6 +237,11 @@ DEFINE FIELD created_at ON TABLE memory_entity TYPE datetime DEFAULT time::now()
 DEFINE INDEX idx_memory_entity_in ON TABLE memory_entity FIELDS in;
 DEFINE INDEX idx_memory_entity_out ON TABLE memory_entity FIELDS out;
 DEFINE INDEX idx_memory_entity_score ON TABLE memory_entity FIELDS out, relevance_score;
+
+-- CASCADE 删除：当 memory 或 entity 被删除时，关联的边自动清理
+-- SurrealDB 的图引用完整性会自动处理，无需额外定义
+-- 当 memory 被删除（Decay 机制触发）时，对应的 memory_entity 边会自动删除
+-- 当 entity 被删除时，对应的 memory_entity 边也会自动删除
 ```
 
 **建边示例:**
@@ -488,12 +502,30 @@ async function retrieveByAssociation(memoryId: number, limit: number = 20) {
 
 **查询时实体提取策略:**
 
-为了性能考虑，查询时的实体提取使用**轻量级策略**：
-1. **关键词匹配**: 检测查询中是否包含已知实体名称（通过 `entity` 表索引）
-2. **正则提取**: 使用与 `clusterer.ts` 相同的正则模式提取技术实体
-3. **降级策略**: 如果未匹配到实体，回退到纯向量检索
+利用 1B 小模型（永久驻留，M4 上 >100 t/s）进行轻量级实体提取：
 
-**注意:** 不使用 LLM 进行查询时实体提取，避免增加检索延迟。
+| 策略 | 说明 | 延迟 |
+|------|------|------|
+| **1B 模型提取** | 使用永久驻留的 1B 模型快速提取查询中的实体 | ~50ms |
+| **关键词匹配** | 检测查询中是否包含已知实体名称（通过 `entity` 表索引） | ~5ms |
+| **降级策略** | 如果未匹配到实体，回退到纯向量检索 | - |
+
+**注意:** 查询时使用 1B 模型而非 8B 模型，在 M4 上延迟几乎可以忽略不计，但比正则提取更精准。
+
+**检索流程:**
+```
+用户查询
+    │
+    ├─→ 1B 模型提取实体 (50ms) → 已知实体匹配 → 候选集 A
+    │
+    ├─→ 向量检索 → 候选集 B
+    │
+    ▼
+合并候选集 (A ∪ B) → 去重
+    │
+    ▼
+Reranker 重排序 → 阈值过滤 → 最终结果
+```
 
 **接口:**
 ```typescript
@@ -717,14 +749,14 @@ async processIndexingQueue(): Promise<{ indexed: number; failed: number }> {
 
 ### 6.3 图查询超时：失忆模式
 
-**问题：** 图查询如果超过 200ms，会影响交互流畅度。
+**问题：** 图查询如果超过 100ms，会影响交互流畅度。
 
 **解决方案：失忆模式（Amnesia Mode）**
 
 ```typescript
 async retrieveWithGraphTimeout(
   query: string,
-  timeoutMs: number = 200
+  timeoutMs: number = 100  // M4 上正常 graph query 约 10ms，100ms 已留足余量
 ): Promise<MemoryWithSimilarity[]> {
   const vectorPromise = this.vectorSearch(query);
   const graphPromise = this.graphSearch(query).withTimeout(timeoutMs);
@@ -748,7 +780,7 @@ async retrieveWithGraphTimeout(
 ```
 
 **阈值设定:**
-- 图查询超时：**200ms**
+- 图查询超时：**100ms**（M4 上正常 graph query 约 10ms，10 倍余量）
 - 超过阈值立即降级为纯向量检索
 - 保证 M4 芯片上的流畅交互体验
 
@@ -834,7 +866,7 @@ async processQueue() {
 |------|------|------|
 | **LLM (Llama-3.1-8B)** | Q4_K_M 量化，占用 5.5-6GB | Keep-alive: 5m（5 分钟无任务后释放） |
 | **1B 小模型** | Keep-alive: -1（永久驻留） | 用于极速分类、过滤、搜索预处理 |
-| **SurrealDB** | 内存上限 4GB | RocksDB Block Cache 自动管理 |
+| **SurrealDB** | 内存上限 3GB | RocksDB Block Cache 自动管理（从 4GB 下调，为 macOS 缓冲腾出空间） |
 | **写入并发** | 限制为 4 | 占满 4 个性能核，能效核处理 UI |
 
 ```typescript
@@ -849,9 +881,9 @@ const ollamaConfig = {
   },
 };
 
-// SurrealDB 配置
+// SurrealDB 配置（16GB M4 优化：从 4GB 下调至 3GB）
 const dbConfig = {
-  maxMemory: 4 * 1024 * 1024 * 1024,  // 4GB
+  maxMemory: 3 * 1024 * 1024 * 1024,  // 3GB（为 macOS 缓冲腾出空间）
   engine: 'rocksdb',
   max_connections: 5,
 };
@@ -861,11 +893,15 @@ const BATCH_SIZE = 50;
 const WRITE_CONCURRENCY = 4;
 ```
 
-#### 7.2.3 深度织网：实体共现关联
+#### 7.2.3 深度织网：实体共现关联（带阈值过滤）
 
 **在 16GB 内存支撑下，RELATE 逻辑可以不只是"记忆→实体"，还可以增加"实体→实体"的自动共现建边：**
 
+**阈值过滤：** 避免 O(n²) 组合爆炸。只有当两个实体在不同 chunk 中共同出现 ≥ 3 次时才建边。
+
 ```typescript
+const CO_OCCURRENCE_THRESHOLD = 3;  // 避免"毛球图"的组合爆炸
+
 async function buildEntityCooccurrence(memoryId: number, entities: Entity[]) {
   // 遍历实体对，建立共现关系
   for (let i = 0; i < entities.length; i++) {
@@ -883,9 +919,22 @@ async function buildEntityCooccurrence(memoryId: number, entities: Entity[]) {
     }
   }
 }
+
+// 后台任务：定期清理低频边
+async function pruneLowWeightEdges(minWeight: number = CO_OCCURRENCE_THRESHOLD) {
+  await db.query(`
+    DELETE FROM related_to WHERE weight < $minWeight
+  `, { minWeight });
+}
 ```
 
 **效果：** 系统能够从"Python 经常和 FastAPI 一起出现"推导出 `Python → related_to → FastAPI` 的关联，让记忆系统产生"逻辑联想"能力。
+
+**为什么需要阈值：**
+- 假设一个 memory 有 10 个实体 → C(10,2) = 45 条边
+- 10000 个 memory → 可能产生 45 万条边
+- 大部分是噪音（如"的"、"和"等高频词与其他实体的共现）
+- 阈值过滤后，只保留有意义的强关联
 
 #### 7.2.4 针对 M4 神经引擎的并发控制
 
@@ -1063,7 +1112,7 @@ test('should retrieve associated memories with weight filter', async () => {
 
 // 4. 失忆模式：图查询超时降级
 test('should fall back to vector-only on graph timeout', async () => {
-  const results = await retrieveWithGraphTimeout('TypeScript', 200);
+  const results = await retrieveWithGraphTimeout('TypeScript', 100);
   // Should return vector results even if graph query times out
   expect(results.length).toBeGreaterThan(0);
 });
@@ -1184,7 +1233,7 @@ Query
    - [ ] 查询包含实体名称时精准召回相关记忆
    - [ ] 支持通过实体联想检索相关背景知识
    - [ ] 二度关联检索时正确应用权重过滤（relevance_score > 0.8）
-   - [ ] 图查询超时 200ms 时正确降级为纯向量检索
+   - [ ] 图查询超时 100ms 时正确降级为纯向量检索
 
 2. **性能验收**
    - [ ] 记忆存储延迟增加 < 100ms（异步不阻塞）
