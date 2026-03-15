@@ -13,6 +13,7 @@
     "test:recall": "node dist/test-recall.js",
     "test:conflict": "node dist/test-conflict.js",
     "test:features": "node dist/test-features.js",
+    "test:graph": "node dist/test-graph-operations.js",
     "profile": "node dist/profile.js",
     "test:v27": "node dist/test-v27.js",
     "clean": "rm -rf dist/"

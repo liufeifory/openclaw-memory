@@ -19,6 +19,21 @@ const RELATES_TABLE = 'relates';
 const VECTOR_DIMENSION = 1024;
 const SCHEMA_VERSION = 1;
 
+export interface EntityStats {
+  total_entities: number;
+  by_type: Record<string, number>;
+  total_links: number;
+}
+
+export interface LinkedMemory {
+  id: number;
+  content?: string;
+  type?: string;
+  similarity?: number;
+  weight?: number;
+  created_at?: string;
+}
+
 export const GRAPH_PROTECTION = {
   MIN_MENTION_COUNT: 3,
   MAX_MEMORY_LINKS: 500,
@@ -156,6 +171,7 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS last_accessed ON TABLE ${ENTITY_TABLE} TYPE option<string>;
       DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${ENTITY_TABLE} TYPE string;
       DEFINE FIELD IF NOT EXISTS is_active ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT true;
+      DEFINE FIELD IF NOT EXISTS is_frozen ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT false;
     `);
     console.log('[SurrealDB] Entity table defined with graph protection fields');
 
@@ -729,6 +745,340 @@ export class SurrealDatabase {
         ? record.updated_at.toISOString()
         : String(record.updated_at),
     };
+  }
+
+  /**
+   * 1. upsertEntity - Create or get entity (ON DUPLICATE KEY UPDATE mode)
+   * Returns entity ID
+   */
+  async upsertEntity(name: string, type: string): Promise<number> {
+    if (!this.client) {
+      throw new Error('[SurrealDB] Client not connected');
+    }
+
+    const now = new Date().toISOString();
+
+    // First try to find existing entity by name
+    const findResult = await this.client.query(
+      `SELECT * FROM ${ENTITY_TABLE} WHERE name = $name LIMIT 1`,
+      { name }
+    );
+
+    let data: any[] = [];
+    if (Array.isArray(findResult) && findResult.length > 0) {
+      if (Array.isArray(findResult[0])) {
+        data = findResult[0] || [];
+      } else if ((findResult as any)[0]?.result) {
+        data = (findResult as any)[0].result || [];
+      }
+    }
+
+    if (data && data.length > 0) {
+      // Entity exists, update mention_count and return ID
+      const existingId = this.extractIdFromRecord(data[0]);
+      await this.client.query(
+        `UPDATE ${ENTITY_TABLE}:${existingId} SET mention_count = mention_count + 1, last_accessed = $created_at`,
+        { created_at: now }
+      );
+      return existingId;
+    }
+
+    // Entity doesn't exist, create new one
+    const createSql = `
+      CREATE ${ENTITY_TABLE} CONTENT {
+        name: $name,
+        entity_type: $type,
+        mention_count: 1,
+        relation_count: 0,
+        created_at: $created_at,
+        is_active: true,
+        is_frozen: false
+      }
+    `;
+
+    try {
+      const result = await this.client.query(createSql, {
+        name,
+        type,
+        created_at: now,
+      });
+
+      // Extract the entity ID from result
+      let createData: any[] = [];
+      if (Array.isArray(result) && result.length > 0) {
+        if (Array.isArray(result[0])) {
+          createData = result[0] || [];
+        } else if ((result as any)[0]?.result) {
+          createData = (result as any)[0].result || [];
+        }
+      }
+
+      if (createData && createData.length > 0) {
+        return this.extractIdFromRecord(createData[0]);
+      }
+
+      throw new Error('[SurrealDB] Failed to get entity ID after create');
+    } catch (error: any) {
+      console.error('[SurrealDB] upsertEntity failed:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * 2. linkMemoryEntity - Create memory-entity edge
+   * Includes Super Node frozen check
+   */
+  async linkMemoryEntity(
+    memoryId: number,
+    entityId: number,
+    relevanceScore: number
+  ): Promise<void> {
+    if (!this.client) {
+      throw new Error('[SurrealDB] Client not connected');
+    }
+
+    // Check if entity is frozen (Super Node protection)
+    const entityCheck = await this.client.query(
+      `SELECT is_frozen FROM ${ENTITY_TABLE}:${entityId}`,
+      {}
+    );
+
+    let entityData: any[] = [];
+    if (Array.isArray(entityCheck) && entityCheck.length > 0) {
+      if (Array.isArray(entityCheck[0])) {
+        entityData = entityCheck[0] || [];
+      } else if ((entityCheck as any)[0]?.result) {
+        entityData = (entityCheck as any)[0].result || [];
+      }
+    }
+
+    if (entityData && entityData.length > 0 && entityData[0].is_frozen === true) {
+      console.warn(`[SurrealDB] Entity ${entityId} is frozen (Super Node), skipping link`);
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const memoryRecordId = `${MEMORY_TABLE}:${memoryId}`;
+    const entityRecordId = `${ENTITY_TABLE}:${entityId}`;
+
+    try {
+      // Use INSERT to create the edge (alternative to RELATE for SurrealDB 2.x)
+      const sql = `
+        INSERT INTO ${MEMORY_ENTITY_TABLE} (
+          memory,
+          entity,
+          relation_type,
+          weight,
+          created_at
+        ) VALUES (
+          ${memoryRecordId},
+          ${entityRecordId},
+          'mentions',
+          $weight,
+          $created_at
+        )
+        ON DUPLICATE KEY UPDATE
+          weight = $weight,
+          created_at = $created_at
+      `;
+
+      await this.client.query(sql, {
+        weight: relevanceScore,
+        created_at: now,
+      });
+
+      // Increment entity's relation_count
+      await this.client.query(
+        `UPDATE ${ENTITY_TABLE}:${entityId} SET relation_count = relation_count + 1`,
+        {}
+      );
+    } catch (error: any) {
+      console.error('[SurrealDB] linkMemoryEntity failed:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * 3. searchByEntity - Retrieve memories associated with an entity (graph traversal)
+   */
+  async searchByEntity(
+    entityId: number,
+    limit: number = 10
+  ): Promise<Array<LinkedMemory>> {
+    if (!this.client) {
+      throw new Error('[SurrealDB] Client not connected');
+    }
+
+    const entityRecordId = `${ENTITY_TABLE}:${entityId}`;
+
+    // Query through memory_entity edge table to find associated memories
+    // SurrealDB doesn't support table aliases, use subquery instead
+    const sql = `
+      SELECT
+        memory.id AS id,
+        memory.content AS content,
+        memory.type AS type,
+        memory.created_at AS created_at,
+        weight
+      FROM ${MEMORY_ENTITY_TABLE}
+      WHERE entity = ${entityRecordId}
+      ORDER BY weight DESC
+      LIMIT $limit
+    `;
+
+    try {
+      const result = await this.client.query(sql, { limit });
+
+      let data: any[] = [];
+      if (Array.isArray(result) && result.length > 0) {
+        if (Array.isArray(result[0])) {
+          data = result[0] || [];
+        } else if ((result as any)[0]?.result) {
+          data = (result as any)[0].result || [];
+        }
+      }
+
+      return data.map((r: any) => ({
+        id: this.extractIdFromRecord(r),
+        content: r.content,
+        type: r.type,
+        weight: r.weight,
+        created_at: r.created_at,
+      }));
+    } catch (error: any) {
+      console.error('[SurrealDB] searchByEntity failed:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * 4. searchByAssociation - Second-degree association search
+   * Find memories related to a seed memory through shared entities
+   */
+  async searchByAssociation(
+    seedMemoryId: number,
+    limit: number = 10
+  ): Promise<Array<LinkedMemory>> {
+    if (!this.client) {
+      throw new Error('[SurrealDB] Client not connected');
+    }
+
+    const seedRecordId = `${MEMORY_TABLE}:${seedMemoryId}`;
+
+    // First, find all entities linked to the seed memory
+    // Then find other memories linked to those entities (excluding the seed)
+    // Use subquery instead of JOIN with alias
+    const sql = `
+      SELECT
+        memory.id AS id,
+        memory.content AS content,
+        memory.type AS type,
+        memory.created_at AS created_at,
+        weight
+      FROM ${MEMORY_ENTITY_TABLE}
+      WHERE entity IN (
+        SELECT entity FROM ${MEMORY_ENTITY_TABLE} WHERE memory = ${seedRecordId}
+      )
+      AND memory != ${seedRecordId}
+      ORDER BY weight DESC
+      LIMIT $limit
+    `;
+
+    try {
+      const result = await this.client.query(sql, { limit });
+
+      let data: any[] = [];
+      if (Array.isArray(result) && result.length > 0) {
+        if (Array.isArray(result[0])) {
+          data = result[0] || [];
+        } else if ((result as any)[0]?.result) {
+          data = (result as any)[0].result || [];
+        }
+      }
+
+      return data.map((r: any) => ({
+        id: this.extractIdFromRecord(r),
+        content: r.content,
+        type: r.type,
+        weight: r.weight,
+        created_at: r.created_at,
+      }));
+    } catch (error: any) {
+      console.error('[SurrealDB] searchByAssociation failed:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * 5. getEntityStats - Get entity statistics
+   * Returns total entities, count by type, and total links
+   */
+  async getEntityStats(): Promise<EntityStats> {
+    if (!this.client) {
+      return { total_entities: 0, by_type: {}, total_links: 0 };
+    }
+
+    try {
+      // Get total entities by selecting all and counting the array length
+      const totalResult = await this.client.query(
+        `SELECT * FROM ${ENTITY_TABLE}`,
+        {}
+      );
+
+      let totalEntities = 0;
+      if (Array.isArray(totalResult) && totalResult.length > 0) {
+        if (Array.isArray(totalResult[0])) {
+          totalEntities = totalResult[0].length;
+        } else if ((totalResult as any)[0]?.result) {
+          totalEntities = (totalResult as any)[0].result?.length || 0;
+        }
+      }
+
+      // Get entities by type
+      const byTypeResult = await this.client.query(
+        `SELECT entity_type, count(true) AS count FROM ${ENTITY_TABLE} GROUP BY entity_type`,
+        {}
+      );
+
+      const byType: Record<string, number> = {};
+      if (Array.isArray(byTypeResult) && byTypeResult.length > 0) {
+        let typeData: any[] = [];
+        if (Array.isArray(byTypeResult[0])) {
+          typeData = byTypeResult[0] || [];
+        } else if ((byTypeResult as any)[0]?.result) {
+          typeData = (byTypeResult as any)[0].result || [];
+        }
+        for (const row of typeData) {
+          if (row.entity_type && row.count) {
+            byType[row.entity_type] = row.count;
+          }
+        }
+      }
+
+      // Get total links (edges in memory_entity table)
+      const linksResult = await this.client.query(
+        `SELECT * FROM ${MEMORY_ENTITY_TABLE}`,
+        {}
+      );
+
+      let totalLinks = 0;
+      if (Array.isArray(linksResult) && linksResult.length > 0) {
+        if (Array.isArray(linksResult[0])) {
+          totalLinks = linksResult[0].length;
+        } else if ((linksResult as any)[0]?.result) {
+          totalLinks = (linksResult as any)[0].result?.length || 0;
+        }
+      }
+
+      return {
+        total_entities: totalEntities,
+        by_type: byType,
+        total_links: totalLinks,
+      };
+    } catch (error: any) {
+      console.error('[SurrealDB] getEntityStats failed:', error.message);
+      return { total_entities: 0, by_type: {}, total_links: 0 };
+    }
   }
 
   async close(): Promise<void> {
