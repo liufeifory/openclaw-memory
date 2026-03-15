@@ -14,9 +14,17 @@ export interface SurrealConfig {
 
 const MEMORY_TABLE = 'memory';
 const ENTITY_TABLE = 'entity';
+const MEMORY_ENTITY_TABLE = 'memory_entity';
 const RELATES_TABLE = 'relates';
 const VECTOR_DIMENSION = 1024;
 const SCHEMA_VERSION = 1;
+
+export const GRAPH_PROTECTION = {
+  MIN_MENTION_COUNT: 3,
+  MAX_MEMORY_LINKS: 500,
+  TTL_DAYS: 90,
+  PRUNE_INTERVAL_DAYS: 7,
+};
 
 export interface MigrationResult {
   success: boolean;
@@ -98,6 +106,7 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS is_active ON TABLE ${MEMORY_TABLE} TYPE bool DEFAULT true;
       DEFINE FIELD IF NOT EXISTS summary ON TABLE ${MEMORY_TABLE} TYPE option<string>;
       DEFINE FIELD IF NOT EXISTS updated_at ON TABLE ${MEMORY_TABLE} TYPE string;
+      DEFINE FIELD IF NOT EXISTS is_indexed ON TABLE ${MEMORY_TABLE} TYPE bool DEFAULT false;
     `);
     console.log('[SurrealDB] Memory table defined');
 
@@ -128,13 +137,69 @@ export class SurrealDatabase {
       console.warn('[SurrealDB] Session index creation failed:', error.message);
     }
 
+    try {
+      await this.query(`DEFINE INDEX IF NOT EXISTS is_indexed_idx ON TABLE ${MEMORY_TABLE} FIELDS is_indexed;`);
+      console.log('[SurrealDB] is_indexed index created');
+      migrated = true;
+    } catch (error: any) {
+      console.warn('[SurrealDB] is_indexed index creation failed:', error.message);
+    }
+
     await this.query(`
       DEFINE TABLE IF NOT EXISTS ${ENTITY_TABLE} SCHEMAFULL;
       DEFINE FIELD IF NOT EXISTS name ON TABLE ${ENTITY_TABLE} TYPE string;
       DEFINE FIELD IF NOT EXISTS normalized_name ON TABLE ${ENTITY_TABLE} TYPE option<string>;
       DEFINE FIELD IF NOT EXISTS entity_type ON TABLE ${ENTITY_TABLE} TYPE string;
+      DEFINE FIELD IF NOT EXISTS alias ON TABLE ${ENTITY_TABLE} TYPE option<array<string>>;
+      DEFINE FIELD IF NOT EXISTS mention_count ON TABLE ${ENTITY_TABLE} TYPE int DEFAULT 0;
+      DEFINE FIELD IF NOT EXISTS relation_count ON TABLE ${ENTITY_TABLE} TYPE int DEFAULT 0;
+      DEFINE FIELD IF NOT EXISTS last_accessed ON TABLE ${ENTITY_TABLE} TYPE option<string>;
+      DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${ENTITY_TABLE} TYPE string;
+      DEFINE FIELD IF NOT EXISTS is_active ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT true;
     `);
-    console.log('[SurrealDB] Entity table defined');
+    console.log('[SurrealDB] Entity table defined with graph protection fields');
+
+    try {
+      await this.query(`DEFINE INDEX IF NOT EXISTS entity_name_idx ON TABLE ${ENTITY_TABLE} FIELDS name;`);
+      console.log('[SurrealDB] Entity name index created');
+      migrated = true;
+    } catch (error: any) {
+      console.warn('[SurrealDB] Entity name index creation failed:', error.message);
+    }
+
+    try {
+      await this.query(`DEFINE INDEX IF NOT EXISTS entity_normalized_idx ON TABLE ${ENTITY_TABLE} FIELDS normalized_name;`);
+      console.log('[SurrealDB] Entity normalized_name index created');
+      migrated = true;
+    } catch (error: any) {
+      console.warn('[SurrealDB] Entity normalized_name index creation failed:', error.message);
+    }
+
+    await this.query(`
+      DEFINE TABLE IF NOT EXISTS ${MEMORY_ENTITY_TABLE} SCHEMAFULL;
+      DEFINE FIELD IF NOT EXISTS memory ON TABLE ${MEMORY_ENTITY_TABLE} TYPE record<${MEMORY_TABLE}>;
+      DEFINE FIELD IF NOT EXISTS entity ON TABLE ${MEMORY_ENTITY_TABLE} TYPE record<${ENTITY_TABLE}>;
+      DEFINE FIELD IF NOT EXISTS relation_type ON TABLE ${MEMORY_ENTITY_TABLE} TYPE string;
+      DEFINE FIELD IF NOT EXISTS weight ON TABLE ${MEMORY_ENTITY_TABLE} TYPE float DEFAULT 1.0;
+      DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${MEMORY_ENTITY_TABLE} TYPE string;
+    `);
+    console.log('[SurrealDB] memory_entity edge table defined');
+
+    try {
+      await this.query(`DEFINE INDEX IF NOT EXISTS memory_entity_memory_idx ON TABLE ${MEMORY_ENTITY_TABLE} FIELDS memory;`);
+      console.log('[SurrealDB] memory_entity memory index created');
+      migrated = true;
+    } catch (error: any) {
+      console.warn('[SurrealDB] memory_entity memory index creation failed:', error.message);
+    }
+
+    try {
+      await this.query(`DEFINE INDEX IF NOT EXISTS memory_entity_entity_idx ON TABLE ${MEMORY_ENTITY_TABLE} FIELDS entity;`);
+      console.log('[SurrealDB] memory_entity entity index created');
+      migrated = true;
+    } catch (error: any) {
+      console.warn('[SurrealDB] memory_entity entity index creation failed:', error.message);
+    }
 
     await this.query(`
       DEFINE TABLE IF NOT EXISTS ${RELATES_TABLE} SCHEMAFULL;
@@ -147,7 +212,7 @@ export class SurrealDatabase {
     return migrated;
   }
 
-  private async query(sql: string): Promise<any> {
+  async query(sql: string): Promise<any> {
     if (!this.client) {
       throw new Error('[SurrealDB] Client not connected');
     }
