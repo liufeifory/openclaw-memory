@@ -7,7 +7,7 @@
  * - Reflection generation: every 50 episodic memories
  */
 
-import { QdrantDatabase, MemoryType } from './qdrant-client.js';
+import { SurrealDatabase } from './surrealdb-client.js';
 import { ImportanceLearning } from './importance-learning.js';
 
 export interface MemoryMaintenanceConfig {
@@ -26,7 +26,7 @@ export class MemoryMaintenance {
   private importanceLearning: ImportanceLearning;
 
   constructor(
-    private db: QdrantDatabase,
+    private db: SurrealDatabase,
     config: MemoryMaintenanceConfig = {}
   ) {
     this.config = {

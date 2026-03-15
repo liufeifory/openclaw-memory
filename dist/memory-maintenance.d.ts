@@ -6,7 +6,7 @@
  * - Memory promotion: episodic -> semantic when access_count > 10
  * - Reflection generation: every 50 episodic memories
  */
-import { QdrantDatabase } from './qdrant-client.js';
+import { SurrealDatabase } from './surrealdb-client.js';
 export interface MemoryMaintenanceConfig {
     decayFactor?: number;
     promotionThreshold?: number;
@@ -20,7 +20,7 @@ export declare class MemoryMaintenance {
     private static readonly REFLECTION_INTERVAL;
     private config;
     private importanceLearning;
-    constructor(db: QdrantDatabase, config?: MemoryMaintenanceConfig);
+    constructor(db: SurrealDatabase, config?: MemoryMaintenanceConfig);
     /**
      * Run decay on memories older than specified days.
      * Returns the number of memories decayed.

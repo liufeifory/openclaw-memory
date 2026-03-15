@@ -4,8 +4,8 @@
  * Configurable proportions for different context sections.
  */
 
-import type { MemoryWithSimilarity } from './memory-types.js';
-import type { ReflectionMemory } from './memory-types.js';
+import type { MemoryWithSimilarity } from './memory-store-surreal.js';
+import type { ReflectionMemory } from './memory-store-surreal.js';
 
 export interface ContextOptions {
   maxMemories?: number;

@@ -9,9 +9,9 @@
  * 3. Compatible additions (like coffee + like tea) = NO CONFLICT
  * 4. General + specific (like fruit -> like apples) = NO CONFLICT
  */
-import { QdrantDatabase } from './qdrant-client.js';
+import { SurrealDatabase } from './surrealdb-client.js';
 import { EmbeddingService } from './embedding.js';
-import { MemoryStore } from './memory-store-qdrant.js';
+import { MemoryStore } from './memory-store-surreal.js';
 import { ConflictDetector } from './conflict-detector.js';
 const TEST_CASES = [
     {
@@ -60,7 +60,13 @@ const TEST_CASES = [
 async function runConflictTests() {
     console.log('=== Conflict Detection Test Suite ===\n');
     // Initialize components
-    const db = new QdrantDatabase({ url: 'http://localhost:6333' });
+    const db = new SurrealDatabase({
+        url: 'http://localhost:8000',
+        namespace: 'openclaw',
+        database: 'memory',
+        username: 'root',
+        password: 'root',
+    });
     const embedding = new EmbeddingService('http://localhost:8080');
     const memoryStore = new MemoryStore(db, embedding);
     const conflictDetector = new ConflictDetector('http://localhost:8081');

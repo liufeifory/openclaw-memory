@@ -187,7 +187,7 @@ export class SurrealDatabase {
         if (!this.client) {
             throw new Error('[SurrealDB] Client not connected');
         }
-        console.log(`[SurrealDB] Search: embedding length=${embedding?.length}, filter=${JSON.stringify(filter)}`);
+        console.log(`[SurrealDB] Search: embedding=${embedding?.length}, filter=${JSON.stringify(filter)}`);
         const conditions = [];
         const params = { query_embedding: embedding, limit };
         if (filter?.type || filter?.memory_type) {

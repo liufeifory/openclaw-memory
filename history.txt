@@ -1,0 +1,30 @@
+#V2
+-- 测试 upsert 语法
+UPSERT memory:999 SET type = 'test', content = 'hello world', embedding = [], importance = 0.5;
+SELECT * FROM memory:999;
+DELETE memory:999;
+-- 测试 datetime 格式
+UPSERT memory:888 SET type = 'test', content = 'hello', created_at = '2026-03-15T05:00:00.000Z', updated_at = time::now();
+SELECT * FROM memory:888;
+DELETE memory:888;
+-- 测试 datetime 转字符串
+-- 测试使用 JavaScript 生成 ISO 字符串
+UPSERT memory:777 SET type = 'test', content = 'hello', created_at = '2026-03-15T06:00:00.000Z', updated_at = '2026-03-15T06:00:00.000Z';
+SELECT * FROM memory:777;
+DELETE memory:777;
+-- 检查数据库中的记录
+SELECT id, type, content, embedding FROM memory;
+-- 检查向量索引
+-- 检查记录
+SELECT id, type, content FROM memory;
+-- 检查索引
+SELECT * FROM vector_idx;
+-- 测试搜索（使用一个简单的查询向量）
+SELECT id, type, content, vector::similarity::cosine(embedding, [0.1, 0.1, 0.1, 0.1, 0.1]) as sim FROM memory ORDER BY sim DESC;
+-- 查看 embedding 维度
+SELECT id, type, array::len(embedding) as dim FROM memory;
+SELECT id, type, content, array::len(embedding) as embedding_len FROM memory;
+DELETE FROM memory;
+SELECT id, type, embedding[0..5] as embedding_sample FROM memory;
+SELECT id, type, vector::similarity::cosine(embedding, [-0.02, -0.02, -0.04, -0.01, 0.007]) AS similarity FROM memory LIMIT 3;
+SELECT id, type, vector::similarity::cosine(embedding, embedding) AS similarity FROM memory LIMIT 3;

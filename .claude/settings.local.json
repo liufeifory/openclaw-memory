@@ -99,7 +99,11 @@
       "Bash(psql -U liufei -d openclaw_memory -c \"\\\\d semantic_memory\" 2>&1)",
       "Bash(psql -U liufei -d openclaw_memory -c \"\\\\d reflection_memory\" 2>&1)",
       "Bash(npm install:*)",
-      "Bash(chmod +x /Users/liufei/.openclaw/plugins/openclaw-memory/start-qdrant.sh)"
+      "Bash(chmod +x /Users/liufei/.openclaw/plugins/openclaw-memory/start-qdrant.sh)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:surrealdb.com)",
+      "Bash(ls:*)",
+      "WebSearch"
     ]
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "openclaw-memory",
   "version": "2.2.0",
-  "description": "Long-term memory with semantic search (supports pgvector, Qdrant, and SurrealDB)",
+  "description": "Long-term memory with semantic search (SurrealDB backend)",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -9,24 +9,19 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "node dist/test-full.js",
-    "test:qdrant": "node dist/test-qdrant.js",
     "test:surreal": "node dist/test-surreal.js",
     "test:recall": "node dist/test-recall.js",
     "test:conflict": "node dist/test-conflict.js",
     "test:features": "node dist/test-features.js",
-    "migrate": "node dist/migrate.js",
     "profile": "node dist/profile.js",
     "test:v27": "node dist/test-v27.js",
     "clean": "rm -rf dist/"
   },
   "dependencies": {
-    "@qdrant/js-client-rest": "^1.7.0",
-    "pg": "^8.11.3",
     "surrealdb": "^2.0.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/pg": "^8.11.2",
     "typescript": "^5.3.3"
   },
   "peerDependencies": {

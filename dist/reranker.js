@@ -77,7 +77,7 @@ export class Reranker {
                 });
                 return await response.json();
             });
-            const output = (result.content || result.generated_text || '').trim();
+            const output = (result.content || result.generated_text || '').toString().trim();
             const rankedIndices = this.parseRanking(output, topResults.length);
             // Assign initial scores based on rank
             let ranked = rankedIndices.map((originalIndex, rank) => {

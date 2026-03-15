@@ -126,7 +126,7 @@ export class Reranker {
         return await response.json();
       }) as any;
 
-      const output = (result.content || result.generated_text || '').trim();
+      const output = (result.content || result.generated_text || '').toString().trim();
       const rankedIndices = this.parseRanking(output, topResults.length);
 
       // Assign initial scores based on rank

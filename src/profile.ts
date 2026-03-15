@@ -9,11 +9,18 @@
  */
 
 import { EmbeddingService } from './embedding.js';
-import { MemoryManager } from './memory-manager-qdrant.js';
+import { MemoryManager as SurrealMemoryManager } from './memory-manager-surreal.js';
 
 const EMBEDDING_ENDPOINT = process.env.EMBEDDING_ENDPOINT || 'http://localhost:8080';
-const QDRANT_CONFIG = {
-  qdrant: { url: process.env.QDRANT_URL || 'http://localhost:6333' },
+const SURREALDB_CONFIG = {
+  backend: 'surrealdb' as const,
+  surrealdb: {
+    url: process.env.SURREALDB_URL || 'http://localhost:8000',
+    namespace: 'openclaw',
+    database: 'memory',
+    username: 'root',
+    password: 'root',
+  },
   embedding: { endpoint: EMBEDDING_ENDPOINT },
 };
 
@@ -32,7 +39,7 @@ async function profileEmbedding(text: string): Promise<number> {
 }
 
 async function profileSearch(
-  manager: MemoryManager,
+  manager: SurrealMemoryManager,
   query: string,
   topK: number = 5
 ): Promise<number> {
@@ -57,7 +64,7 @@ async function runProfiles() {
 
   // Profile full search
   console.log('[完整检索性能测试]');
-  const manager = new MemoryManager(QDRANT_CONFIG);
+  const manager = new SurrealMemoryManager(SURREALDB_CONFIG);
   await manager.initialize();
 
   const searchTimes: number[] = [];
@@ -75,7 +82,7 @@ async function runProfiles() {
   console.log(`  检索平均耗时：${avgSearch.toFixed(2)}ms`);
   console.log(`  端到端平均耗时：${(avgEmbedding + avgSearch).toFixed(2)}ms`);
 
-  await manager.shutdown();
+  await manager.close();
 }
 
 // Cold start test
@@ -83,7 +90,7 @@ async function profileColdStart() {
   console.log('\n=== Cold Start Profile ===\n');
 
   const start = Date.now();
-  const manager = new MemoryManager(QDRANT_CONFIG);
+  const manager = new SurrealMemoryManager(SURREALDB_CONFIG);
   console.log(`  Constructor: ${Date.now() - start}ms`);
 
   const initStart = Date.now();
@@ -94,7 +101,7 @@ async function profileColdStart() {
   await manager.retrieveRelevant('test', undefined, 1, 0.5);
   console.log(`  First search: ${Date.now() - searchStart}ms`);
 
-  await manager.shutdown();
+  await manager.close();
 }
 
 async function main() {

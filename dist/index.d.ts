@@ -1,7 +1,7 @@
 /**
  * OpenClaw Memory Plugin - Native Node.js Implementation
  *
- * Supports PostgreSQL (pgvector), Qdrant, and SurrealDB backends.
+ * Backend: SurrealDB with vector search capabilities.
  *
  * Features:
  * - Semantic retrieval via vector search
@@ -9,30 +9,6 @@
  * - Episodic, semantic, and reflection memories
  * - Message queue + background worker for decoupled storage
  */
-interface PgConfig {
-    backend?: 'pgvector';
-    database: {
-        host: string;
-        port: number;
-        database: string;
-        user: string;
-        password: string;
-    };
-    embedding?: {
-        endpoint: string;
-    };
-}
-interface QdrantConfig {
-    backend: 'qdrant';
-    qdrant: {
-        url: string;
-        port?: number;
-        apiKey?: string;
-    };
-    embedding?: {
-        endpoint: string;
-    };
-}
 interface SurrealConfig {
     backend: 'surrealdb';
     surrealdb: {
@@ -46,7 +22,7 @@ interface SurrealConfig {
         endpoint: string;
     };
 }
-type MemoryPluginConfig = PgConfig | QdrantConfig | SurrealConfig;
+type MemoryPluginConfig = SurrealConfig;
 declare const memoryPlugin: {
     id: string;
     name: string;

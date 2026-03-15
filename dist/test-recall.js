@@ -5,9 +5,9 @@
  *
  * Usage: npm run test:recall
  */
-import { QdrantDatabase } from './qdrant-client.js';
+import { SurrealDatabase } from './surrealdb-client.js';
 import { EmbeddingService } from './embedding.js';
-import { MemoryStore } from './memory-store-qdrant.js';
+import { MemoryStore } from './memory-store-surreal.js';
 import { Reranker } from './reranker.js';
 // Test queries with expected results
 const TEST_QUERIES = [
@@ -27,7 +27,13 @@ const TEST_QUERIES = [
 async function runRecallTest() {
     console.log('=== Recall Rate Test ===\n');
     // Initialize components
-    const db = new QdrantDatabase({ url: 'http://localhost:6333' });
+    const db = new SurrealDatabase({
+        url: 'http://localhost:8000',
+        namespace: 'openclaw',
+        database: 'memory',
+        username: 'root',
+        password: 'root',
+    });
     const embedding = new EmbeddingService('http://localhost:8080');
     const memoryStore = new MemoryStore(db, embedding);
     const reranker = new Reranker('http://localhost:8081');

@@ -1,7 +1,7 @@
 /**
  * OpenClaw Memory Plugin - Native Node.js Implementation
  *
- * Supports PostgreSQL (pgvector), Qdrant, and SurrealDB backends.
+ * Backend: SurrealDB with vector search capabilities.
  *
  * Features:
  * - Semantic retrieval via vector search
@@ -9,8 +9,6 @@
  * - Episodic, semantic, and reflection memories
  * - Message queue + background worker for decoupled storage
  */
-import { MemoryManager as PgMemoryManager } from './memory-manager.js';
-import { MemoryManager as QdrantMemoryManager } from './memory-manager-qdrant.js';
 import { MemoryManager as SurrealMemoryManager } from './memory-manager-surreal.js';
 import { LLMLimiter } from './llm-limiter.js';
 import { MemoryFilter } from './memory-filter.js';
@@ -60,15 +58,7 @@ function appendToLocalMemory(content, sessionId) {
 }
 function getMemoryManager(config) {
     if (!memoryManager) {
-        if (config.backend === 'qdrant') {
-            memoryManager = new QdrantMemoryManager(config);
-        }
-        else if (config.backend === 'surrealdb') {
-            memoryManager = new SurrealMemoryManager(config);
-        }
-        else {
-            memoryManager = new PgMemoryManager(config);
-        }
+        memoryManager = new SurrealMemoryManager(config);
     }
     return memoryManager;
 }
@@ -109,27 +99,21 @@ function buildMemoryContext(memories) {
 const memoryPlugin = {
     id: 'openclaw-memory',
     name: 'OpenClaw Memory',
-    description: 'Long-term memory with semantic search (supports pgvector, Qdrant, and SurrealDB)',
+    description: 'Long-term memory with semantic search (SurrealDB backend)',
     kind: 'memory',
     async init(config) {
         // Store config for later use in register
         savedConfig = config;
         // Initialize memory manager
         const mm = getMemoryManager(config);
-        // Initialize backend (run migration if needed)
-        if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
-            const result = await mm.initialize();
-            if (result.migrated) {
-                console.log('[openclaw-memory] Schema migration:', result.changes);
-            }
-        }
-        else if (config.backend === 'surrealdb' && mm instanceof SurrealMemoryManager) {
+        // Initialize SurrealDB backend
+        if (mm instanceof SurrealMemoryManager) {
             const result = await mm.initialize();
             if (result.migrated) {
                 console.log('[openclaw-memory] SurrealDB schema migration:', result.changes);
             }
         }
-        console.log('[openclaw-memory] Plugin initialized with backend:', config.backend || 'pgvector');
+        console.log('[openclaw-memory] Plugin initialized with SurrealDB backend');
     },
     register(api) {
         // Get plugin config from OpenClaw - use api.pluginConfig property (not getConfig method)
@@ -144,10 +128,9 @@ const memoryPlugin = {
         }
         // Debug: log resolved config
         console.log('[openclaw-memory] Resolved config:', JSON.stringify(config, null, 2));
-        // Check for any backend config
-        const hasBackend = config.backend || 'database' in config || 'qdrant' in config || 'surrealdb' in config;
-        if (!hasBackend) {
-            console.warn('[openclaw-memory] No database config found, plugin disabled');
+        // Check for SurrealDB config
+        if (!config.surrealdb) {
+            console.warn('[openclaw-memory] No SurrealDB config found, plugin disabled');
             return;
         }
         // Initialize memory manager
@@ -193,12 +176,7 @@ const memoryPlugin = {
                     // 2. 存储记忆（同时写入数据库和本地文件）
                     if (filterResult.shouldStore && filterResult.memoryType) {
                         if (filterResult.memoryType === 'semantic') {
-                            if (mm instanceof QdrantMemoryManager || mm instanceof SurrealMemoryManager) {
-                                await mm.storeSemanticWithConflictCheck(item.message, filterResult.importance, 0.85, item.sessionId);
-                            }
-                            else {
-                                await mm.storeSemantic(item.message, filterResult.importance);
-                            }
+                            await mm.storeSemanticWithConflictCheck(item.message, filterResult.importance, 0.85, item.sessionId);
                         }
                         else {
                             await mm.storeMemory(item.sessionId, item.message, filterResult.importance);

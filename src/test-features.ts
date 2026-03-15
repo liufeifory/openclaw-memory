@@ -8,13 +8,19 @@
  * 4. Hierarchical Memory Tree (Task #42)
  */
 
-import { QdrantDatabase } from './qdrant-client.js';
+import { SurrealDatabase } from './surrealdb-client.js';
 import { EmbeddingService } from './embedding.js';
-import { MemoryStore } from './memory-store-qdrant.js';
+import { MemoryStore } from './memory-store-surreal.js';
 import { Summarizer } from './summarizer.js';
 import { SemanticClusterer } from './clusterer.js';
 
-const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
+const SURREALDB_CONFIG = {
+  url: process.env.SURREALDB_URL || 'http://localhost:8000',
+  namespace: 'openclaw',
+  database: 'memory',
+  username: 'root',
+  password: 'root',
+};
 const EMBEDDING_URL = process.env.EMBEDDING_ENDPOINT || 'http://localhost:8080';
 const LLAMA_URL = process.env.LLAMA_ENDPOINT || 'http://localhost:8081';
 
@@ -56,7 +62,7 @@ async function testTokenCompression() {
 async function testSemanticDedupe() {
   console.log('=== Test: Semantic Dedupe ===\n');
 
-  const db = new QdrantDatabase({ url: QDRANT_URL });
+  const db = new SurrealDatabase(SURREALDB_CONFIG);
   const embedding = new EmbeddingService(EMBEDDING_URL);
   const memoryStore = new MemoryStore(db, embedding);
 
@@ -84,7 +90,7 @@ async function testSemanticDedupe() {
 async function testSessionIsolation() {
   console.log('=== Test: Session Isolation ===\n');
 
-  const db = new QdrantDatabase({ url: QDRANT_URL });
+  const db = new SurrealDatabase(SURREALDB_CONFIG);
   const embedding = new EmbeddingService(EMBEDDING_URL);
   const memoryStore = new MemoryStore(db, embedding);
 

@@ -80,7 +80,7 @@ export class ConflictDetector {
                 });
                 return await response.json();
             });
-            const output = (result.content || result.generated_text || '').trim().toUpperCase();
+            const output = (result.content || result.generated_text || '').toString().trim().toUpperCase();
             const llmResult = output.includes('YES');
             // Fallback: keyword-based conflict detection for common patterns
             if (!llmResult) {

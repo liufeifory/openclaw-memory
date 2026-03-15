@@ -9,34 +9,25 @@
  *   node memory-cli.ts delete <id>
  */
 
-import { MemoryManager } from './memory-manager-qdrant.js';
+import { MemoryManager } from './memory-manager-surreal.js';
 
-const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
-const EMBEDDING_ENDPOINT = process.env.EMBEDDING_ENDPOINT || 'http://localhost:8080';
-
-interface Config {
-  backend: 'qdrant';
-  qdrant: {
-    url: string;
-  };
-  embedding: {
-    endpoint: string;
-  };
-}
-
-const config: Config = {
-  backend: 'qdrant',
-  qdrant: {
-    url: QDRANT_URL,
+const SURREALDB_CONFIG = {
+  backend: 'surrealdb' as const,
+  surrealdb: {
+    url: process.env.SURREALDB_URL || 'http://localhost:8000',
+    namespace: 'openclaw',
+    database: 'memory',
+    username: 'root',
+    password: 'root',
   },
   embedding: {
-    endpoint: EMBEDDING_ENDPOINT,
+    endpoint: process.env.EMBEDDING_ENDPOINT || 'http://localhost:8080',
   },
 };
 
 async function printUsage() {
   console.log(`
-Memory CLI - Store and retrieve memories from Qdrant
+Memory CLI - Store and retrieve memories with SurrealDB
 
 Usage:
   memory-cli store <content> [options]    Store a memory
@@ -62,7 +53,7 @@ Examples:
 }
 
 async function storeMemory(content: string, options: { type: string; importance: number; session: string }) {
-  const mm = new MemoryManager(config);
+  const mm = new MemoryManager(SURREALDB_CONFIG);
   await mm.initialize();
 
   try {
@@ -84,12 +75,12 @@ async function storeMemory(content: string, options: { type: string; importance:
     console.error('Error storing memory:', error);
     process.exit(1);
   } finally {
-    await mm.shutdown();
+    await mm.close();
   }
 }
 
 async function searchMemories(query: string, options: { topK: number; threshold: number }) {
-  const mm = new MemoryManager(config);
+  const mm = new MemoryManager(SURREALDB_CONFIG);
   await mm.initialize();
 
   try {
@@ -114,95 +105,49 @@ async function searchMemories(query: string, options: { topK: number; threshold:
     console.error('Error searching memories:', error);
     process.exit(1);
   } finally {
-    await mm.shutdown();
+    await mm.close();
   }
 }
 
 async function listMemories(limit: number) {
-  const mm = new MemoryManager(config);
+  const mm = new MemoryManager(SURREALDB_CONFIG);
   await mm.initialize();
 
   try {
-    const result = await mm.listMemories(limit);
-
-    console.log(`\nRecent memories (${result.points.length} items)\n`);
+    const stats = await mm.getStats();
+    console.log(`\nRecent memories (Total: ${stats.total_count})\n`);
     console.log('='.repeat(60));
-
-    if (result.points.length === 0) {
-      console.log('No memories stored.');
-      return;
-    }
-
-    result.points.reverse().forEach((p, i) => {
-      console.log(`${i + 1}. [${p.payload.memory_type}] (ID: ${p.id})`);
-      console.log(`   ${p.payload.content}`);
-      console.log(`   Session: ${p.payload.session_id} | Created: ${p.payload.created_at}`);
-      console.log();
-    });
+    console.log(`Episodic: ${stats.episodic_count}`);
+    console.log(`Semantic: ${stats.semantic_count}`);
+    console.log(`Reflection: ${stats.reflection_count}`);
+    console.log('\nNote: Use search command to find specific memories');
   } catch (error) {
     console.error('Error listing memories:', error);
     process.exit(1);
   } finally {
-    await mm.shutdown();
-  }
-}
-
-async function deleteMemory(id: number) {
-  const mm = new MemoryManager(config);
-  await mm.initialize();
-
-  try {
-    await mm.deleteMemories([id]);
-    console.log(`Deleted memory with ID: ${id}`);
-  } catch (error) {
-    console.error('Error deleting memory:', error);
-    process.exit(1);
-  } finally {
-    await mm.shutdown();
-  }
-}
-
-async function clearAllMemories() {
-  const mm = new MemoryManager(config);
-  await mm.initialize();
-
-  try {
-    await mm.clearAllMemories();
-    console.log('Cleared all memories.');
-  } catch (error) {
-    console.error('Error clearing memories:', error);
-    process.exit(1);
-  } finally {
-    await mm.shutdown();
+    await mm.close();
   }
 }
 
 async function showStats() {
-  const mm = new MemoryManager(config);
+  const mm = new MemoryManager(SURREALDB_CONFIG);
   await mm.initialize();
 
   try {
-    const stats = await mm.getCollectionStats();
+    const stats = await mm.getStats();
 
-    console.log('\nQdrant Collection Stats\n');
+    console.log('\nSurrealDB Memory Stats\n');
     console.log('='.repeat(60));
-    console.log(`Points count: ${stats.points_count}`);
-    console.log(`Indexed vectors: ${stats.indexed_vectors_count}`);
-    console.log(`Segments: ${stats.segments_count}`);
-    console.log(`Status: ${stats.status}`);
+    console.log(`Episodic memories: ${stats.episodic_count}`);
+    console.log(`Semantic memories: ${stats.semantic_count}`);
+    console.log(`Reflection memories: ${stats.reflection_count}`);
+    console.log(`Total memories: ${stats.total_count}`);
     console.log();
-
-    if (stats.payload_schema) {
-      console.log('Payload Schema:');
-      for (const [field, info] of Object.entries(stats.payload_schema)) {
-        console.log(`  - ${field}: ${info.data_type} (${info.points} points)`);
-      }
-    }
   } catch (error) {
     console.error('Error getting stats:', error);
     process.exit(1);
   } finally {
-    await mm.shutdown();
+    await mm.close();
   }
 }
 
@@ -254,22 +199,6 @@ async function main() {
 
     case 'list': {
       await listMemories(parseInt(parseOption('limit', '10')));
-      break;
-    }
-
-    case 'delete': {
-      const id = parseInt(args[1]);
-      if (isNaN(id)) {
-        console.error('Error: Valid ID is required');
-        await printUsage();
-        process.exit(1);
-      }
-      await deleteMemory(id);
-      break;
-    }
-
-    case 'clear': {
-      await clearAllMemories();
       break;
     }
 
