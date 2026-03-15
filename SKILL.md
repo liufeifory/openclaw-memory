@@ -1,75 +1,123 @@
 ---
 name: openclaw-memory
-description: "Qdrant-based long-term memory with automatic storage and retrieval. Auto-stores user messages, auto-injects relevant memories into context. Use for: (1) automatic context injection, (2) semantic memory retrieval, (3) user preference extraction, (4) conversation summarization."
+description: "Production-grade long-term memory system with semantic search, auto-storage, and auto-retrieval. Supports PostgreSQL (pgvector) and Qdrant backends."
 metadata:
   {
     "openclaw": {
       "emoji": "🧠",
       "kind": "memory",
-      "requires": { "config": ["qdrant.url"] }
+      "requires": {
+        "config": ["database"]
+      }
     },
   }
 allowed-tools: ["bash"]
 ---
 
-# Memory System (Auto Storage + Retrieval)
+# OpenClaw Memory Plugin
 
-基于 Qdrant 向量数据库的长期记忆系统，**自动存储**和**自动检索**用户记忆。
+基于向量数据库的长期记忆系统，**自动存储**和**自动检索**用户记忆。
 
 ## 自动功能
 
 ### 1. 自动记忆存储 (message_received Hook)
 
-所有用户消息自动处理：
+所有用户消息自动分类并存储：
 
 ```
-用户消息 → 分类 → 存储到 Qdrant
+用户消息 → MemoryFilter (LLM 分类) → MemoryManager → 向量数据库
 ```
 
-- **TRIVIAL** (问候、感谢): 不存储
-- **FACT/PREFERENCE** (用户事实、偏好): 存储为 semantic 记忆
-- **EVENT** (事件、经历): 存储为 episodic 记忆
-- **QUESTION** (问题): 不存储
+**消息分类：**
+
+| 分类 | 示例 | 是否存储 | 记忆类型 |
+|------|------|----------|----------|
+| TRIVIAL | "你好"、"谢谢" | ❌ | - |
+| FACT | "我是程序员" | ✅ | semantic |
+| PREFERENCE | "我喜欢 Python" | ✅ | semantic |
+| EVENT | "今天去了星巴克" | ✅ | episodic |
+| QUESTION | "什么是 AI？" | ❌ | - |
 
 ### 2. 自动上下文注入 (before_prompt_build Hook)
 
 每次 Agent 响应前自动注入相关记忆：
 
 ```
-用户消息 → 检索相关记忆 → 注入到 prompt → Agent 响应
+用户消息 → 向量检索 (top_k=3, threshold=0.65) → 注入 prompt → Agent 响应
 ```
 
-- 检索 top 3 条相关记忆
-- 相似度阈值 > 0.65
-- 超时 300ms (避免阻塞)
+**注入格式：**
 
-### 3. 偏好提取 (每 10 条消息)
+```
+--- Relevant Memories ---
+[SEMANTIC] (sim: 0.923, imp: 0.80) 用户经常使用 TypeScript
+[EPISODIC] (sim: 0.856, imp: 0.65) 用户昨天安装了 PostgreSQL
+--- End Memories ---
+```
+
+**超时保护：** 1000ms（避免阻塞 Agent 响应）
+
+### 3. 偏好提取（每 10 条消息）
 
 自动从对话中提取用户偏好：
-- likes (喜欢的事物)
-- dislikes (不喜欢的事物)
-- facts (用户事实)
-- habits (用户习惯)
 
-### 4. 对话摘要 (每 10 条消息)
+- **likes** - 喜欢的事物
+- **dislikes** - 不喜欢的事物
+- **facts** - 用户事实
+- **habits** - 用户习惯
 
-自动生成对话摘要，存储为 reflection 记忆。
+提取结果存储为 **semantic 记忆**。
+
+### 4. 对话摘要（每 10 条消息）
+
+自动生成对话摘要，存储为 **reflection 记忆**（importance=0.9）。
 
 ## 配置
 
-### Qdrant 配置 (推荐)
+### PostgreSQL (pgvector) 配置
 
-```yaml
-plugins:
-  slots:
-    memory: "openclaw-memory"
-  plugins:
-    openclaw-memory:
-      backend: "qdrant"
-      qdrant:
-        url: "http://localhost:6333"
-      embedding:
-        endpoint: "http://localhost:8080"
+```json
+{
+  "plugins": {
+    "slots": {
+      "memory": "openclaw-memory"
+    },
+    "openclaw-memory": {
+      "backend": "pgvector",
+      "database": {
+        "host": "localhost",
+        "port": 5432,
+        "database": "openclaw_memory",
+        "user": "liufei",
+        "password": ""
+      },
+      "embedding": {
+        "endpoint": "http://localhost:8080"
+      }
+    }
+  }
+}
+```
+
+### Qdrant 配置
+
+```json
+{
+  "plugins": {
+    "slots": {
+      "memory": "openclaw-memory"
+    },
+    "openclaw-memory": {
+      "backend": "qdrant",
+      "qdrant": {
+        "url": "http://localhost:6333"
+      },
+      "embedding": {
+        "endpoint": "http://localhost:8080"
+      }
+    }
+  }
+}
 ```
 
 ## 手动检索
@@ -98,7 +146,8 @@ plugins:
 
 ```bash
 # 存储记忆
-node dist/memory-cli.ts store "用户喜欢 TypeScript" --type=semantic --importance=0.8
+node dist/memory-cli.ts store "用户喜欢 TypeScript" \
+  --type=semantic --importance=0.8
 
 # 搜索记忆
 node dist/memory-cli.ts search "编程语言偏好" --top-k=3
@@ -118,7 +167,8 @@ node dist/memory-cli.ts clear
 
 ## 输出格式
 
-memory_search 工具返回：
+`memory_search` 工具返回：
+
 ```json
 {
   "memories": [
@@ -142,22 +192,22 @@ memory_search 工具返回：
 
 - **时间衰减**: 每日自动执行 `importance *= 0.98`
 - **冲突检测**: semantic 记忆相似度 > 0.85 时触发
-- **聚类**: 空闲时自动聚类相似记忆
+- **记忆提升**: access_count > 10 时 episodic → semantic
 
 ## Hook 说明
 
 | Hook | 类型 | 返回值 | 说明 |
 |------|------|--------|------|
-| `message_received` | 异步非阻塞 | void | 后台存储消息 |
-| `before_prompt_build` | 同步阻塞 | `{ prependContext }` | 注入记忆上下文 |
+| `message_received` | 异步非阻塞 | void | 后台存储消息（仅渠道模式） |
+| `before_prompt_build` | 同步阻塞 | `{ prependContext }` | 注入记忆上下文（所有模式） |
 
 ### before_prompt_build 超时保护
 
 ```typescript
-// 300ms 超时，避免阻塞 Agent 响应
+// 1000ms 超时，避免阻塞 Agent 响应
 Promise.race([
   mm.retrieveRelevant(query, sessionId, 3, 0.65),
-  setTimeout(() => reject(new Error('timeout')), 300)
+  setTimeout(() => reject(new Error('timeout')), 1000)
 ])
 ```
 
@@ -170,25 +220,28 @@ Promise.race([
 
 | 服务 | 端口 | 用途 |
 |------|------|------|
-| Qdrant | 6333 | 向量数据库 |
-| llama.cpp (Embedding) | 8080 | BGE-M3 向量生成 |
-| llama.cpp (LLM) | 8081 | Llama-3.2-1B 重排序/摘要 |
+| PostgreSQL / Qdrant | 5432 / 6333 | 向量数据库 |
+| llama.cpp (Embedding) | 8080 | BGE-M3 向量生成 (1024 维) |
+| llama.cpp (LLM) | 8081 | Llama-3.2-1B 分类/提取/摘要 |
 
 ## 故障排除
 
 **没有自动注入记忆：**
-1. 检查 Qdrant 是否运行：`curl http://localhost:6333`
+
+1. 检查数据库是否运行：`curl http://localhost:6333` 或 `pg_isready`
 2. 检查 embedding 服务：`curl http://localhost:8080/embedding -d '{"input":"test"}'`
-3. 查看日志：`./deploy.sh logs`
+3. 查看日志：`tail -f ~/.openclaw/logs/gateway.log | grep memory`
 
 **检索结果不相关：**
+
 1. 降低阈值：`threshold: 0.5`
 2. 增加检索数量：`top_k: 10`
 
 **Hook 超时警告：**
-- 正常现象，说明检索超过 300ms
-- 记忆检索会在后台继续，下次请求时可能已有结果
+
+- 正常现象，说明检索超过 1000ms
 - Agent 响应不受影响
+- 如频繁出现，可增加 `timeout_ms` 配置
 
 ## 脚本
 
@@ -198,3 +251,28 @@ Promise.race([
 | `dist/test-qdrant.js` | Qdrant 功能测试 |
 | `dist/test-features.js` | 特性测试 |
 | `dist/profile.js` | 性能分析 |
+| `dist/migrate.ts` | 数据库迁移 |
+
+## 本地备份
+
+系统同步写入本地 Markdown 文件：
+
+**路径：** `~/.openclaw/workspace/memory/YYYY-MM-DD.md`
+
+**格式：**
+
+```markdown
+# 2026-03-15
+
+## 日志
+
+- 2026-03-15T10:30:00Z: [FACT] 用户是程序员
+- 2026-03-15T10:35:00Z: [PREFERENCE-LIKE] 用户喜欢 TypeScript
+```
+
+## 相关文档
+
+- [README.md](README.md) - 快速开始
+- [USAGE.md](USAGE.md) - 使用指南
+- [ARCHITECTURE.md](ARCHITECTURE.md) - 架构说明
+- [CONFIG.md](CONFIG.md) - 配置详解
