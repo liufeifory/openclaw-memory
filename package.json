@@ -18,6 +18,7 @@
     "test:v27": "node dist/test-v27.js",
     "test:entity-extractor": "node dist/test-entity-extractor.js",
     "test:entity-indexer": "node dist/test-entity-indexer.js",
+    "test:hybrid-retriever": "node dist/test-hybrid-retriever.js",
     "clean": "rm -rf dist/"
   },
   "dependencies": {

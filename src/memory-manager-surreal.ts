@@ -12,6 +12,8 @@ import { LLMLimiter } from './llm-limiter.js';
 import { ImportanceLearning } from './importance-learning.js';
 import { SemanticClusterer } from './clusterer.js';
 import { Summarizer } from './summarizer.js';
+import { HybridRetriever } from './hybrid-retrieval.js';
+import { EntityIndexer } from './entity-indexer.js';
 import type { MemoryWithSimilarity } from './memory-store-surreal.js';
 
 export interface RetrievalFunnelStats {
@@ -50,6 +52,8 @@ export class MemoryManager {
   private importanceLearning: ImportanceLearning;
   private clusterer: SemanticClusterer;
   private summarizer: Summarizer;
+  private hybridRetriever: HybridRetriever;
+  private entityIndexer: EntityIndexer;
   private idleClusteringInterval?: NodeJS.Timeout;
   private activeSessions = new Set<string>();
   private sessionBuffers = new Map<string, string[]>();
@@ -74,6 +78,10 @@ export class MemoryManager {
     this.importanceLearning = new ImportanceLearning();
     this.clusterer = new SemanticClusterer(llamaEndpoint, this.limiter);
     this.summarizer = new Summarizer(llamaEndpoint, this.limiter);
+
+    // Initialize EntityIndexer and HybridRetriever
+    this.entityIndexer = new EntityIndexer(this.db);
+    this.hybridRetriever = new HybridRetriever(this.db, this.embedding, this.entityIndexer, this.reranker);
   }
 
   /**
@@ -258,7 +266,8 @@ export class MemoryManager {
   }
 
   /**
-   * Retrieve memories relevant to a query.
+   * Retrieve memories relevant to a query using HybridRetriever.
+   * Combines vector search + graph traversal + reranking.
    */
   async retrieveRelevant(
     query: string,
@@ -279,86 +288,39 @@ export class MemoryManager {
       typeDistribution: {},
     };
 
-    const embedding = await this.embedding.embed(query);
+    // Use HybridRetriever for vector + graph hybrid search
+    const hybridResult = await this.hybridRetriever.retrieve(query, sessionId, topK, threshold);
 
-    const searchResults = await this.memoryStore.search(embedding, INITIAL_K, threshold, undefined, false, sessionId);
+    funnel.initialCount = hybridResult.stats.vectorCount + hybridResult.stats.graphCount;
+    funnel.afterRerank = hybridResult.stats.mergedCount;
+    funnel.afterThreshold = hybridResult.stats.finalCount;
+    funnel.finalCount = hybridResult.stats.finalCount;
+    funnel.avgSimilarity = hybridResult.stats.avgSimilarity;
 
-    if (!searchResults || !Array.isArray(searchResults)) {
-      console.warn('[MemoryManager] search returned invalid results, returning empty');
-      return [];
-    }
+    // Convert MemoryResult to MemoryWithSimilarity format
+    const results: MemoryWithSimilarity[] = hybridResult.results.map(r => ({
+      id: r.id,
+      content: r.content,
+      type: r.type,
+      similarity: r.score ?? r.similarity ?? 0,
+      score: r.score ?? r.similarity ?? 0,
+      importance: r.importance ?? 0.5,
+      created_at: r.created_at ?? new Date(),
+      access_count: r.access_count ?? 0,
+      cluster_id: r.cluster_id,
+    }));
 
-    funnel.initialCount = searchResults.length;
-
-    const now = new Date();
-    for (const mem of searchResults) {
-      const daysSinceCreation = (now.getTime() - mem.created_at.getTime()) / (1000 * 60 * 60 * 24);
-      const timeDecay = Math.exp(-0.05 * daysSinceCreation);
-
-      const memoryTime = mem.created_at?.getTime() || 0;
-      const threeDaysMs = 3 * 24 * 60 * 60 * 1000;
-      let baseSimilarity = mem.similarity ?? 0.5;
-
-      if (now.getTime() - memoryTime < threeDaysMs) {
-        baseSimilarity += 0.1;
-      }
-
-      mem.similarity = baseSimilarity * timeDecay;
-    }
-    funnel.afterTimeDecay = searchResults.length;
-
-    const reranked = await this.reranker.rerank(query, searchResults, {
-      topK: topK,
-      threshold: 0.7,
-      enableDiversity: true,
-    });
-
-    if (!reranked || !Array.isArray(reranked)) {
-      console.warn('[MemoryManager] reranker returned invalid results, returning empty');
-      return [];
-    }
-
-    funnel.afterRerank = reranked.length;
-
-    for (const mem of reranked) {
+    // Increment access counts for retrieved memories
+    for (const mem of results) {
       await this.memoryStore.incrementAccess(mem.id, mem.type as 'episodic' | 'semantic' | 'reflection');
     }
 
-    const afterThreshold = reranked.filter(r => (r.similarity ?? r.score) >= 0.6);
-    funnel.afterThreshold = afterThreshold.length;
-
-    const filtered = afterThreshold.filter(r => (r.importance ?? 0.5) >= 0.3);
-    funnel.afterImportance = filtered.length;
-
-    filtered.sort((a, b) => {
-      const scoreA = (a.similarity ?? a.score) * (a.importance ?? 0.5);
-      const scoreB = (b.similarity ?? b.score) * (b.importance ?? 0.5);
-      return scoreB - scoreA;
-    });
-
-    if (filtered.length === 0 || (filtered[0].similarity ?? filtered[0].score) < 0.6) {
-      console.log(`[MemoryManager] Retrieval threshold not met, returning empty`);
-      return [];
+    if (enableFunnelStats && hybridResult.stats.mergedCount > 0) {
+      console.log(`[MemoryManager] Hybrid Funnel: ${funnel.initialCount} (vector:${hybridResult.stats.vectorCount} + graph:${hybridResult.stats.graphCount}) → ${funnel.afterRerank} merged → ${funnel.finalCount} final`);
+      console.log(`[MemoryManager] Avg similarity: ${funnel.avgSimilarity.toFixed(2)}`);
     }
 
-    funnel.finalCount = filtered?.length ?? 0;
-    funnel.avgSimilarity = filtered && filtered.length > 0
-      ? filtered.reduce((sum, m) => sum + (m.similarity ?? m.score ?? 0), 0) / filtered.length
-      : 0;
-    funnel.avgImportance = filtered && filtered.length > 0
-      ? filtered.reduce((sum, m) => sum + (m.importance ?? 0.5), 0) / filtered.length
-      : 0;
-    for (const mem of filtered) {
-      funnel.typeDistribution[mem.type] = (funnel.typeDistribution[mem.type] || 0) + 1;
-    }
-
-    if (enableFunnelStats) {
-      console.log(`[MemoryManager] Funnel: ${funnel.initialCount} → ${funnel.afterTimeDecay} → ${funnel.afterRerank} → ${funnel.afterThreshold} → ${funnel.afterImportance} → ${funnel.finalCount}`);
-      console.log(`[MemoryManager] Avg similarity: ${funnel.avgSimilarity.toFixed(2)}, Avg importance: ${funnel.avgImportance.toFixed(2)}`);
-      console.log(`[MemoryManager] Type distribution:`, funnel.typeDistribution);
-    }
-
-    return filtered as MemoryWithSimilarity[];
+    return results;
   }
 
   /**
