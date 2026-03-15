@@ -1,33 +1,63 @@
 # 图数据记忆网络设计文档
 
 **日期:** 2026-03-15
-**版本:** 6.0 - 三层漏斗 + 写入背压
+**版本:** 7.0 - Graph Explosion 防护机制
 **状态:** 已完成 - 原生 SurrealDB 图能力设计
 
 ---
 
 **版本历史:**
+- **v7.0:** Graph Explosion 防护机制（Entity 频率过滤、Super Node 限制、TTL Pruning、Topic Layer）
 - **v6.0:** 三层漏斗提取策略 (Static Cache → 1B Pre-Filter → 8B Refine)、写入背压动态频率控制
 - **v5.0:** 添加共现阈值过滤 (CO_OCCURRENCE_THRESHOLD=3)、SurrealDB 内存从 4GB 下调至 3GB、Amnesia Mode 超时从 200ms 降至 100ms、CASCADE delete 说明
 - **v4.0:** 原生 SurrealDB 图能力设计
 
 ---
 
-## 1. 概述
-
-### 1.1 目标
-
-利用 **SurrealDB 原生图能力**构建实体索引记忆网络，实现：
-
-1. **精准召回** - 通过实体名称匹配，精准召回相关记忆块
-2. **联想检索** - 通过图遍历（`->` `<-`）实现"通过话题带出背景知识"
-3. **简洁 Schema** - 使用 `RELATE` 建边，自动管理 `in`/`out` 引用
-
 ### 1.2 核心原则
 
 - **原生图优先** - 能用 `RELATE` 和图遍历就不用关系表
+- **增长控制优先** - Graph Explosion 是 GraphRAG 第一杀手，必须在设计层面控制
 - 实体不宜过细，倾向于"能跨文档关联"的关键词
 - 异步处理，不阻塞主存储流程
+
+### 1.2.1 Graph Explosion 风险与防护
+
+**风险：** GraphRAG 系统长期运行（3-6 个月）后，实体和关系数量增长速度远远快于有效信息增长。
+
+**增长速度对比：**
+
+| 指标 | 增长速度 | 一年规模（每天 100 条 memory） |
+|------|----------|--------------------------------|
+| memory | 线性 | ~36,500 |
+| entity | 指数 | ~15,000 |
+| memory→entity edges | 指数 | ~182,500 |
+| entity→entity edges | 指数 | ~50,000+ |
+
+**不加控制的后果：**
+- 6 个月后 edges > 1M
+- 查询越来越慢（O(edges) 复杂度）
+- 超级节点（Super Node）出现，如 "data" 连接 5000 memory
+- Graph 退化成 "everything connected"，recall 失效
+
+**健康规模目标：**
+
+| 指标 | 健康阈值 | 警戒阈值 |
+|------|----------|----------|
+| entity ≈ memory / 10 | 10k (memory=100k) | > 50k |
+| edges | 200k | > 1M |
+| graph traversal | < 50ms | > 200ms |
+| max_entity_degree | ≤ 500 | > 1000 |
+
+**v7.0 防护机制：**
+
+| 机制 | 作用 | 预期效果 |
+|------|------|----------|
+| Entity 频率过滤 | min_frequency ≥ 3 才创建节点 | entity 数量 ↓ 70% |
+| Super Node 限制 | max_memory_links ≤ 500 | 防止单一实体连接爆炸 |
+| Topic Layer | entity → topic → memory | edges 从 2000 ↓ 20 |
+| TTL / Pruning | 90 天未访问 entity 降级/删除 | 清除历史噪音 |
+| Alias 合并 | Postgres = PostgreSQL = PG | 防止 graph fragmentation |
 
 ### 1.3 RELATE：从"存数据"变成"织网"
 
@@ -195,25 +225,49 @@ DEFINE TABLE entity SCHEMAFULL;
 
 -- 基础字段
 DEFINE FIELD name ON TABLE entity TYPE string;
-DEFINE FIELD entity_type ON TABLE entity TYPE string;  -- TECH, CONCEPT, PROJECT, PERSON, ORG, GENERAL
-DEFINE FIELD normalized_name ON TABLE entity TYPE option<string>;  -- 归一化名称（同义词）
+DEFINE FIELD entity_type ON TABLE entity TYPE string DEFAULT 'ENTITY';
 
--- 统计字段（用于重要性排序）
+-- 同义词合并（Alias 机制）
+DEFINE FIELD canonical_id ON TABLE entity TYPE option<int>;  -- 指向规范实体 ID
+DEFINE FIELD aliases ON TABLE entity TYPE array<string> DEFAULT [];  -- 别名列表
+
+-- 统计字段（用于重要性和剪枝）
 DEFINE FIELD mention_count ON TABLE entity TYPE int DEFAULT 0;  -- 被提及次数
 DEFINE FIELD memory_count ON TABLE entity TYPE int DEFAULT 0;   -- 关联的记忆数量
 DEFINE FIELD last_mentioned_at ON TABLE entity TYPE datetime;
+DEFINE FIELD first_seen_at ON TABLE entity TYPE datetime DEFAULT time::now();  -- 首次出现时间
+
+-- Graph Explosion 防护字段
+DEFINE FIELD is_frozen ON TABLE entity TYPE bool DEFAULT false;  -- Super Node 冻结标记
+DEFINE FIELD last_accessed_at ON TABLE entity TYPE datetime;  -- 最后访问时间（用于 TTL）
 
 -- 索引
 DEFINE INDEX idx_entity_name ON TABLE entity FIELDS name;
-DEFINE INDEX idx_entity_type ON TABLE entity FIELDS entity_type;
-DEFINE INDEX idx_entity_normalized ON TABLE entity FIELDS normalized_name;
+DEFINE INDEX idx_entity_canonical ON TABLE entity FIELDS canonical_id;
+DEFINE INDEX idx_entity_last_accessed ON TABLE entity FIELDS last_accessed_at;
+DEFINE INDEX idx_entity_frozen ON TABLE entity FIELDS is_frozen WHERE is_frozen = true;
 ```
 
 **说明:**
-- `name`: 实体原文
-- `normalized_name`: 归一化后的名称（可选，用于同义词合并，Stage 2 扩展）
-- `mention_count`: 每次提到该实体时 +1
-- `memory_count`: 关联的记忆数量（通过 `count(<-memory_entity<-memory)` 计算或缓存）
+
+| 字段 | 作用 | Graph Explosion 防护 |
+|------|------|---------------------|
+| `mention_count` | 被提及次数 | < 3 次的实体不创建或降级 |
+| `memory_count` | 关联记忆数 | > 500 时触发冻结（is_frozen） |
+| `canonical_id` | 同义词合并 | Postgres/PostgreSQL/PG 合并为一个节点 |
+| `last_accessed_at` | 最后访问时间 | 90 天未访问触发 TTL pruning |
+| `is_frozen` | Super Node 冻结 | 冻结后不再建立新边 |
+
+**阈值常量：**
+
+```typescript
+const GRAPH_PROTECTION = {
+  MIN_MENTION_COUNT: 3,       // 实体创建门槛：提及≥3 次
+  MAX_MEMORY_LINKS: 500,      // Super Node 上限：500 memory
+  TTL_DAYS: 90,               // TTL：90 天未访问降级
+  PRUNE_INTERVAL_DAYS: 7,     // 每周修剪一次
+};
+```
 
 ### 3.2 记忆 - 实体边表 (memory_entity)
 
@@ -261,6 +315,224 @@ SET
 - 单一 `ENTITY` 类型下，不需要复杂的停用词过滤
 - LLM 提取时已经过滤了通用词汇
 - 简化 Schema，减少维护成本
+
+### 3.4 Graph Explosion 防护机制
+
+**问题：** GraphRAG 系统长期运行（3-6 个月）后，实体和关系数量增长速度远远快于有效信息增长。
+
+**防护策略：**
+
+#### 3.4.1 Entity 频率过滤（最重要）
+
+**规则：** 实体只有在提及次数 ≥ 3 次时才创建正式节点。
+
+```typescript
+const MIN_MENTION_COUNT = 3;
+
+class EntityIndexer {
+  private pendingEntities = new Map<string, { count: number; memoryIds: number[] }>();
+
+  async processEntity(name: string, memoryId: number): Promise<number | null> {
+    // 累加提及次数
+    const pending = this.pendingEntities.get(name) || { count: 0, memoryIds: [] };
+    pending.count++;
+    pending.memoryIds.push(memoryId);
+    this.pendingEntities.set(name, pending);
+
+    // 只有达到门槛才创建正式实体
+    if (pending.count >= MIN_MENTION_COUNT && !pending.entityId) {
+      pending.entityId = await this.createEntity(name);
+      console.log(`[EntityIndexer] Created entity "${name}" after ${pending.count} mentions`);
+    }
+
+    return pending.entityId ?? null;
+  }
+}
+```
+
+**效果：**
+- 一次性实体、临时实体、噪音实体被过滤
+- entity 数量 ↓ 70%
+
+#### 3.4.2 Super Node 限制
+
+**规则：** 单个实体的 memory 连接数 ≤ 500，超过则冻结。
+
+```typescript
+const MAX_MEMORY_LINKS = 500;
+
+async function checkAndFreezeSuperNode(entityId: number): Promise<void> {
+  const result = await db.query<{ count: number }>(`
+    SELECT count() AS count FROM <-memory_entity<-memory
+    WHERE out = entity:${entityId}
+  `);
+
+  const memoryCount = result[0].count;
+
+  if (memoryCount >= MAX_MEMORY_LINKS) {
+    await db.update('entity', entityId, { is_frozen: true });
+    console.log(`[EntityIndexer] Frozen super node "${entityId}" with ${memoryCount} links`);
+  }
+}
+
+// 建边前检查
+async function linkMemoryEntity(memoryId: number, entityId: number, score: number) {
+  const entity = await db.select('entity', entityId);
+
+  // 冻结的 Super Node 不再建立新边
+  if (entity.is_frozen) {
+    console.log(`[EntityIndexer] Skipping link to frozen entity ${entityId}`);
+    return;
+  }
+
+  await db.query(`
+    RELATE memory:${memoryId}->memory_entity->entity:${entityId}
+    SET relevance_score = ${score}, weight = ${score}, frequency = 1
+  `);
+
+  // 检查是否需要冻结
+  await checkAndFreezeSuperNode(entityId);
+}
+```
+
+**效果：**
+- 防止 "Python"、"data" 等超级节点连接 2000+ memory
+- Graph traversal 从 O(2000) 降至 O(500)
+
+#### 3.4.3 Topic Layer（最有效）
+
+**规则：** 当 entity 连接数接近上限时，自动创建 Topic 抽象层。
+
+```
+Python (entity)
+   │
+   ├─ Web (topic)
+   │   ├─ memory: Flask 教程
+   │   ├─ memory: Django 项目
+   │
+   ├─ ML (topic)
+   │   ├─ memory: PyTorch 笔记
+   │   └─ memory: NumPy 计算
+   │
+   └─ Data (topic)
+       ├─ memory: Pandas 数据处理
+       └─ memory: SQLAlchemy 连接
+```
+
+**Schema:**
+```sql
+DEFINE TABLE topic SCHEMAFULL;
+
+DEFINE FIELD name ON TABLE topic TYPE string;
+DEFINE FIELD parent_entity_id ON TABLE topic TYPE int;  -- 父实体
+DEFINE FIELD memory_count ON TABLE topic TYPE int DEFAULT 0;
+
+-- Topic-Memory 边
+DEFINE TABLE topic_memory SCHEMAFULL;
+DEFINE FIELD topic ON TABLE topic_memory TYPE int;
+DEFINE FIELD memory ON TABLE topic_memory TYPE int;
+```
+
+**效果：**
+- edges 从 2000 降至 20（Python → 10 topics → 2000 memories）
+- 支持语义分组（Web / ML / Data）
+
+#### 3.4.4 TTL / Pruning（定期修剪）
+
+**规则：** 90 天未访问的 entity 降级或删除。
+
+```typescript
+const TTL_DAYS = 90;
+const PRUNE_INTERVAL_DAYS = 7;
+
+async function pruneExpiredEntities(): Promise<{ deprecated: number; deleted: number }> {
+  const threshold = new Date(Date.now() - TTL_DAYS * 24 * 60 * 60 * 1000);
+
+  // 查找 90 天未访问的实体
+  const expired = await db.query(`
+    SELECT id, name, last_accessed_at, memory_count
+    FROM entity
+    WHERE last_accessed_at < ${threshold.toISOString()}
+    AND memory_count < 5  -- 低价值实体
+  `);
+
+  let deprecated = 0, deleted = 0;
+
+  for (const entity of expired) {
+    if (entity.memory_count === 0) {
+      // 无关联记忆，直接删除
+      await db.delete('entity', entity.id);
+      deleted++;
+    } else {
+      // 降级为 pending 状态，保留观察 30 天
+      await db.update('entity', entity.id, {
+        is_deprecated: true,
+        deprecated_at: new Date(),
+      });
+      deprecated++;
+    }
+  }
+
+  return { deprecated, deleted };
+}
+
+// 每周执行一次
+setInterval(() => pruneExpiredEntities(), PRUNE_INTERVAL_DAYS * 24 * 60 * 60 * 1000);
+```
+
+**效果：**
+- 清除历史噪音
+- 防止"僵尸实体"占用资源
+
+#### 3.4.5 Alias 合并（防止碎片化）
+
+**规则：** 同义实体名称合并到规范实体。
+
+```typescript
+const ALIAS_RULES: Record<string, string[]> = {
+  'PostgreSQL': ['Postgres', 'postgres', 'PG'],
+  'TypeScript': ['TS', 'ts'],
+  'JavaScript': ['JS', 'js', 'ECMAScript'],
+  'OpenAI': ['GPT-4', 'ChatGPT', 'o1'],
+};
+
+async function mergeAliases(entityName: string): Promise<number> {
+  const canonicalName = Object.keys(ALIAS_RULES).find(key =>
+    ALIAS_RULES[key].includes(entityName)
+  ) || entityName;
+
+  // 获取或创建规范实体
+  const canonical = await getOrCreateEntity(canonicalName);
+
+  // 如果当前是别名，合并到规范实体
+  if (canonicalName !== entityName) {
+    const alias = await getOrCreateEntity(entityName);
+
+    // 转移所有边
+    await db.query(`
+      BEGIN TRANSACTION;
+
+      -- 转移 memory_entity 边
+      FOR $link IN (SELECT * FROM memory_entity WHERE out = entity:${alias.id}) {
+        RELATE $link.in->memory_entity->entity:${canonical.id}
+        SET relevance_score = $link.relevance_score, weight = $link.weight;
+        DELETE $link;
+      };
+
+      -- 标记别名为 merged
+      UPDATE entity:${alias.id} SET canonical_id = ${canonical.id}, merged = true;
+
+      COMMIT TRANSACTION;
+    `);
+  }
+
+  return canonical.id;
+}
+```
+
+**效果：**
+- Postgres / PostgreSQL / PG 合并为一个节点
+- 防止 graph fragmentation
 
 ### 3.4 图遍历查询示例
 
@@ -1410,6 +1682,107 @@ test('should meet compute efficiency targets', async () => {
   expect(stats.layer2FilterRate).toBeGreaterThan(0.3);  // Layer 2 过滤率 > 30%
   expect(stats.layer3CallRate).toBeLessThan(0.1);  // Layer 3 调用率 < 10%
 });
+
+// 8. Graph Explosion 防护：Entity 频率过滤
+test('should only create entity after min mention count', async () => {
+  const indexer = new EntityIndexer(db);
+  const memoryId1 = await storeEpisodic('session1', 'Using TypeScript');
+  const memoryId2 = await storeEpisodic('session2', 'TypeScript is great');
+  // mention_count = 2, not yet created
+
+  let entity = await findEntity('TypeScript');
+  expect(entity).toBeNull();  // 提及次数 < 3，不创建
+
+  // 第 3 次提及
+  const memoryId3 = await storeEpisodic('session3', 'TypeScript tips');
+  await processIndexingQueue();
+
+  entity = await findEntity('TypeScript');
+  expect(entity).not.toBeNull();  // 提及次数 >= 3，创建实体
+  expect(entity.mention_count).toBe(3);
+});
+
+// 9. Graph Explosion 防护：Super Node 冻结
+test('should freeze entity when memory_count exceeds limit', async () => {
+  const MAX_MEMORY_LINKS = 500;
+  const entity = await upsertEntity('Python');
+
+  // 模拟 500 个 memory 连接
+  for (let i = 0; i < MAX_MEMORY_LINKS; i++) {
+    await storeEpisodic(`session${i}`, `Python example ${i}`);
+  }
+  await processIndexingQueue();
+
+  // 检查是否冻结
+  const updatedEntity = await db.select('entity', entity.id);
+  expect(updatedEntity.is_frozen).toBe(true);
+  expect(updatedEntity.memory_count).toBe(MIN_MEMORY_LINKS);
+});
+
+// 10. Graph Explosion 防护：冻结实体不再建立新边
+test('should not create new links for frozen entity', async () => {
+  const frozenEntity = await upsertEntity('Data');
+  await db.update('entity', frozenEntity.id, { is_frozen: true });
+
+  const memoryId = await storeEpisodic('session1', 'Data analysis with Python');
+  await processIndexingQueue();
+
+  // 检查是否建立了新边
+  const links = await getLinksByEntity(frozenEntity.id);
+  expect(links.length).toBe(0);  // 冻结实体不应有新边
+});
+
+// 11. Graph Explosion 防护：TTL Pruning
+test('should prune entities not accessed for TTL_DAYS', async () => {
+  const TTL_DAYS = 90;
+  const oldEntity = await upsertEntity('LegacyTech');
+
+  // 设置 last_accessed_at 为 90 天前
+  const oldDate = new Date(Date.now() - TTL_DAYS * 24 * 60 * 60 * 1000);
+  await db.update('entity', oldEntity.id, { last_accessed_at: oldDate });
+
+  // 执行修剪
+  const result = await pruneExpiredEntities();
+
+  // 无关联记忆的实体应被删除
+  expect(result.deleted).toBeGreaterThan(0);
+
+  const deletedEntity = await db.select('entity', oldEntity.id);
+  expect(deletedEntity).toBeNull();
+});
+
+// 12. Graph Explosion 防护：Alias 合并
+test('should merge alias entities to canonical', async () => {
+  // 创建别名实体
+  const postgresEntity = await upsertEntity('Postgres');
+  const pgEntity = await upsertEntity('PG');
+
+  // 触发 alias 合并
+  await mergeAliases('PG');
+
+  // 检查 PG 是否指向 PostgreSQL
+  const mergedEntity = await db.select('entity', pgEntity.id);
+  expect(mergedEntity.canonical_id).toBe(postgresEntity.id);
+  expect(mergedEntity.merged).toBe(true);
+});
+
+// 13. Graph Explosion 防护：健康规模指标
+test('should maintain healthy graph scale', async () => {
+  const memoryCount = await db.count('memory');
+  const entityCount = await db.count('entity');
+
+  // entity ≈ memory / 10
+  const ratio = entityCount / memoryCount;
+  expect(ratio).toBeLessThan(0.2);  // entity < memory * 0.2
+
+  // 检查是否有超级节点
+  const superNodes = await db.query(`
+    SELECT id, name, memory_count
+    FROM entity
+    WHERE memory_count > 1000
+  `);
+  expect(superNodes.length).toBe(0);  // 不应有 memory_count > 1000 的实体
+});
 ```
 
 ---
@@ -1545,13 +1918,41 @@ Query
 - [ ] Layer 1 静态缓存命中率 > 60%
 - [ ] Layer 2 1B 模型过滤成功率 > 30%
 
-### 4. 写入背压验收
+### 4. Graph Explosion 防护验收
+
+**Entity 频率过滤:**
+- [ ] 提及次数 < 3 的实体不创建正式节点
+- [ ]  pendingEntities 机制正常工作
+- [ ] entity 增长率 < memory 增长率的 30%
+
+**Super Node 限制:**
+- [ ] 单个实体的 memory 连接数 ≤ 500
+- [ ] 超过阈值后自动设置 `is_frozen: true`
+- [ ] 冻结实体不再建立新边
+
+**TTL / Pruning:**
+- [ ] 90 天未访问的实体自动降级
+- [ ] 无关联记忆的实体自动删除
+- [ ] 每周修剪任务正常执行
+
+**Alias 合并:**
+- [ ] Postgres/PostgreSQL/PG 合并为一个规范实体
+- [ ] 别名实体的 `canonical_id` 正确指向
+- [ ] 边转移后原别名实体标记为 `merged: true`
+
+**健康规模指标:**
+- [ ] entity ≈ memory / 10（例如 memory=10k 时 entity≈1k）
+- [ ] edges < 200k（memory=100k 时）
+- [ ] graph traversal < 50ms
+- [ ] 无 entity 的 memory_count > 1000
+
+### 5. 写入背压验收
 
 - [ ] 内存 > 80% 时自动降低轮询频率
 - [ ] CPU > 80°C 时自动降频或暂停处理
 - [ ] 高负载下不触发系统 Swap
 
-### 5. 质量验收
+### 6. 质量验收
 
 - [ ] 单元测试覆盖率 > 80%
 - [ ] 集成测试通过
