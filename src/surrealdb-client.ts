@@ -93,17 +93,18 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS embedding ON TABLE ${MEMORY_TABLE} TYPE array<number>;
       DEFINE FIELD IF NOT EXISTS importance ON TABLE ${MEMORY_TABLE} TYPE float;
       DEFINE FIELD IF NOT EXISTS access_count ON TABLE ${MEMORY_TABLE} TYPE int DEFAULT 0;
-      DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${MEMORY_TABLE} TYPE datetime DEFAULT time::now();
+      DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${MEMORY_TABLE} TYPE string;
       DEFINE FIELD IF NOT EXISTS session_id ON TABLE ${MEMORY_TABLE} TYPE option<string>;
       DEFINE FIELD IF NOT EXISTS is_active ON TABLE ${MEMORY_TABLE} TYPE bool DEFAULT true;
       DEFINE FIELD IF NOT EXISTS summary ON TABLE ${MEMORY_TABLE} TYPE option<string>;
+      DEFINE FIELD IF NOT EXISTS updated_at ON TABLE ${MEMORY_TABLE} TYPE string;
     `);
     console.log('[SurrealDB] Memory table defined');
 
     try {
       await this.query(`
         DEFINE INDEX IF NOT EXISTS vector_idx ON TABLE ${MEMORY_TABLE}
-        FIELDS embedding MTREE DIMENSION ${VECTOR_DIMENSION} DISTANCE COSINE;
+        FIELDS embedding HNSW DIMENSION ${VECTOR_DIMENSION} DISTANCE COSINE;
       `);
       console.log('[SurrealDB] Vector index created');
       migrated = true;
@@ -138,7 +139,7 @@ export class SurrealDatabase {
     await this.query(`
       DEFINE TABLE IF NOT EXISTS ${RELATES_TABLE} SCHEMAFULL;
       DEFINE FIELD IF NOT EXISTS type ON TABLE ${RELATES_TABLE} TYPE string;
-      DEFINE FIELD IF NOT EXISTS evidence ON TABLE ${RELATES_TABLE} TYPE array<record(${MEMORY_TABLE})>;
+      DEFINE FIELD IF NOT EXISTS evidence ON TABLE ${RELATES_TABLE} TYPE array<record<${MEMORY_TABLE}>>;
     `);
     console.log('[SurrealDB] Relates table defined');
 
@@ -192,23 +193,50 @@ export class SurrealDatabase {
 
     const recordId = new RecordId(MEMORY_TABLE, id);
 
-    const record: Record<string, any> = {
-      type: payload.type || 'episodic',
-      content: payload.content || '',
-      embedding: embedding,
-      importance: payload.importance || 0.5,
-      access_count: payload.access_count || 0,
-      created_at: payload.created_at ? String(payload.created_at) : new Date().toISOString(),
-      session_id: payload.session_id ?? null,
-      is_active: payload.is_active ?? true,
-      summary: payload.summary ?? null,
-      updated_at: new Date().toISOString(),
-    };
+    // Build SET clause for upsert
+    const fields: string[] = [];
+    const params: Record<string, any> = {};
+
+    fields.push(`type = $type`);
+    params.type = payload.type || 'episodic';
+
+    fields.push(`content = $content`);
+    params.content = payload.content || '';
+
+    fields.push(`embedding = $embedding`);
+    params.embedding = embedding;
+
+    fields.push(`importance = $importance`);
+    params.importance = payload.importance || 0.5;
+
+    fields.push(`access_count = $access_count`);
+    params.access_count = payload.access_count || 0;
+
+    const now = new Date().toISOString();
+    fields.push(`created_at = $created_at`);
+    params.created_at = payload.created_at ? String(payload.created_at) : now;
+
+    if (payload.session_id !== undefined) {
+      fields.push(`session_id = $session_id`);
+      params.session_id = payload.session_id;
+    }
+
+    fields.push(`is_active = $is_active`);
+    params.is_active = payload.is_active ?? true;
+
+    if (payload.summary !== undefined) {
+      fields.push(`summary = $summary`);
+      params.summary = payload.summary;
+    }
+
+    fields.push(`updated_at = $updated_at`);
+    params.updated_at = now;
+
+    const sql = `UPSERT ${String(recordId)} SET ${fields.join(', ')}`;
+    console.log('[SurrealDB] Upsert SQL:', sql.substring(0, 200));
 
     try {
-      // Merge recordId with record data for upsert
-      const dataToUpsert = { ...record };
-      await this.client.upsert({ id: recordId, ...dataToUpsert } as any);
+      await this.client.query(sql, params);
       return { success: true };
     } catch (error: any) {
       console.error('[SurrealDB] Upsert failed:', error.message);
@@ -320,8 +348,8 @@ export class SurrealDatabase {
 
     try {
       const recordId = new RecordId(MEMORY_TABLE, id);
-      const result = await this.client.select(recordId);
-      const records = result as unknown as any[];
+      const result = await this.client.query(`SELECT * FROM ${String(recordId)}`, {});
+      const records = (result as any)[0]?.result || [];
 
       if (records && records.length > 0) {
         return {
@@ -346,19 +374,23 @@ export class SurrealDatabase {
     }
 
     try {
-      const updateData = {
-        ...payload,
-        updated_at: new Date().toISOString(),
-      };
-
       const recordId = new RecordId(MEMORY_TABLE, id);
-      const existing = await this.client.select(recordId);
-      const records = existing as unknown as any[];
 
-      if (records && records.length > 0) {
-        const merged = { ...records[0], ...updateData };
-        await this.client.upsert({ id: recordId, ...merged } as any);
+      // Build SET clause for update
+      const fields: string[] = [];
+      const params: Record<string, any> = {};
+
+      for (const [key, value] of Object.entries(payload)) {
+        if (value !== undefined && value !== null) {
+          fields.push(`${key} = $${key}`);
+          params[key] = key === 'created_at' || key === 'updated_at' ? String(value) : value;
+        }
       }
+
+      fields.push(`updated_at = time::now()`);
+
+      const sql = `UPDATE ${String(recordId)} SET ${fields.join(', ')}`;
+      await this.client.query(sql, params);
 
       return { success: true };
     } catch (error: any) {
@@ -470,7 +502,7 @@ export class SurrealDatabase {
 
     for (const id of ids) {
       const recordId = new RecordId(MEMORY_TABLE, id);
-      await this.client.delete(recordId);
+      await this.client.query(`DELETE ${String(recordId)}`, {});
     }
   }
 

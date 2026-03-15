@@ -299,6 +299,7 @@ export class MemoryStore {
 
     const payload: Record<string, any> = {
       type: MemoryType.REFLECTION,
+      content: summary, // Store summary in content field for consistency
       summary: summary,
       importance: importance,
       access_count: 0,
