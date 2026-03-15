@@ -1,8 +1,8 @@
 # 图数据记忆网络设计文档
 
 **日期:** 2026-03-15
-**版本:** 2.0
-**状态:** 待审核
+**版本:** 4.0
+**状态:** 已完成 - 原生 SurrealDB 图能力设计
 
 ---
 
@@ -10,305 +10,211 @@
 
 ### 1.1 目标
 
-在现有向量检索基础上，构建**以实体索引为核心的记忆网络**，实现：
+利用 **SurrealDB 原生图能力**构建实体索引记忆网络，实现：
 
 1. **精准召回** - 通过实体名称匹配，精准召回相关记忆块
-2. **联想检索** - 通过图路径遍历，实现"通过一个话题带出相关背景知识"
-3. **可扩展性** - Schema 支持未来升级为完整的知识图谱推理
+2. **联想检索** - 通过图遍历（`->` `<-`）实现"通过话题带出背景知识"
+3. **简洁 Schema** - 使用 `RELATE` 建边，自动管理 `in`/`out` 引用
 
 ### 1.2 核心原则
 
+- **原生图优先** - 能用 `RELATE` 和图遍历就不用关系表
 - 实体不宜过细，倾向于"能跨文档关联"的关键词
-- 保证检索的确定性（实体匹配）和联想性（图路径遍历）
 - 异步处理，不阻塞主存储流程
 
-### 1.3 系统定位与演进路线
+### 1.3 为什么用 SurrealDB 的图能力
 
-**当前定位：Entity-Indexed Vector RAG (GraphRAG Stage 1)**
+| 需求 | 关系表方案 | SurrealDB 原生图 |
+|------|------------|-----------------|
+| 建立关联 | 手动插入 `memory_id`, `entity_id` | `RELATE memory:1->memory_entity->entity:1` |
+| 一度关联查询 | `SELECT * FROM memory_entity WHERE memory_id = ?` | `SELECT ->memory_entity->entity FROM memory:1` |
+| 反向关联 | `SELECT * FROM memory_entity WHERE entity_id = ?` | `SELECT <-memory_entity<-memory FROM entity:1` |
+| 二度关联 | 多表 JOIN | `SELECT ->memory_entity<-memory FROM (SELECT ->memory_entity->entity FROM memory:1)` |
+| 边属性 | 额外字段 | `RELATE ... SET relevance_score = 0.9` |
 
-| 能力 | Stage 1 | Stage 2 | Stage 3 |
-|------|---------|---------|---------|
-| 实体精准召回 | ✔ | ✔ | ✔ |
-| 实体跨文档关联 | ✔ | ✔ | ✔ |
-| 知识推理 (Entity→Entity) | ❌ | ✔ | ✔ |
-| 知识扩展 (图遍历) | ❌ | ✔ | ✔ |
-| Topic 抽象层 | ❌ | ❌ | ✔ |
+### 1.4 系统定位
 
-**演进路线:**
+**Stage 1: Entity-Indexed Vector RAG（本次实现）**
 
 ```
-Stage 0: Vector RAG (现有系统)
-  └─ memory + vector search + reranker
+Vector RAG (现有)
+  └─ memory (向量检索)
 
-Stage 1: Entity Index (本次实现)
-  └─ entity + memory_entity + hybrid retrieval
++ Entity Index (新增)
+  └─ entity (实体表)
+  └─ memory_entity (RELATE 边表)
+  └─ 图遍历查询 (->memory_entity->)
+```
 
-Stage 2: Graph Layer (后续)
-  └─ entity_relation + entity_alias + co-occurrence mining
+**Stage 2: Graph Layer（后续，利用 Stage 1 的边做扩展）**
 
-Stage 3: Topic Layer (长期)
-  └─ topic cluster + scalable graph
+```
++ entity_relation (实体间关系，也用 RELATE)
++ entity_alias (同义词)
++ 多度关联检索
+```
+
+**Stage 3: Topic Layer（长期）**
+
+```
++ topic (主题抽象层)
++ 主题级别的图遍历
 ```
 
 ---
 
 ## 2. 实体类型定义
 
-支持五类核心实体：
-
 | 类型 | 标识 | 示例 |
 |------|------|------|
-| Tech/Tools | `TECH` | Python, M4 Chip, SurrealDB, LLM, TypeScript |
-| Concepts | `CONCEPT` | GraphRAG, 向量索引，内存管理，HNSW |
-| Projects/Tasks | `PROJECT` | openclaw-memory, 图数据功能实现 |
-| People/Orgs | `PERSON` / `ORG` | Anthropic, OpenAI,  Elon Musk |
-| General | `GENERAL` | 由 LLM 判断的其他关键名词 |
+| TECH | `TECH` | Python, SurrealDB, LLM, TypeScript |
+| CONCEPT | `CONCEPT` | GraphRAG, 向量索引，HNSW |
+| PROJECT | `PROJECT` | openclaw-memory, 图数据功能 |
+| PERSON | `PERSON` | 刘飞，Elon Musk |
+| ORG | `ORG` | Anthropic, OpenAI |
+| GENERAL | `GENERAL` | 其他关键名词 |
 
 ---
 
-## 3. 架构设计
+## 3. Schema 设计（原生图）
 
-### 3.1 整体架构
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        用户查询                                  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    检索入口 (retrieveRelevant)                   │
-│  ┌─────────────────────────┐  ┌───────────────────────────────┐ │
-│  │   向量检索分支          │  │      实体检索分支              │ │
-│  │   query → embedding     │  │   query → 提取实体 → 匹配     │ │
-│  │   → 向量相似性搜索      │  │   → memory_entity 关联查询    │ │
-│  └───────────┬─────────────┘  └───────────────┬───────────────┘ │
-│              │                                │                 │
-│              └──────────────┬─────────────────┘                 │
-│                             ▼                                   │
-│              ┌──────────────────────────┐                       │
-│              │      混合结果合并         │                       │
-│              │  (Vector + Entity Merge)  │                       │
-│              └────────────┬─────────────┘                       │
-│                           ▼                                     │
-│              ┌──────────────────────────┐                       │
-│              │         Reranker         │                       │
-│              │    (LLM 重排序 + 阈值)    │                       │
-│              └────────────┬─────────────┘                       │
-│                           ▼                                     │
-│              ┌──────────────────────────┐                       │
-│              │      返回最终结果         │                       │
-│              └──────────────────────────┘                       │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        数据层                                    │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────┐ │
-│  │   memory     │   │    entity    │   │   memory_entity      │ │
-│  │  (记忆表)    │   │   (实体表)   │   │   (记忆 - 实体关系)   │ │
-│  │              │   │              │   │                      │ │
-│  │ - id         │   │ - id         │   │ - memory_id (FK)     │ │
-│  │ - content    │   │ - name       │   │ - entity_id (FK)     │ │
-│  │ - embedding  │◄──┤ - type       │◄──┤ - relevance_score    │ │
-│  │ - type       │   │ - ...        │   │ - created_at         │ │
-│  └──────────────┘   └──────────────┘   └──────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 3.2 数据流
-
-**存储流程:**
-```
-记忆存储请求
-    │
-    ▼
-写入 memory 表 (向量 + 内容)
-    │
-    ▼
-加入异步队列 (pending_entities)
-    │
-    ▼
-[后台处理]
-    ├─→ LLM 提取实体
-    ├─→ 写入 entity 表 (去重)
-    └─→ 写入 memory_entity 关系表
-```
-
-**检索流程:**
-```
-用户查询
-    │
-    ├─→ 向量检索分支：query → embedding → 向量搜索 → 候选集 A
-    │
-    └─→ 实体检索分支：query → 实体提取 → 匹配 entity →
-                       memory_entity 关联 → 候选集 B
-    │
-    ▼
-合并候选集 (A ∪ B)
-    │
-    ▼
-Reranker 重排序
-    │
-    ▼
-阈值过滤 → 最终结果
-```
-
----
-
-## 4. Schema 设计
-
-### 4.1 实体表 (entity) - 扩展现有
-
-**注意:** 现有代码中 `entity` 表 (`src/surrealdb-client.ts:132-136`) 只有基础字段。
-本设计需要扩展该表，添加 `description`、`mention_count`、`memory_count`、`embedding` 等字段。
-迁移策略见第 10 节。
+### 3.1 实体表 (entity)
 
 ```sql
 DEFINE TABLE entity SCHEMAFULL;
 
--- 基础字段（已存在）
+-- 基础字段
 DEFINE FIELD name ON TABLE entity TYPE string;
-DEFINE FIELD normalized_name ON TABLE entity TYPE option<string>;  -- 归一化名称
 DEFINE FIELD entity_type ON TABLE entity TYPE string;  -- TECH, CONCEPT, PROJECT, PERSON, ORG, GENERAL
+DEFINE FIELD normalized_name ON TABLE entity TYPE option<string>;  -- 归一化名称（同义词）
 
--- 扩展字段（需要迁移添加）
-DEFINE FIELD description ON TABLE entity TYPE option<string>;  -- 实体描述/定义
+-- 统计字段（用于重要性排序）
 DEFINE FIELD mention_count ON TABLE entity TYPE int DEFAULT 0;  -- 被提及次数
-DEFINE FIELD memory_count ON TABLE entity TYPE int DEFAULT 0;  -- 关联的记忆数量（用于重要性排序）
-DEFINE FIELD last_mentioned_at ON TABLE entity TYPE option<datetime>;  -- 最后提及时间
-DEFINE FIELD embedding ON TABLE entity TYPE option<array<number>>;  -- 实体向量表示（用于语义检索）
+DEFINE FIELD memory_count ON TABLE entity TYPE int DEFAULT 0;   -- 关联的记忆数量
+DEFINE FIELD last_mentioned_at ON TABLE entity TYPE datetime;
 
 -- 索引
 DEFINE INDEX idx_entity_name ON TABLE entity FIELDS name;
 DEFINE INDEX idx_entity_type ON TABLE entity FIELDS entity_type;
 DEFINE INDEX idx_entity_normalized ON TABLE entity FIELDS normalized_name;
-DEFINE INDEX idx_entity_memory_count ON TABLE entity FIELDS memory_count;  -- 支持按重要性排序
-DEFINE INDEX idx_entity_vector ON TABLE entity FIELDS embedding HNSW DIMENSION 1024 DISTANCE COSINE;  -- 向量检索
 ```
 
-**实体停用表 (entity_stoplist):**
+**说明:**
+- `name`: 实体原文
+- `normalized_name`: 归一化后的名称（可选，用于同义词合并，Stage 2 扩展）
+- `mention_count`: 每次提到该实体时 +1
+- `memory_count`: 关联的记忆数量（通过 `count(<-memory_entity<-memory)` 计算或缓存）
 
-为防止低价值实体污染索引，使用停用表过滤：
+### 3.2 记忆 - 实体边表 (memory_entity)
 
-```json
-// entity_stoplist.json
-{
-  "generic_terms": ["system", "method", "example", "function", "代码", "功能", "模块"],
-  "threshold_confidence": 0.6,
-  "threshold_memory_count": 1
-}
-```
-
-提取实体时过滤规则：
-1. 匹配 stoplist 的术语直接过滤
-2. confidence < 0.6 的实体过滤
-3. memory_count = 0 且 mention_count < 2 的实体标记为候选（不用于检索）
-
-### 4.3 实体类型常量
-
-**文件:** `src/surrealdb-client.ts` (新增常量定义)
-
-```typescript
-export const EntityType = {
-  TECH: 'TECH',           // 技术、工具、框架、库、硬件
-  CONCEPT: 'CONCEPT',     // 抽象概念、方法论、算法
-  PROJECT: 'PROJECT',     // 项目名、任务名
-  PERSON: 'PERSON',       // 人名
-  ORG: 'ORG',             // 组织、公司、团队
-  GENERAL: 'GENERAL',     // 其他关键名词
-} as const;
-```
-
-### 4.2 记忆 - 实体关系表 (memory_entity) - 新增
-
-**注意:** 现有代码中 `relates` 表 (`src/surrealdb-client.ts:17`) 与新的 `memory_entity` 表设计不兼容。
-本设计使用全新的 `memory_entity` 表，现有的 `relates` 表保留但暂不使用（留作第二阶段扩展）。
+**关键：使用 `RELATE` 语句，SurrealDB 自动创建 `in` 和 `out` 字段**
 
 ```sql
 DEFINE TABLE memory_entity SCHEMAFULL;
 
--- 外键关联
-DEFINE FIELD memory_id ON TABLE memory_entity TYPE int;
-DEFINE FIELD entity_id ON TABLE memory_entity TYPE int;
+-- in 和 out 由 RELATE 自动管理，无需手动定义
+-- in -> 指向 memory 记录
+-- out -> 指向 entity 记录
 
--- 相关性评分
-DEFINE FIELD relevance_score ON TABLE memory_entity TYPE float;  -- 0.0-1.0，实体与记忆的相关性
-
--- 位置信息（可选，Stage 1 预留）
-DEFINE FIELD position ON TABLE memory_entity TYPE option<string>;  -- title | body | tag
+-- 边属性
+DEFINE FIELD relevance_score ON TABLE memory_entity TYPE float;  -- 0.0-1.0，相关性评分
+DEFINE FIELD weight ON TABLE memory_entity TYPE float;  -- 排序权重
+DEFINE FIELD frequency ON TABLE memory_entity TYPE int DEFAULT 1;  -- 提及频率
 
 -- 审计字段
-DEFINE FIELD created_at ON TABLE memory_entity TYPE datetime;
+DEFINE FIELD created_at ON TABLE memory_entity TYPE datetime DEFAULT time::now();
 
--- 索引
-DEFINE INDEX idx_memory_entity_memory ON TABLE memory_entity FIELDS memory_id;
-DEFINE INDEX idx_memory_entity_entity ON TABLE memory_entity FIELDS entity_id;
-DEFINE INDEX idx_memory_entity_composite ON TABLE memory_entity FIELDS memory_id, entity_id;
-DEFINE INDEX idx_memory_entity_score ON TABLE memory_entity FIELDS entity_id, relevance_score;  -- 支持按相关性排序查询
+-- 索引（图遍历加速）
+DEFINE INDEX idx_memory_entity_in ON TABLE memory_entity FIELDS in;
+DEFINE INDEX idx_memory_entity_out ON TABLE memory_entity FIELDS out;
+DEFINE INDEX idx_memory_entity_score ON TABLE memory_entity FIELDS out, relevance_score;
 ```
 
-**实体检索 TopK 限制:**
-
-为防止高关联实体（如 "Python"）导致候选集爆炸，检索时限制单个实体返回的记忆数量：
-
-```typescript
-// 单个实体最多返回 20 条记忆
-const ENTITY_MEMORY_LIMIT = 20;
-
-SELECT memory_id, relevance_score
-FROM memory_entity
-WHERE entity_id = $entity_id
-ORDER BY relevance_score DESC
-LIMIT $ENTITY_MEMORY_LIMIT;
+**建边示例:**
+```sql
+-- 创建记忆和实体的关联
+RELATE memory:123->memory_entity->entity:456
+SET
+  relevance_score = 0.85,
+  weight = 0.9,
+  frequency = 1;
 ```
 
-### 4.3 实体 - 实体关系表 (entity_relation) - 预留（第二阶段）
+### 3.3 实体停用表 (entity_stoplist) - 可选
+
+过滤低价值实体：
 
 ```sql
--- 第一阶段暂不实现，保留扩展性
--- 后续可通过分析 memory_entity 中共现频率自动创建
+DEFINE TABLE entity_stoplist SCHEMAFULL;
+DEFINE FIELD term ON TABLE entity_stoplist TYPE string;
+DEFINE INDEX idx_stoplist_term ON TABLE entity_stoplist FIELDS term;
+```
 
-DEFINE TABLE entity_relation SCHEMAFULL;
+```json
+// 预定义停用词
+["system", "method", "example", "function", "代码", "功能", "模块", "今天", "明天"]
+```
 
-DEFINE FIELD from_entity_id ON TABLE entity_relation TYPE int;
-DEFINE FIELD to_entity_id ON TABLE entity_relation TYPE int;
-DEFINE FIELD relation_type ON TABLE entity_relation TYPE string;  -- is-a, related-to, part-of, used-for
-DEFINE FIELD evidence_memory_ids ON TABLE entity_relation TYPE array<int>;
-DEFINE FIELD confidence ON TABLE entity_relation TYPE float;
-DEFINE FIELD created_at ON TABLE entity_relation TYPE datetime;
+### 3.4 图遍历查询示例
 
-DEFINE INDEX idx_entity_relation_from ON TABLE entity_relation FIELDS from_entity_id;
-DEFINE INDEX idx_entity_relation_to ON TABLE entity_relation FIELDS to_entity_id;
+**一度关联：查某个记忆的所有实体**
+```sql
+SELECT * FROM (SELECT ->memory_entity->entity FROM memory:123);
+```
+
+**反向关联：查某个实体的所有记忆**
+```sql
+SELECT m.*, me.relevance_score, me.weight
+FROM memory m
+WHERE m.id IN (
+  SELECT VALUE in FROM memory_entity WHERE out = entity:456
+)
+ORDER BY me.weight DESC
+LIMIT 20;
+```
+
+**二度关联：通过记忆找相关记忆（联想检索）**
+```sql
+-- memory:123 -> entity -> 其他 memory
+SELECT m.*, COUNT(me2) as association_count
+FROM memory m
+WHERE m.id IN (
+  SELECT VALUE in FROM memory_entity
+  WHERE out IN (
+    SELECT VALUE out FROM memory_entity
+    WHERE in = memory:123
+  )
+) AND m.id != memory:123
+GROUP BY m.id
+ORDER BY association_count DESC
+LIMIT 20;
+```
+
+**通过实体名称找记忆（精准召回）**
+```sql
+-- 先找实体，再通过边找记忆
+SELECT m.*
+FROM memory m
+WHERE m.id IN (
+  SELECT VALUE in FROM memory_entity
+  WHERE out IN (
+    SELECT id FROM entity WHERE name = 'TypeScript' OR normalized_name = 'TypeScript'
+  )
+);
 ```
 
 ---
 
-## 5. 核心模块设计
+## 4. 核心模块设计
 
-### 5.1 实体提取服务 (EntityExtractor)
+### 4.1 实体提取服务 (EntityExtractor)
 
 **文件:** `src/entity-extractor.ts`
 
 **职责:**
 - 从文本中提取五类实体
 - 使用 LLM 进行语义提取（非纯 regex）
-- 两阶段提取：regex pre-filter → LLM refine
-- 返回结构化的实体列表
-
-**两阶段提取流程:**
-
-```
-文本输入
-   ↓
-regex / keyword pre-filter
-   ↓
-候选实体列表
-   ↓
-LLM refine (验证 + 分类)
-   ↓
-最终实体列表 (带 confidence)
-```
+- 三层缓存优化：已知实体缓存 → regex pre-filter → LLM refine
 
 **接口:**
 ```typescript
@@ -316,7 +222,7 @@ interface ExtractedEntity {
   name: string;
   type: 'TECH' | 'CONCEPT' | 'PROJECT' | 'PERSON' | 'ORG' | 'GENERAL';
   confidence: number;  // 0.0-1.0
-  context?: string;  // 提取上下文
+  isKnown?: boolean;  // 是否为已知实体（直接复用）
 }
 
 class EntityExtractor {
@@ -327,25 +233,13 @@ class EntityExtractor {
   );
 
   /**
-   * 两阶段实体提取
-   * 1. regex pre-filter 提取候选
-   * 2. LLM refine 验证和分类
+   * 从文本中提取实体
    */
   extract(text: string): Promise<ExtractedEntity[]>;
-
-  /**
-   * 批量提取（优化 LLM 调用）
-   */
-  extractBatch(texts: string[]): Promise<Map<number, ExtractedEntity[]>>;
-
-  /**
-   * 从候选实体中过滤停用词
-   */
-  private filterStopwords(entities: ExtractedEntity[]): ExtractedEntity[];
 }
 ```
 
-**LLM Prompt 设计:**
+**LLM Prompt:**
 ```
 从以下文本中提取具有索引价值的实体。
 
@@ -356,28 +250,26 @@ class EntityExtractor {
 实体类型：
 - TECH: 技术、工具、框架、库、硬件
 - CONCEPT: 抽象概念、方法论、算法
-- PROJECT: 项目名、任务名、产品名
+- PROJECT: 项目名、任务名
 - PERSON: 人名
 - ORG: 组织、公司、团队
-- GENERAL: 其他具有索引价值的关键名词
+- GENERAL: 其他关键名词
 
 文本：{text}
 
-以 JSON 格式返回：
-[
-  {"name": "实体名", "type": "类型", "confidence": 0.9},
-  ...
-]
+返回 JSON:
+[{"name": "实体名", "type": "类型", "confidence": 0.9}]
 ```
 
-### 5.2 实体索引服务 (EntityIndexer)
+### 4.2 实体索引服务 (EntityIndexer)
 
 **文件:** `src/entity-indexer.ts`
 
 **职责:**
 - 处理异步实体索引队列
 - 实体去重和归一化
-- 维护 memory_entity 关系
+- 使用 `RELATE` 建立记忆 - 实体边
+- 更新实体统计（mention_count, memory_count）
 
 **接口:**
 ```typescript
@@ -385,7 +277,7 @@ class EntityIndexer {
   constructor(db: SurrealDatabase, extractor: EntityExtractor);
 
   /**
-   * 将记忆加入索引队列
+   * 将记忆加入索引队列（异步）
    */
   enqueueMemory(memoryId: number, content: string): void;
 
@@ -395,30 +287,92 @@ class EntityIndexer {
   processQueue(): Promise<{ indexed: number; failed: number }>;
 
   /**
-   * 获取与实体相关的所有记忆
+   * 通过实体 ID 检索关联记忆（图遍历）
    */
   getMemoriesByEntity(entityId: number, limit?: number): Promise<MemoryWithSimilarity[]>;
 
   /**
-   * 获取记忆关联的所有实体
+   * 通过记忆 ID 检索关联实体（图遍历）
    */
   getEntitiesByMemory(memoryId: number): Promise<ExtractedEntity[]>;
 
   /**
-   * 通过实体联想检索（一度/多度关联）
+   * 联想检索：通过实体找相关记忆（二度关联）
    */
   retrieveByAssociation(
-    seedEntityId: number,
-    degrees: number = 1,
+    seedMemoryId: number,
+    degrees: number = 2,
     limit?: number
   ): Promise<MemoryWithSimilarity[]>;
 }
 ```
 
-### 5.3 混合检索增强 (HybridRetrieval)
+**核心 SQL 操作:**
 
-**文件:** `src/hybrid-retrieval.ts` (新增)
-或扩展现有 `memory-manager-surreal.ts`
+```typescript
+// 1. 创建或获取实体
+async function upsertEntity(name: string, type: string): Promise<number> {
+  const result = await db.query(`
+    CREATE entity SET
+      name = $name,
+      entity_type = $type,
+      mention_count = 1,
+      last_mentioned_at = time::now()
+    ON DUPLICATE KEY UPDATE
+      mention_count += 1,
+      last_mentioned_at = time::now()
+  `, { name, type });
+  return result[0].id;
+}
+
+// 2. 建立记忆 - 实体边（使用 RELATE）
+async function linkMemoryEntity(memoryId: number, entityId: number, score: number) {
+  await db.query(`
+    RELATE memory:${memoryId}->memory_entity->entity:${entityId}
+    SET
+      relevance_score = $score,
+      weight = $score,
+      frequency = 1
+  `, { score });
+}
+
+// 3. 图遍历：查实体的所有记忆
+async function getMemoriesByEntity(entityId: number, limit: number = 20) {
+  return db.query(`
+    SELECT m.*, me.relevance_score, me.weight
+    FROM memory m
+    WHERE m.id IN (
+      SELECT VALUE in FROM memory_entity WHERE out = entity:${entityId}
+    )
+    ORDER BY me.weight DESC
+    LIMIT $limit
+  `, { limit });
+}
+
+// 4. 图遍历：二度关联检索
+async function retrieveByAssociation(memoryId: number, limit: number = 20) {
+  return db.query(`
+    SELECT m.*, COUNT(me2) as association_count
+    FROM memory m
+    WHERE m.id IN (
+      SELECT VALUE in FROM memory_entity
+      WHERE out IN (
+        SELECT VALUE out FROM memory_entity
+        WHERE in = memory:${memoryId}
+      )
+    ) AND m.id != memory:${memoryId}
+    GROUP BY m.id
+    ORDER BY association_count DESC
+    LIMIT $limit
+  `);
+}
+```
+
+---
+
+### 4.3 混合检索器 (HybridRetriever)
+
+**文件:** `src/hybrid-retrieval.ts`
 
 **职责:**
 - 同时执行向量检索和实体检索
@@ -436,15 +390,6 @@ class EntityIndexer {
 
 **接口:**
 ```typescript
-interface HybridRetrievalOptions {
-  vectorWeight?: number;  // 向量检索权重，默认 0.5
-  entityWeight?: number;  // 实体检索权重，默认 0.5
-  topK?: number;  // 返回数量，默认 5
-  threshold?: number;  // 阈值，默认 0.6
-  enableAssociation?: boolean;  // 是否启用联想检索，默认 false
-  associationDegrees?: number;  // 联想度数，默认 1
-}
-
 class HybridRetriever {
   constructor(
     db: SurrealDatabase,
@@ -459,12 +404,28 @@ class HybridRetriever {
   retrieve(
     query: string,
     sessionId?: string,
-    options?: HybridRetrievalOptions
+    topK?: number,
+    threshold?: number
   ): Promise<MemoryWithSimilarity[]>;
 }
 ```
 
-### 5.4 数据库客户端扩展
+**检索流程:**
+```
+用户查询
+    │
+    ├─→ 向量检索：query → embedding → 向量搜索 → 候选集 A
+    │
+    └─→ 实体检索：query → 提取实体 → 图遍历 (->memory_entity<-memory) → 候选集 B
+    │
+    ▼
+合并候选集 (A ∪ B) → 去重
+    │
+    ▼
+Reranker 重排序 → 阈值过滤 → 最终结果
+```
+
+### 4.4 数据库客户端扩展
 
 **文件:** `src/surrealdb-client.ts` (扩展)
 
@@ -474,16 +435,15 @@ class SurrealDatabase {
   // ... 现有方法 ...
 
   /**
-   * 创建或获取实体
+   * 创建或获取实体（ON DUPLICATE KEY UPDATE）
    */
   upsertEntity(
     name: string,
-    type: string,
-    metadata?: { description?: string; normalized_name?: string }
+    type: string
   ): Promise<number>;
 
   /**
-   * 创建记忆 - 实体关系
+   * 建立记忆 - 实体边（使用 RELATE）
    */
   linkMemoryEntity(
     memoryId: number,
@@ -492,7 +452,7 @@ class SurrealDatabase {
   ): Promise<void>;
 
   /**
-   * 通过实体 ID 检索关联记忆
+   * 通过实体 ID 检索关联记忆（图遍历）
    */
   searchByEntity(
     entityId: number,
@@ -500,9 +460,13 @@ class SurrealDatabase {
   ): Promise<Array<{ id: number; payload: Record<string, any> }>>;
 
   /**
-   * 获取记忆关联的实体
+   * 二度关联检索：通过记忆找相关记忆
    */
-  getEntitiesByMemory(memoryId: number): Promise<Array<{ id: number; name: string; type: string }>>;
+  searchByAssociation(
+    seedMemoryId: number,
+    degrees?: number,
+    limit?: number
+  ): Promise<Array<{ id: number; payload: Record<string, any> }>>;
 
   /**
    * 获取实体统计
@@ -517,9 +481,9 @@ class SurrealDatabase {
 
 ---
 
-## 6. 集成点
+## 5. 集成点
 
-### 6.1 记忆存储流程集成
+### 5.1 记忆存储流程集成
 
 修改 `memory-store-surreal.ts`:
 
@@ -543,9 +507,9 @@ async storeSemantic(content: string, importance: number = 0.7, sessionId?: strin
 }
 ```
 
-### 6.2 检索流程集成
+### 5.2 检索流程集成
 
-**方案 A：修改现有 `retrieveRelevant` 方法**
+**方案：修改现有 `retrieveRelevant` 方法**
 
 修改 `memory-manager-surreal.ts` 的 `retrieveRelevant` 方法：
 
@@ -562,27 +526,10 @@ async retrieveRelevant(
     return this.hybridRetriever.retrieve(query, sessionId, {
       topK,
       threshold,
-      enableAssociation: false,  // 默认不启用联想检索
     });
   }
 
   // ... 现有向量检索逻辑（保持不变） ...
-}
-```
-
-**方案 B：新增独立方法（推荐）**
-
-保留现有 `retrieveRelevant` 逻辑不变，新增 `retrieveWithEntityIndex` 方法：
-
-```typescript
-async retrieveWithEntityIndex(
-  query: string,
-  sessionId: string | undefined,
-  topK: number = 5,
-  threshold: number = 0.6
-): Promise<MemoryWithSimilarity[]> {
-  // 使用混合检索
-  return this.hybridRetriever.retrieve(query, sessionId, { topK, threshold });
 }
 ```
 
@@ -594,12 +541,7 @@ async retrieveWithEntityIndex(
 3. 阈值过滤（默认 0.6）
 4. 重要性加权排序
 
-这样设计的好处：
-- 保持现有 retrieval funnel 逻辑完整
-- 实体检索作为"候选集扩展"手段
-- Reranker 统一处理最终排序
-
-### 6.3 后台维护集成
+### 5.3 后台维护集成
 
 修改 `memory-manager-surreal.ts` 的后台维护循环：
 
@@ -621,15 +563,15 @@ private startIdleMaintenanceWorker(): void {
 
 ---
 
-## 7. 错误处理
+## 6. 错误处理
 
-### 7.1 LLM 调用失败
+### 6.1 LLM 调用失败
 
 - EntityExtractor 重试机制（最多 3 次）
 - 失败后降级为 regex 提取（基础模式）
 - 记录失败日志，不影响主存储流程
 
-### 7.2 数据库操作失败
+### 6.2 数据库操作失败
 
 - 实体索引操作失败不阻塞记忆存储
 - 队列支持断点续处理
@@ -642,10 +584,9 @@ DEFINE FIELD content ON TABLE pending_indexing TYPE string;
 DEFINE FIELD retry_count ON TABLE pending_indexing TYPE int DEFAULT 0;
 DEFINE FIELD last_error ON TABLE pending_indexing TYPE option<string>;
 DEFINE FIELD created_at ON TABLE pending_indexing TYPE datetime;
-DEFINE INDEX idx_pending_retry ON TABLE pending_indexing FIELDS retry_count, created_at;
 ```
 
-### 7.3 实体归一化冲突
+### 6.3 实体归一化冲突
 
 - 使用 `normalized_name` 字段处理同义词
 - 首次创建时确定 normalized_name
@@ -653,9 +594,9 @@ DEFINE INDEX idx_pending_retry ON TABLE pending_indexing FIELDS retry_count, cre
 
 ---
 
-## 8. 性能考虑
+## 7. 性能考虑
 
-### 8.1 异步队列设计
+### 7.1 异步队列设计
 
 **队列存储策略：**
 
@@ -664,79 +605,94 @@ DEFINE INDEX idx_pending_retry ON TABLE pending_indexing FIELDS retry_count, cre
 - **批量处理**: 累积 10 条或 30 秒触发
 - **后台处理限流**: LLM 并发 ≤ 2
 
-**重启恢复策略:**
+### 7.2 索引优化
 
-```typescript
-// MemoryManager.initialize() 中恢复未处理队列
-async initialize(): Promise<MigrationResult> {
-  const result = await this.db.initialize();
+- entity 表：name、entity_type、normalized_name 建立索引
+- memory_entity 表：in、out、复合索引（图遍历加速）
 
-  // 恢复未处理的索引队列
-  await this.entityIndexer?.restorePendingQueue();
-
-  return result;
-}
-```
-
-### 8.2 索引优化
-
-- entity 表：name、type、normalized_name 建立索引
-- memory_entity 表：memory_id、entity_id、复合索引
-- 检索时先过滤 entity_type 再关联
-
-### 8.3 缓存策略
+### 7.3 缓存策略
 
 - 热点实体缓存到内存（最近访问的 100 个实体）
 - 实体→记忆关联结果缓存 5 分钟
 
 ---
 
-## 9. 测试计划
+## 8. 测试计划
 
-### 9.1 单元测试
+### 8.1 单元测试
 
 - EntityExtractor.extract() - 实体提取准确性
 - EntityIndexer.enqueueMemory() - 队列操作
+- SurrealDatabase.linkMemoryEntity() - RELATE 建边
 - 混合检索结果合并逻辑
 
-### 9.2 集成测试
+### 8.2 集成测试
 
 - 存储→提取→索引→检索完整流程
 - 实体去重和归一化
 - 联想检索（一度/多度关联）
 
-### 9.3 性能测试
+**测试用例:**
+```typescript
+// 1. 存储记忆后自动提取实体
+test('should extract entities when storing memory', async () => {
+  const memoryId = await storeEpisodic('session1', 'Using TypeScript with SurrealDB');
+  await processIndexingQueue();
 
-- 批量索引 1000 条记忆的耗时
-- 混合检索 vs 纯向量检索的延迟对比
-- 队列积压处理能力
+  const entities = await getEntitiesByMemory(memoryId);
+  expect(entities).toContainEqual({ name: 'TypeScript', type: 'TECH' });
+  expect(entities).toContainEqual({ name: 'SurrealDB', type: 'TECH' });
+});
+
+// 2. 通过实体精准召回记忆
+test('should recall memories by entity', async () => {
+  const entity = await upsertEntity('TypeScript', 'TECH');
+  const memories = await getMemoriesByEntity(entity);
+
+  expect(memories.every(m =>
+    m.content.includes('TypeScript')
+  )).toBe(true);
+});
+
+// 3. 二度关联检索
+test('should retrieve associated memories', async () => {
+  const memoryId = await storeEpisodic('session1', 'TypeScript is great');
+  await storeEpisodic('session2', 'SurrealDB graph database');
+  await storeEpisodic('session3', 'TypeScript with SurrealDB');
+
+  const associated = await retrieveByAssociation(memoryId);
+
+  // Should find memory:3 via shared entities (TypeScript, SurrealDB)
+  expect(associated.length).toBeGreaterThan(0);
+});
+```
 
 ---
 
-## 10. 迁移计划
+## 9. 迁移计划
 
-### 10.1 第一阶段（本次实现）
+### 9.1 第一阶段（本次实现）
 
 **Schema 迁移步骤:**
 
-1. **扩展 entity 表** - 添加新字段
+1. **扩展 entity 表** - 添加统计字段
    ```sql
-   DEFINE FIELD description ON TABLE entity TYPE option<string>;
    DEFINE FIELD mention_count ON TABLE entity TYPE int DEFAULT 0;
-   DEFINE FIELD last_mentioned_at ON TABLE entity TYPE option<datetime>;
+   DEFINE FIELD memory_count ON TABLE entity TYPE int DEFAULT 0;
+   DEFINE FIELD last_mentioned_at ON TABLE entity TYPE datetime;
    ```
 
-2. **创建 memory_entity 表** - 新建关系表
+2. **创建 memory_entity 边表** - 使用 RELATE
    ```sql
    DEFINE TABLE memory_entity SCHEMAFULL;
-   DEFINE FIELD memory_id ON TABLE memory_entity TYPE int;
-   DEFINE FIELD entity_id ON TABLE memory_entity TYPE int;
    DEFINE FIELD relevance_score ON TABLE memory_entity TYPE float;
-   DEFINE FIELD created_at ON TABLE memory_entity TYPE datetime;
-   DEFINE INDEX idx_memory_entity_memory ON TABLE memory_entity FIELDS memory_id;
-   DEFINE INDEX idx_memory_entity_entity ON TABLE memory_entity FIELDS entity_id;
-   DEFINE INDEX idx_memory_entity_composite ON TABLE memory_entity FIELDS memory_id, entity_id;
-   DEFINE INDEX idx_memory_entity_score ON TABLE memory_entity FIELDS entity_id, relevance_score;
+   DEFINE FIELD weight ON TABLE memory_entity TYPE float;
+   DEFINE FIELD frequency ON TABLE memory_entity TYPE int DEFAULT 1;
+   DEFINE FIELD created_at ON TABLE memory_entity TYPE datetime DEFAULT time::now();
+
+   DEFINE INDEX idx_memory_entity_in ON TABLE memory_entity FIELDS in;
+   DEFINE INDEX idx_memory_entity_out ON TABLE memory_entity FIELDS out;
+   DEFINE INDEX idx_memory_entity_score ON TABLE memory_entity FIELDS out, relevance_score;
    ```
 
 3. **创建 pending_indexing 表** - 持久化队列
@@ -760,7 +716,7 @@ async initialize(): Promise<MigrationResult> {
 5. 集成到存储和检索流程
 6. 添加测试
 
-### 10.2 第二阶段（后续可选）
+### 9.2 第二阶段（后续可选）
 
 **Schema 迁移:**
 
@@ -769,19 +725,15 @@ async initialize(): Promise<MigrationResult> {
    DEFINE TABLE entity_alias SCHEMAFULL;
    DEFINE FIELD alias ON TABLE entity_alias TYPE string;
    DEFINE FIELD entity_id ON TABLE entity_alias TYPE int;
-   DEFINE FIELD verified ON TABLE entity_alias TYPE bool DEFAULT false;  -- 是否经过人工确认
-   DEFINE INDEX idx_entity_alias ON TABLE entity_alias FIELDS alias;
+   DEFINE FIELD verified ON TABLE entity_alias TYPE bool DEFAULT false;
    ```
 
-2. **创建 entity_relation 表** - 共现关系
+2. **创建 entity_relation 边表** - 共现关系（也用 RELATE）
    ```sql
    DEFINE TABLE entity_relation SCHEMAFULL;
-   DEFINE FIELD from_entity_id ON TABLE entity_relation TYPE int;
-   DEFINE FIELD to_entity_id ON TABLE entity_relation TYPE int;
-   DEFINE FIELD relation_type ON TABLE entity_relation TYPE string;  -- related-to, used-for, is-a
-   DEFINE FIELD weight ON TABLE entity_relation TYPE float;  -- 共现权重
+   DEFINE FIELD relation_type ON TABLE entity_relation TYPE string;
+   DEFINE FIELD weight ON TABLE entity_relation TYPE float;
    DEFINE FIELD evidence_memory_ids ON TABLE entity_relation TYPE array<int>;
-   DEFINE FIELD llm_verified ON TABLE entity_relation TYPE bool DEFAULT false;  -- LLM 验证关系类型
    ```
 
 3. **创建 topic 表** - Topic 抽象层
@@ -801,10 +753,10 @@ memory_entity 共现统计
    ↓
 LLM 关系分类 (relation_type)
    ↓
-写入 entity_relation
+RELATE entity:1->entity_relation->entity:2
 ```
 
-### 10.3 第三阶段（长期优化）
+### 9.3 第三阶段（长期优化）
 
 **Topic Layer 实现:**
 
@@ -827,7 +779,7 @@ Query
 
 ---
 
-## 11. 验收标准
+## 10. 验收标准
 
 1. **功能验收**
    - [ ] 存储记忆时自动提取实体并建立索引
