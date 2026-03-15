@@ -22,17 +22,55 @@
 - 实体不宜过细，倾向于"能跨文档关联"的关键词
 - 异步处理，不阻塞主存储流程
 
-### 1.3 为什么用 SurrealDB 的图能力
+### 1.3 RELATE：从"存数据"变成"织网"
 
-| 需求 | 关系表方案 | SurrealDB 原生图 |
-|------|------------|-----------------|
-| 建立关联 | 手动插入 `memory_id`, `entity_id` | `RELATE memory:1->memory_entity->entity:1` |
-| 一度关联查询 | `SELECT * FROM memory_entity WHERE memory_id = ?` | `SELECT ->memory_entity->entity FROM memory:1` |
-| 反向关联 | `SELECT * FROM memory_entity WHERE entity_id = ?` | `SELECT <-memory_entity<-memory FROM entity:1` |
-| 二度关联 | 多表 JOIN | `SELECT ->memory_entity<-memory FROM (SELECT ->memory_entity->entity FROM memory:1)` |
-| 边属性 | 额外字段 | `RELATE ... SET relevance_score = 0.9` |
+**传统关系型数据库（如 SQLite）：**
+```sql
+-- 需要三张表，手动维护外键
+INSERT INTO memory_entity (memory_id, entity_id, relevance) VALUES (1, 2, 0.9);
+```
 
-### 1.4 系统定位
+**SurrealDB 原生图：**
+```sql
+-- 一个动作，自动创建双向指针 + 边记录
+RELATE memory:1->mentions->entity:2 SET relevance = 0.9;
+```
+
+**RELATE 的威力：**
+
+| 操作 | SQL 语法 | 说明 |
+|------|----------|------|
+| 建边 | `RELATE memory:1->mentions->entity:2 SET weight = 0.9` | 自动创建 `in` 和 `out` 字段 |
+| 正向遍历 | `SELECT ->mentions->entity FROM memory:1` | 找记忆关联的实体 |
+| 反向遍历 | `SELECT <-mentions<-memory FROM entity:2` | 找提到该实体的所有记忆 |
+| 二度联想 | `SELECT ->mentions<-memory->mentions->entity FROM entity:python` | 从 Python 想到它用的数据库 |
+
+**二度联想示例：**
+```
+用户提到"Python" → 想找相关的其他实体
+
+SELECT ->mentions<-memory->mentions->entity AS related_topics FROM entity:python
+
+结果：
+- TypeScript (通过"Python vs TypeScript 对比"的记忆关联)
+- SurrealDB (通过"Python 连接数据库"的记忆关联)
+- FastAPI (通过"Python Web 框架"的记忆关联)
+```
+
+这就是人类"联想记忆"的代码实现。
+
+### 1.4 M4 优化策略
+
+**Mac Mini M4 的优势：** 单核性能极强、统一内存（Unified Memory）带宽极高、带有神经引擎（ANE）。
+
+| 策略 | 实现 | 理由 |
+|------|------|------|
+| **统一内存优化** | 存储引擎配置为 RocksDB | CPU 和 GPU 共享内存，RocksDB 减少磁盘压力，确保模型推理和数据库写入互不干扰 |
+| **异步索引 + 批处理** | 后台线程运行 8B 模型，一个事务执行所有 RELATE | 用户回复秒开，背后"知识织网"在后台完成 |
+| **并发控制** | 限制模型提取任务并发数 = 1 | M4 运行 8B 模型时 GPU 满载，顺序处理比并发更快（L2 缓存命中率高） |
+| **向量索引** | 使用 MTREE 而非 HNSW | 内存占用更小，对高带宽内存友好，为 LLM 腾出运行空间 |
+
+### 1.5 系统定位
 
 **Stage 1: Entity-Indexed Vector RAG（本次实现）**
 
@@ -679,7 +717,114 @@ async retrieveWithGraphTimeout(
 - **批量处理**: 累积 10 条或 30 秒触发
 - **后台处理限流**: LLM 并发 ≤ 2
 
-### 7.2 索引优化
+### 7.2 M4 优化策略
+
+**Mac Mini M4 的优势：** 单核性能极强、统一内存（Unified Memory）带宽极高、带有神经引擎（ANE）。
+
+#### 7.2.1 统一内存优化 (Unified Memory Access)
+
+**策略：** 存储引擎配置为 RocksDB
+
+**理由：**
+- M4 的 CPU 和 GPU 共享内存
+- 运行 8B 模型时，GPU 占用大量内存
+- RocksDB 能极好地利用内存缓存，减少磁盘压力
+- 确保模型推理和数据库写入互不干扰
+
+```typescript
+const db = new SurrealDatabase({
+  url: 'http://localhost:8000',
+  // RocksDB 引擎配置（SurrealDB 启动参数）
+  engine: 'rocksdb',
+  max_connections: 5,
+});
+```
+
+#### 7.2.2 异步索引与批处理 (Batching)
+
+**策略：** 不要在用户对话时同步执行 `RELATE`
+
+**实现：**
+```typescript
+// 主流程：只负责保存记忆
+async storeEpisodic(sessionId: string, content: string): Promise<number> {
+  const memoryId = await db.create('memory', { content, session_id: sessionId });
+  // 异步：加入队列，不阻塞
+  this.indexer.enqueue(memoryId, content);
+  return memoryId;
+}
+
+// 后台：Worker Thread 运行 8B 模型
+async processQueue() {
+  const batch = this.queue.splice(0, BATCH_SIZE);
+
+  // 事务一次性织网
+  await db.query(`
+    BEGIN TRANSACTION;
+    FOR $item IN $batch {
+      LET $entities = await llm.extract($item.content);
+      FOR $ent IN $entities {
+        LET $ent_id = (SELECT id FROM entity WHERE name = $ent.name)[0]
+                      OR (CREATE entity SET name = $ent.name);
+        RELATE $item.id->mentions->$ent_id SET weight = $ent.weight;
+      };
+      UPDATE $item.id SET is_indexed = true;
+    };
+    COMMIT TRANSACTION;
+  `, { batch });
+}
+```
+
+**效果：** 用户感觉回复秒开，背后的"知识织网"在后台安静完成。
+
+#### 7.2.3 针对 M4 神经引擎的并发控制
+
+**策略：** 限制模型提取任务的并发数为 1
+
+**理由：**
+- M4 运行 8B 模型时，神经引擎或 GPU 会满载
+- 同时启动多个提取任务会导致系统严重掉帧
+- 顺序处理比并发处理更快（L2 缓存命中率高）
+
+```typescript
+class EntityExtractor {
+  private queue: QueueItem[] = [];
+  private isProcessing = false;
+
+  async extract(text: string): Promise<Entity[]> {
+    // 顺序处理，保持 L2 缓存命中率
+    return new Promise((resolve) => {
+      this.queue.push({ text, resolve });
+      if (!this.isProcessing) this.processQueue();
+    });
+  }
+
+  private async processQueue() {
+    this.isProcessing = true;
+    while (this.queue.length > 0) {
+      const { text, resolve } = this.queue.shift()!;
+      const result = await this.callLLM(text);  // 并发数 = 1
+      resolve(result);
+    }
+    this.isProcessing = false;
+  }
+}
+```
+
+#### 7.2.4 向量索引优化 (MTREE)
+
+**策略：** 使用 SurrealDB 的 MTREE 索引而不是传统的 HNSW
+
+**理由：**
+- MTREE 在本地环境下的内存占用更小
+- 对 M4 高带宽内存非常友好
+- 保持高检索速度的同时，为 LLM 腾出更多运行空间
+
+```sql
+DEFINE INDEX idx_entity_vector ON TABLE entity FIELDS embedding MTREE DIMENSION 1024 DISTANCE COSINE;
+```
+
+### 7.3 索引优化
 
 - entity 表：name、entity_type、normalized_name 建立索引
 - memory_entity 表：in、out、复合索引（图遍历加速）
@@ -690,31 +835,54 @@ async retrieveWithGraphTimeout(
   - MTREE 是 SurrealDB 为本地高性能设计的向量索引算法
   - 比 HNSW 更省内存，适合本地部署
 
-### 7.3 缓存策略
+### 7.4 缓存策略
 
 - 热点实体缓存到内存（最近访问的 100 个实体）
 - 实体→记忆关联结果缓存 5 分钟
 
-### 7.4 事务优化
+### 7.5 事务优化：织网模式
 
 **批量导入文档时:**
 - 使用 `BEGIN TRANSACTION` 包裹批量操作
 - 每批处理 50 个切片再提交，避免频繁磁盘 I/O
-- 示例：
-  ```typescript
-  await db.query('BEGIN TRANSACTION');
-  try {
-    for (const chunk of chunks) {
-      await processChunk(chunk);
-    }
-    await db.query('COMMIT TRANSACTION');
-  } catch (e) {
-    await db.query('ROLLBACK TRANSACTION');
-    throw e;
-  }
-  ```
 
-### 7.5 连接池管理
+**织网模式（针对 M4 优化）：**
+
+```typescript
+// 针对 M4 优化的实体织网逻辑
+async function indexMemory(memoryId: string, text: string) {
+  try {
+    // 1. 调用本地 8B 模型 (利用 M4 ANE/GPU)
+    const entities = await llm.extract(text);
+
+    // 2. 使用事务一次性织网 (SurrealDB 原子操作)
+    await db.query(`
+      BEGIN TRANSACTION;
+      FOR $ent IN $entities {
+        -- 实体去重：存在则复用，不存在则创建
+        LET $ent_id = (SELECT id FROM entity WHERE name = $ent.name)[0]
+                      OR (CREATE entity SET name = $ent.name, type = $ent.type);
+
+        -- RELATE 核心逻辑：建立带权重的边
+        RELATE ${memoryId}->mentions->$ent_id SET weight = $ent.weight;
+      };
+      UPDATE ${memoryId} SET is_indexed = true;
+      COMMIT TRANSACTION;
+    `, { entities });
+
+  } catch (e) {
+    console.warn("织网失败，但不影响主流程：", e);
+    // 失忆模式保障：图查询失败时降级为纯向量检索
+  }
+}
+```
+
+**关键点：**
+1. **原子性**：要么全部建边成功，要么全部失败
+2. **性能**：一次事务提交 vs 多次单独提交
+3. **容错**：失败不影响主流程，记录日志即可
+
+### 7.6 连接池管理
 
 **配置建议:**
 ```typescript
