@@ -152,7 +152,7 @@ export class MemoryStore {
         if (sessionId)
             filter.session_id = sessionId;
         const results = await this.db.search(embedding, topK * 2, Object.keys(filter).length > 0 ? filter : undefined);
-        return results
+        const mapped = results
             .map(r => ({
             id: r.id,
             content: r.payload.content,
@@ -172,6 +172,7 @@ export class MemoryStore {
             return true;
         })
             .slice(0, topK);
+        return mapped;
     }
     /**
      * Get semantic memories with optional session filtering.
@@ -250,8 +251,9 @@ export class MemoryStore {
         const point = await this.db.get(memoryId);
         if (point && point.payload) {
             const newAccessCount = (point.payload.access_count || 0) + 1;
+            // Only update fields that exist in the database schema
+            // memory_type is a computed field, not stored in DB
             await this.db.updatePayload(memoryId, {
-                ...point.payload,
                 access_count: newAccessCount,
                 updated_at: new Date().toISOString(),
             });

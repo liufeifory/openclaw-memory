@@ -253,6 +253,8 @@ export class SurrealDatabase {
       throw new Error('[SurrealDB] Client not connected');
     }
 
+    console.log(`[SurrealDB] Search: embedding=${embedding?.length}, filter=${JSON.stringify(filter)}`);
+
     const conditions: string[] = [];
     const params: Record<string, any> = { query_embedding: embedding, limit };
 
@@ -278,7 +280,24 @@ export class SurrealDatabase {
     `;
 
     const result = await this.client.query(sql, params);
-    const data = (result as any)[0]?.result || [];
+
+    // SurrealDB 3.x SDK returns [[records]] format (array of arrays)
+    // Check if result[0] is an array (direct data) or an object with result property
+    let data: any[] = [];
+    if (Array.isArray(result) && result.length > 0) {
+      if (Array.isArray(result[0])) {
+        // SurrealDB 3.x format: [[{id, content, ...}]]
+        data = result[0] || [];
+      } else if ((result as any)[0]?.result) {
+        // Legacy format: [{result: [{id, content, ...}]}]
+        data = (result as any)[0].result || [];
+      }
+    } else if ((result as any)?.result) {
+      // Fallback for object format
+      data = (result as any).result || [];
+    }
+
+    console.log(`[SurrealDB] Search extracted ${data.length} items`);
 
     return data.map((r: any) => ({
       id: this.extractIdFromRecord(r),
@@ -332,7 +351,16 @@ export class SurrealDatabase {
     `;
 
     const result = await this.client.query(sql, params);
-    const data = (result as any)[0]?.result || [];
+
+    // SurrealDB 3.x returns [[records]] format
+    let data: any[] = [];
+    if (Array.isArray(result) && result.length > 0) {
+      if (Array.isArray(result[0])) {
+        data = result[0] || [];
+      } else if ((result as any)[0]?.result) {
+        data = (result as any)[0].result || [];
+      }
+    }
 
     return data.map((r: any) => ({
       id: this.extractIdFromRecord(r),
@@ -349,7 +377,16 @@ export class SurrealDatabase {
     try {
       const recordId = new RecordId(MEMORY_TABLE, id);
       const result = await this.client.query(`SELECT * FROM ${String(recordId)}`, {});
-      const records = (result as any)[0]?.result || [];
+
+      // SurrealDB 3.x returns [[record]] format
+      let records: any[] = [];
+      if (Array.isArray(result) && result.length > 0) {
+        if (Array.isArray(result[0])) {
+          records = result[0] || [];
+        } else if ((result as any)[0]?.result) {
+          records = (result as any)[0].result || [];
+        }
+      }
 
       if (records && records.length > 0) {
         return {
@@ -387,7 +424,10 @@ export class SurrealDatabase {
         }
       }
 
-      fields.push(`updated_at = time::now()`);
+      // Use parameterized string instead of time::now() to avoid datetime type coercion issues
+      const now = new Date().toISOString();
+      fields.push(`updated_at = $updated_at`);
+      params.updated_at = now;
 
       const sql = `UPDATE ${String(recordId)} SET ${fields.join(', ')}`;
       await this.client.query(sql, params);
@@ -425,7 +465,16 @@ export class SurrealDatabase {
     const sql = `SELECT * FROM ${MEMORY_TABLE} ${whereClause} LIMIT $limit`;
 
     const result = await this.client.query(sql, params);
-    const data = (result as any)[0]?.result || [];
+
+    // SurrealDB 3.x returns [[records]] format
+    let data: any[] = [];
+    if (Array.isArray(result) && result.length > 0) {
+      if (Array.isArray(result[0])) {
+        data = result[0] || [];
+      } else if ((result as any)[0]?.result) {
+        data = (result as any)[0].result || [];
+      }
+    }
 
     return data.map((r: any) => ({
       id: this.extractIdFromRecord(r),
@@ -486,7 +535,16 @@ export class SurrealDatabase {
     `;
 
     const result = await this.client.query(sql, typedParams);
-    const data = (result as any)[0]?.result || [];
+
+    // SurrealDB 3.x returns [[records]] format
+    let data: any[] = [];
+    if (Array.isArray(result) && result.length > 0) {
+      if (Array.isArray(result[0])) {
+        data = result[0] || [];
+      } else if ((result as any)[0]?.result) {
+        data = (result as any)[0].result || [];
+      }
+    }
 
     return data.map((r: any) => ({
       id: this.extractIdFromRecord(r),
@@ -513,7 +571,16 @@ export class SurrealDatabase {
 
     try {
       const result = await this.client.query('SELECT count() AS count FROM memory');
-      return (result as any)[0]?.result?.[0]?.count || 0;
+
+      // SurrealDB 3.x returns [[{count: N}]] format
+      if (Array.isArray(result) && result.length > 0) {
+        if (Array.isArray(result[0]) && result[0].length > 0) {
+          return result[0][0]?.count || 0;
+        } else if ((result as any)[0]?.result?.[0]) {
+          return (result as any)[0].result[0].count || 0;
+        }
+      }
+      return 0;
     } catch {
       return 0;
     }
@@ -534,7 +601,16 @@ export class SurrealDatabase {
 
     try {
       const result = await this.client.query('SELECT schema_version FROM metadata LIMIT 1');
-      return (result as any)[0]?.result?.[0]?.schema_version || 0;
+
+      // SurrealDB 3.x returns [[{schema_version: N}]] format
+      if (Array.isArray(result) && result.length > 0) {
+        if (Array.isArray(result[0]) && result[0].length > 0) {
+          return result[0][0]?.schema_version || 0;
+        } else if ((result as any)[0]?.result?.[0]) {
+          return (result as any)[0].result[0].schema_version || 0;
+        }
+      }
+      return 0;
     } catch {
       return 0;
     }
@@ -558,10 +634,16 @@ export class SurrealDatabase {
   }
 
   private extractIdFromRecord(record: any): number {
+    // Handle RecordId object (SurrealDB 3.x SDK)
+    if (record.id && typeof record.id === 'object' && record.id.id !== undefined) {
+      return record.id.id;
+    }
+    // Handle string format "table:id"
     if (typeof record.id === 'string') {
       const parts = record.id.split(':');
       return parseInt(parts[parts.length - 1], 10);
     }
+    // Handle numeric id directly
     return record.id || 0;
   }
 
