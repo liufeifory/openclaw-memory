@@ -230,6 +230,8 @@ export class SurrealDatabase {
         }
         fields.push(`is_active = $is_active`);
         params.is_active = payload.is_active ?? true;
+        fields.push(`is_indexed = $is_indexed`);
+        params.is_indexed = payload.is_indexed ?? false;
         if (payload.summary !== undefined) {
             fields.push(`summary = $summary`);
             params.summary = payload.summary;
