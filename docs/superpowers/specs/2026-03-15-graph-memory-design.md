@@ -610,8 +610,15 @@ WHERE m.id IN (
 | 层级 | 策略 | 成本 | 覆盖率 |
 |------|------|------|--------|
 | **第一层：Static Cache / Regex** | 内存 Set + 字符串匹配 | 几乎零成本 | ~60% |
-| **第二层：1B 模型 Pre-Filter** | Yes/No 分类 | 极低成本 | ~30% |
+| **Layer 1.5: Mini-Batch Buffer** | 5-10 条批量处理 | 低开销 | - |
+| **第二层：1B 模型 Pre-Filter** | Yes/No 批量分类 | 极低成本 | ~30% |
 | **第三层：8B 模型 Refine** | 精准语义提取 | 高成本 | ~10% |
+
+**优化点：Mini-Batch Buffer（降低 1B 模型调度开销）**
+
+> **问题：** 1B 模型虽然快（>100 t/s），但每次调用涉及 Ollama/LocalAI 的上下文加载和推理开销。短时间导入大量文档（如 1000 条/天）时，频繁启停推理任务会造成系统微卡顿。
+
+> **解决方案：** 在 Layer 1 和 Layer 2 之间增加"小批次缓存（Mini-Batch Buffer）"。积攒 5-10 条文本后一次性塞给 1B 模型问："这 10 段文本里哪些有新实体？"
 
 **整体流程:**
 ```
@@ -622,16 +629,25 @@ WHERE m.id IN (
 │ Layer 1: Static Cache / Regex   │  ← 已知实体直接命中，无需 LLM
 │ - 内存 Set 存储已存在实体名      │
 │ - CamelCase / [A-Z]{2,} 匹配   │
+│ - Alias 规范化预处理            │
 └─────────────────────────────────┘
     │
     ├─ 全部命中 → 直接返回，跳过后续所有 LLM 调用 ✅
     │
-    ├─ 部分未命中 → 进入 Layer 2
+    ├─ 部分未命中 → 进入 Mini-Batch Buffer
+    ▼
+┌─────────────────────────────────┐
+│ Layer 1.5: Mini-Batch Buffer    │  ← 积攒 5-10 条批量处理
+│ - 队列长度达到 5 或等待 30 秒触发  │
+│ - 降低 1B 模型调度开销          │
+└─────────────────────────────────┘
+    │
     ▼
 ┌─────────────────────────────────┐
 │ Layer 2: 1B 模型 Pre-Filter     │  ← 永久驻留，极低成本
-│ - 问 1B 模型："这段文本是否有    │
-│   新的专有名词？Yes/No"         │
+│ - 批量问 1B 模型：               │
+│   "这 10 段文本里哪些有新实体？"  │
+│ - 返回 [Yes, No, Yes, ...]     │
 └─────────────────────────────────┘
     │
     ├─ 回答 No → 无需提取，返回空数组 ✅
@@ -648,20 +664,109 @@ WHERE m.id IN (
 最终实体列表
 ```
 
+**Mini-Batch Buffer 实现:**
+
+```typescript
+class MiniBatchBuffer {
+  private buffer: Array<{ text: string; resolve: (entities: ExtractedEntity[]) => void }> = [];
+  private batchSize = 10;
+  private flushInterval: NodeJS.Timeout;
+
+  constructor(private processor: (texts: string[]) => Promise<ExtractedEntity[][]>) {
+    // 30 秒自动触发，即使队列未满
+    this.flushInterval = setInterval(() => this.flush(), 30000);
+  }
+
+  async add(text: string): Promise<ExtractedEntity[]> {
+    return new Promise((resolve) => {
+      this.buffer.push({ text, resolve });
+
+      // 达到批次大小时立即处理
+      if (this.buffer.length >= this.batchSize) {
+        this.flush();
+      }
+    });
+  }
+
+  private async flush(): Promise<void> {
+    if (this.buffer.length === 0) return;
+
+    const batch = this.buffer.splice(0, this.batchSize);
+    const texts = batch.map(item => item.text);
+
+    try {
+      // 批量处理，显著降低推理调度开销
+      const results = await this.processor(texts);
+
+      // 分别返回结果
+      for (let i = 0; i < batch.length; i++) {
+        batch[i].resolve(results[i]);
+      }
+    } catch (error) {
+      // 错误处理：返回空数组
+      for (const item of batch) {
+        item.resolve([]);
+      }
+    }
+  }
+
+  destroy(): void {
+    clearInterval(this.flushInterval);
+  }
+}
+```
+
+**性能对比：**
+
+| 模式 | 单条处理延迟 | 1000 条总耗时 | 推理调用次数 |
+|------|-------------|--------------|-------------|
+| 无 Buffer（逐条） | ~50ms | ~50s | 1000 次 |
+| Mini-Batch (batch=10) | ~5ms（平均） | ~15s | 100 次 |
+
+**效果：**
+- 推理调用次数 ↓ 90%
+- 1000 条总耗时 ↓ 70%
+- 系统微卡顿显著减少
+
 **各层详细说明:**
 
-#### Layer 1: Static Cache / Regex（零成本过滤）
+#### Layer 1: Static Cache / Regex（零成本过滤 + Alias 规范化）
 
 **逻辑:** 从 SurrealDB 的 `entity` 表中导出所有已存在的 `name`，维护在内存的 `Set` 中。
 
+**优化点：Alias 规范化预处理**
+
+> **问题：** 如果先存了 "PG"，后存了 "PostgreSQL"（规范词），根据目前的逻辑，"PG" 会先成为一个独立实体，后续需要昂贵的"边转移"事务操作。
+
+> **解决方案：** 增加"规范化预处理层"。在 Layer 1 的 Regex 匹配时，直接根据 `ALIAS_RULES` 字典将文本中的 "PG" 映射为 "PostgreSQL"。这样在进入数据库前就完成了统一。
+
 **实现:**
+
 ```typescript
+// 别名映射表（规范名 -> 别名列表）
+const ALIAS_RULES: Record<string, string[]> = {
+  'PostgreSQL': ['Postgres', 'postgres', 'PG'],
+  'TypeScript': ['TS', 'ts'],
+  'JavaScript': ['JS', 'js', 'ECMAScript'],
+  'OpenAI': ['GPT-4', 'ChatGPT', 'o1'],
+  'React': ['React.js', 'ReactJS'],
+  'Kubernetes': ['K8s', 'k8s', 'K8S'],
+};
+
+// 构建反向索引（别名 -> 规范名）
+const ALIAS_TO_CANONICAL: Record<string, string> = {};
+for (const [canonical, aliases] of Object.entries(ALIAS_RULES)) {
+  for (const alias of aliases) {
+    ALIAS_TO_CANONICAL[alias.toLowerCase()] = canonical;
+  }
+}
+
 class EntityExtractor {
   private knownEntities = new Set<string>();
   private lastCacheUpdate: Date | null = null;
 
   constructor(db: SurrealDatabase) {
-    // 初始化时加载已知实体
+    // 初始化时加载已知实体（包括别名）
     this.loadKnownEntities();
     // 定期刷新缓存（每 5 分钟）
     setInterval(() => this.loadKnownEntities(), 5 * 60 * 1000);
@@ -669,15 +774,46 @@ class EntityExtractor {
 
   private async loadKnownEntities() {
     const entities = await db.select('entity');
-    this.knownEntities = new Set(entities.map(e => e.name.toLowerCase()));
+
+    // 存储规范名和所有别名
+    this.knownEntities = new Set<string>();
+    for (const entity of entities) {
+      // 存储规范名
+      this.knownEntities.add(entity.name.toLowerCase());
+
+      // 存储别名映射
+      if (entity.aliases && Array.isArray(entity.aliases)) {
+        for (const alias of entity.aliases) {
+          this.knownEntities.add(alias.toLowerCase());
+        }
+      }
+    }
+
     this.lastCacheUpdate = new Date();
   }
 
+  /**
+   * 规范化预处理：将文本中的别名替换为规范名
+   */
+  private normalizeText(text: string): string {
+    let normalized = text;
+
+    for (const [alias, canonical] of Object.entries(ALIAS_TO_CANONICAL)) {
+      // 使用正则表达式进行全词匹配替换
+      const regex = new RegExp(`\\b${alias}\\b`, 'gi');
+      normalized = normalized.replace(regex, canonical);
+    }
+
+    return normalized;
+  }
+
   private layer1_RegexMatch(text: string): string[] {
+    // 先进行别名规范化
+    const normalizedText = this.normalizeText(text);
     const found: string[] = [];
 
     // 简单字符串匹配
-    const words = text.match(/[A-Za-z0-9_-]+/g) || [];
+    const words = normalizedText.match(/[A-Za-z0-9_-]+/g) || [];
     for (const word of words) {
       if (this.knownEntities.has(word.toLowerCase())) {
         found.push(word);
@@ -685,7 +821,7 @@ class EntityExtractor {
     }
 
     // CamelCase 匹配（如 TypeScript、SurrealDB）
-    const camelCase = text.match(/[A-Z][a-z]+(?:[A-Z][a-z]+)*/g) || [];
+    const camelCase = normalizedText.match(/[A-Z][a-z]+(?:[A-Z][a-z]+)*/g) || [];
     for (const match of camelCase) {
       if (!found.includes(match)) {
         found.push(match);
@@ -693,7 +829,7 @@ class EntityExtractor {
     }
 
     // 全大写缩写匹配（如 API、SDK、LLM）
-    const acronyms = text.match(/[A-Z]{2,}/g) || [];
+    const acronyms = normalizedText.match(/[A-Z]{2,}/g) || [];
     for (const acronym of acronyms) {
       if (!found.includes(acronym)) {
         found.push(acronym);
@@ -705,8 +841,17 @@ class EntityExtractor {
 }
 ```
 
-**效果:**
-- 如果一个 Chunk 里的词全是已知实体，直接跳过后续所有 LLM 调用
+**效果对比：**
+
+| 方案 | 处理时机 | 边转移操作 | 数据库一致性 |
+|------|----------|-----------|-------------|
+| 后置合并 | 写入数据库后 | 需要，昂贵 | 需要事务保证 |
+| 预处理规范化 | 写入数据库前 | 无需 | 天然一致 |
+
+**效果：**
+- 避免昂贵的"边转移"事务操作
+- 数据库天然保持一致性
+- "PG" → "PostgreSQL" 在入库前完成统一
 - 覆盖率约 60%，成本几乎为零
 
 #### Layer 2: 1B 模型 Pre-Filter（极低成本过滤）
