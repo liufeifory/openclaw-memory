@@ -1,15 +1,17 @@
 /**
  * OpenClaw Memory Plugin - Native Node.js Implementation
  *
- * Supports both PostgreSQL (pgvector) and Qdrant backends.
+ * Supports PostgreSQL (pgvector), Qdrant, and SurrealDB backends.
  *
  * Features:
  * - Semantic retrieval via vector search
  * - Importance-based ranking
  * - Episodic, semantic, and reflection memories
+ * - Message queue + background worker for decoupled storage
  */
 import { MemoryManager as PgMemoryManager } from './memory-manager.js';
 import { MemoryManager as QdrantMemoryManager } from './memory-manager-qdrant.js';
+import { MemoryManager as SurrealMemoryManager } from './memory-manager-surreal.js';
 import { LLMLimiter } from './llm-limiter.js';
 import { MemoryFilter } from './memory-filter.js';
 import { PreferenceExtractor } from './preference-extractor.js';
@@ -22,9 +24,10 @@ let memoryFilter = null;
 let preferenceExtractor = null;
 let summarizer = null;
 let globalLimiter = null;
-let savedConfig = null; // Store config from init
+let savedConfig = null;
 /**
  * Append memory to local Markdown file for self-improving-agent compatibility.
+ * This function is NOT affected by backend choice - always writes to file.
  */
 function appendToLocalMemory(content, sessionId) {
     try {
@@ -59,6 +62,9 @@ function getMemoryManager(config) {
     if (!memoryManager) {
         if (config.backend === 'qdrant') {
             memoryManager = new QdrantMemoryManager(config);
+        }
+        else if (config.backend === 'surrealdb') {
+            memoryManager = new SurrealMemoryManager(config);
         }
         else {
             memoryManager = new PgMemoryManager(config);
@@ -103,21 +109,27 @@ function buildMemoryContext(memories) {
 const memoryPlugin = {
     id: 'openclaw-memory',
     name: 'OpenClaw Memory',
-    description: 'Long-term memory with semantic search (supports pgvector and Qdrant)',
+    description: 'Long-term memory with semantic search (supports pgvector, Qdrant, and SurrealDB)',
     kind: 'memory',
     async init(config) {
         // Store config for later use in register
         savedConfig = config;
-        // Initialize memory manager on plugin load
+        // Initialize memory manager
         const mm = getMemoryManager(config);
-        // Initialize Qdrant if using that backend (run migration)
+        // Initialize backend (run migration if needed)
         if (config.backend === 'qdrant' && mm instanceof QdrantMemoryManager) {
             const result = await mm.initialize();
             if (result.migrated) {
                 console.log('[openclaw-memory] Schema migration:', result.changes);
             }
         }
-        console.log('[openclaw-memory] Plugin initialized with', config.backend === 'qdrant' ? 'Qdrant' : 'PostgreSQL');
+        else if (config.backend === 'surrealdb' && mm instanceof SurrealMemoryManager) {
+            const result = await mm.initialize();
+            if (result.migrated) {
+                console.log('[openclaw-memory] SurrealDB schema migration:', result.changes);
+            }
+        }
+        console.log('[openclaw-memory] Plugin initialized with backend:', config.backend || 'pgvector');
     },
     register(api) {
         // Get plugin config from OpenClaw - use api.pluginConfig property (not getConfig method)
@@ -132,10 +144,9 @@ const memoryPlugin = {
         }
         // Debug: log resolved config
         console.log('[openclaw-memory] Resolved config:', JSON.stringify(config, null, 2));
-        // Check for either pgvector or qdrant config
-        const hasPgConfig = 'database' in config && !!config.database;
-        const hasQdrantConfig = config.backend === 'qdrant' || ('qdrant' in config && !!config.qdrant);
-        if (!hasPgConfig && !hasQdrantConfig) {
+        // Check for any backend config
+        const hasBackend = config.backend || 'database' in config || 'qdrant' in config || 'surrealdb' in config;
+        if (!hasBackend) {
             console.warn('[openclaw-memory] No database config found, plugin disabled');
             return;
         }
@@ -152,83 +163,105 @@ const memoryPlugin = {
         const summarizer = getSummarizer(llamaEndpoint, limiter);
         // Conversation buffer for summarization
         const conversationBuffers = new Map();
-        // 已存储消息记录（用于避免 TUI 模式下重复存储）
-        const storedMessages = new Set();
+        const messageQueue = [];
+        let queueProcessing = false;
+        let queueShutDown = false;
         /**
-         * 存储消息的通用函数（被 message_received 和 before_prompt_build 共用）
+         * 后台 Worker - 持续处理消息队列
+         * 错误完全隔离，只记录日志，不影响主流程
          */
-        async function storeMessage(sessionId, message, source) {
-            try {
-                // 类型检查：确保 message 是字符串
-                if (typeof message !== 'string') {
-                    console.warn(`[openclaw-memory] storeMessage (${source}) received non-string message (type: ${typeof message})`);
-                    message = String(message);
-                }
-                // 跳过空消息
-                if (!message || message.trim().length === 0) {
-                    console.log('[openclaw-memory] storeMessage: empty message, skipping');
-                    return;
-                }
-                // 1. 分类消息
-                const filterResult = await filter.classify(message);
-                // 2. 存储记忆（同时写入 Qdrant 和本地文件）
-                if (filterResult.shouldStore && filterResult.memoryType) {
-                    if (filterResult.memoryType === 'semantic') {
-                        if (mm instanceof QdrantMemoryManager) {
-                            await mm.storeSemanticWithConflictCheck(message, filterResult.importance, 0.85, sessionId);
+        async function processQueue() {
+            if (queueProcessing)
+                return;
+            queueProcessing = true;
+            while (!queueShutDown && messageQueue.length > 0) {
+                const item = messageQueue.shift();
+                if (!item)
+                    continue;
+                try {
+                    // 类型检查：确保 message 是字符串
+                    if (typeof item.message !== 'string') {
+                        console.warn(`[openclaw-memory] Queue: received non-string message (type: ${typeof item.message})`);
+                        item.message = String(item.message);
+                    }
+                    // 跳过空消息
+                    if (!item.message || item.message.trim().length === 0) {
+                        continue;
+                    }
+                    // 1. 分类消息
+                    const filterResult = await filter.classify(item.message);
+                    // 2. 存储记忆（同时写入数据库和本地文件）
+                    if (filterResult.shouldStore && filterResult.memoryType) {
+                        if (filterResult.memoryType === 'semantic') {
+                            if (mm instanceof QdrantMemoryManager || mm instanceof SurrealMemoryManager) {
+                                await mm.storeSemanticWithConflictCheck(item.message, filterResult.importance, 0.85, item.sessionId);
+                            }
+                            else {
+                                await mm.storeSemantic(item.message, filterResult.importance);
+                            }
                         }
                         else {
-                            await mm.storeSemantic(message, filterResult.importance);
+                            await mm.storeMemory(item.sessionId, item.message, filterResult.importance);
                         }
+                        // 同时写入本地 Markdown 文件（用于 self-improving-agent 读取）
+                        const categoryLabel = filterResult.category ? `[${filterResult.category}] ` : '';
+                        appendToLocalMemory(`${categoryLabel}${item.message}`, item.sessionId);
                     }
-                    else {
-                        await mm.storeMemory(sessionId, message, filterResult.importance);
+                    // 3. 偏好提取（每 10 条）
+                    const buffer = conversationBuffers.get(item.sessionId) || [];
+                    buffer.push(item.message);
+                    conversationBuffers.set(item.sessionId, buffer);
+                    if (buffer.length >= 10) {
+                        const userProfile = await extractor.extract(buffer);
+                        for (const like of userProfile.likes) {
+                            await mm.storeSemantic(like, 0.8, item.sessionId);
+                            appendToLocalMemory(`[PREFERENCE-LIKE] ${like}`);
+                        }
+                        for (const dislike of userProfile.dislikes) {
+                            await mm.storeSemantic(dislike, 0.8, item.sessionId);
+                            appendToLocalMemory(`[PREFERENCE-DISLIKE] ${dislike}`);
+                        }
+                        const summaryResult = await summarizer.summarize(buffer);
+                        if (summaryResult.summary) {
+                            await mm.storeReflection(summaryResult.summary, 0.9, item.sessionId);
+                            appendToLocalMemory(`[REFLECTION] ${summaryResult.summary}`);
+                        }
+                        conversationBuffers.set(item.sessionId, []);
                     }
-                    // 同时写入本地 Markdown 文件（用于 self-improving-agent 读取）
-                    // 根据分类添加标签
-                    const categoryLabel = filterResult.category ? `[${filterResult.category}] ` : '';
-                    appendToLocalMemory(`${categoryLabel}${message}`, sessionId);
+                    console.log(`[openclaw-memory] Queue: processed message for session ${item.sessionId}`);
                 }
-                // 3. 偏好提取（每 10 条）
-                const buffer = conversationBuffers.get(sessionId) || [];
-                buffer.push(message);
-                conversationBuffers.set(sessionId, buffer);
-                if (buffer.length >= 10) {
-                    // 提取偏好
-                    const userProfile = await extractor.extract(buffer);
-                    // Store likes as semantic memories
-                    for (const like of userProfile.likes) {
-                        await mm.storeSemantic(like, 0.8, sessionId);
-                        // 同步写入本地文件
-                        appendToLocalMemory(`[PREFERENCE-LIKE] ${like}`);
-                    }
-                    // Store dislikes as semantic memories
-                    for (const dislike of userProfile.dislikes) {
-                        await mm.storeSemantic(dislike, 0.8, sessionId);
-                        // 同步写入本地文件
-                        appendToLocalMemory(`[PREFERENCE-DISLIKE] ${dislike}`);
-                    }
-                    // 生成摘要
-                    const summaryResult = await summarizer.summarize(buffer);
-                    if (summaryResult.summary) {
-                        await mm.storeReflection(summaryResult.summary, 0.9, sessionId);
-                        // 同步写入本地文件
-                        appendToLocalMemory(`[REFLECTION] ${summaryResult.summary}`);
-                    }
-                    // 清空缓冲
-                    conversationBuffers.set(sessionId, []);
+                catch (error) {
+                    // 错误完全隔离，只记录日志，不影响队列继续处理
+                    console.error(`[openclaw-memory] Queue: failed to process message for session ${item.sessionId}:`, error.message);
                 }
             }
-            catch (error) {
-                console.error(`[openclaw-memory] storeMessage (${source}) failed:`, error.message);
-            }
+            queueProcessing = false;
         }
+        /**
+         * 入队消息 - Hook 只负责复制，立即返回
+         */
+        function enqueueMessage(sessionId, message, source) {
+            if (queueShutDown)
+                return;
+            messageQueue.push({
+                sessionId,
+                message,
+                source,
+                timestamp: Date.now(),
+            });
+            // 如果 Worker 没在运行，启动它（不 await，后台运行）
+            if (!queueProcessing) {
+                processQueue();
+            }
+            console.log(`[openclaw-memory] Message enqueued (queue size: ${messageQueue.length})`);
+        }
+        // 已存储消息记录（用于避免 TUI 模式下重复存储）
+        const storedMessages = new Set();
         // ============================================================
-        // ✅ 注册 message_received Hook - 存储消息 (渠道模式)
-        // 注意：此 Hook 仅在渠道消息（Telegram/WhatsApp/Discord 等）时触发
-        // TUI 模式下不会触发，消息存储由 before_prompt_build 处理
+        // ✅ 注册 message_received Hook - 复制消息到队列 (渠道模式)
+        // Hook 立即返回，不等待存储完成
         // ============================================================
-        api.on('message_received', async (event, ctx) => {
+        api.on('message_received', (event, ctx) => {
             console.log('[openclaw-memory] message_received hook triggered (channel mode):', {
                 from: event.from || 'anonymous',
                 content: event.content?.slice(0, 50),
@@ -241,14 +274,14 @@ const memoryPlugin = {
                 console.log('[openclaw-memory] Skipping message: no content');
                 return;
             }
-            // 渠道模式：直接存储消息
-            await storeMessage(sessionId, message, 'channel');
+            // 渠道模式：复制消息到队列，立即返回
+            enqueueMessage(sessionId, message, 'channel');
         });
         // ============================================================
-        // ✅ 注册 before_prompt_build Hook - 注入上下文 + 存储消息 (TUI 模式)
+        // ✅ 注册 before_prompt_build Hook - 注入上下文 + 复制消息 (TUI 模式)
         // 此 Hook 在所有模式下都会触发（包括 TUI 和渠道）
-        // TUI 模式下：存储最后一条用户消息并检索记忆
-        // 渠道模式下：只检索记忆（消息已由 message_received 存储）
+        // TUI 模式下：复制最后一条用户消息到队列并检索记忆
+        // 渠道模式下：只检索记忆（消息已由 message_received 复制）
         // ============================================================
         api.on('before_prompt_build', async (event, ctx) => {
             console.log('[openclaw-memory] before_prompt_build hook triggered:', {
@@ -294,15 +327,13 @@ const memoryPlugin = {
                 console.log('[openclaw-memory] Empty user message, skipping');
                 return;
             }
-            // TUI 模式：存储最后一条用户消息（异步执行，不阻塞）
+            // TUI 模式：复制消息到队列（异步执行，不阻塞）
             // 使用消息哈希避免重复存储
             const messageHash = `${sessionId}:${lastMessageContent.slice(0, 50)}`;
             if (!storedMessages.has(messageHash)) {
                 storedMessages.add(messageHash);
-                // 异步存储，不阻塞上下文检索
-                storeMessage(sessionId, lastMessageContent, 'tui').catch(err => {
-                    console.error('[openclaw-memory] Background message store failed:', err.message);
-                });
+                // 异步入队，不阻塞
+                enqueueMessage(sessionId, lastMessageContent, 'tui');
             }
             // 超时控制：1000ms 内必须返回，避免阻塞 Agent 响应（Rerank 需要调用 LLM，约 800-900ms）
             const timeoutMs = 1000;
@@ -363,13 +394,6 @@ const memoryPlugin = {
             return [memorySearchTool];
         }, { names: ['memory_search'] });
         console.log('[openclaw-memory] Plugin registered');
-    },
-    async shutdown() {
-        if (memoryManager) {
-            await memoryManager.shutdown();
-            memoryManager = null;
-            console.log('[openclaw-memory] Plugin shut down');
-        }
     },
 };
 export default memoryPlugin;
