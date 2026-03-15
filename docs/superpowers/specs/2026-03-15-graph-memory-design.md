@@ -65,14 +65,27 @@ Vector RAG (现有)
 
 ## 2. 实体类型定义
 
-| 类型 | 标识 | 示例 |
-|------|------|------|
-| TECH | `TECH` | Python, SurrealDB, LLM, TypeScript |
-| CONCEPT | `CONCEPT` | GraphRAG, 向量索引，HNSW |
-| PROJECT | `PROJECT` | openclaw-memory, 图数据功能 |
-| PERSON | `PERSON` | 刘飞，Elon Musk |
-| ORG | `ORG` | Anthropic, OpenAI |
-| GENERAL | `GENERAL` | 其他关键名词 |
+**简化策略：单一类型**
+
+不预定义复杂分类，只保留 `ENTITY` 一种类型。
+
+| 原因 | 说明 |
+|------|------|
+| 减少 LLM 判断成本 | 不需要区分 TECH vs CONCEPT，提取更快 |
+| 检索层不需要分类 | 用户查询时不在乎"TypeScript"是 TECH 还是 CONCEPT |
+| 简化 Schema | 不需要维护 6 种类型的停用词表 |
+
+**Schema:**
+```sql
+DEFINE FIELD entity_type ON TABLE entity TYPE string DEFAULT 'ENTITY';
+```
+
+**LLM 提取时:**
+```
+从文本中提取具有索引价值的关键词（实体）。
+不需要分类，统一标记为 ENTITY。
+示例：TypeScript, SurrealDB, 向量索引，记忆系统
+```
 
 ---
 
@@ -140,20 +153,12 @@ SET
   frequency = 1;
 ```
 
-### 3.3 实体停用表 (entity_stoplist) - 可选
+### 3.3 停用表：已移除
 
-过滤低价值实体：
-
-```sql
-DEFINE TABLE entity_stoplist SCHEMAFULL;
-DEFINE FIELD term ON TABLE entity_stoplist TYPE string;
-DEFINE INDEX idx_stoplist_term ON TABLE entity_stoplist FIELDS term;
-```
-
-```json
-// 预定义停用词
-["system", "method", "example", "function", "代码", "功能", "模块", "今天", "明天"]
-```
+**原因：**
+- 单一 `ENTITY` 类型下，不需要复杂的停用词过滤
+- LLM 提取时已经过滤了通用词汇
+- 简化 Schema，减少维护成本
 
 ### 3.4 图遍历查询示例
 
@@ -174,21 +179,30 @@ LIMIT 20;
 ```
 
 **二度关联：通过记忆找相关记忆（联想检索）**
+
+**注意：** 必须增加权重过滤，避免高频率实体（如 "Python"）产生大量噪音。
+
 ```sql
 -- memory:123 -> entity -> 其他 memory
+-- 过滤条件：relevance_score > 0.8
 SELECT m.*, COUNT(me2) as association_count
 FROM memory m
 WHERE m.id IN (
   SELECT VALUE in FROM memory_entity
   WHERE out IN (
     SELECT VALUE out FROM memory_entity
-    WHERE in = memory:123
+    WHERE in = memory:123 AND relevance_score > 0.8  -- 权重过滤
   )
+  AND relevance_score > 0.8  -- 返回的边也必须大于阈值
 ) AND m.id != memory:123
 GROUP BY m.id
 ORDER BY association_count DESC
 LIMIT 20;
 ```
+
+**阈值说明:**
+- `relevance_score > 0.8`：只保留强关联
+- 避免 "Python" 等高频实体关联的 1000+ 条记忆全部召回
 
 **通过实体名称找记忆（精准召回）**
 ```sql
@@ -212,25 +226,31 @@ WHERE m.id IN (
 **文件:** `src/entity-extractor.ts`
 
 **职责:**
-- 从文本中提取五类实体
-- 使用 LLM 进行语义提取（非纯 regex）
-- 三层缓存优化：已知实体缓存 → regex pre-filter → LLM refine
+- 从文本中提取关键词（实体）
+- 使用 LLM 进行语义提取
+
+**简化策略：LLM + 数据库唯一约束**
+
+| 原设计 | 简化后 |
+|--------|--------|
+| 三层缓存：已知实体缓存 → regex pre-filter → LLM refine | 直接 LLM 提取 |
+| 内存缓存管理 | 利用 SurrealDB `ON DUPLICATE KEY UPDATE` 去重 |
+| 复杂 Pipeline | 单一调用 |
+
+**理由:**
+- M4 芯片 + Llama-3.1-8B 足够快，不需要复杂的预过滤
+- 让模型做擅长的事（语义理解），数据库做擅长的事（去重）
+- 代码量减少 70%
 
 **接口:**
 ```typescript
 interface ExtractedEntity {
   name: string;
-  type: 'TECH' | 'CONCEPT' | 'PROJECT' | 'PERSON' | 'ORG' | 'GENERAL';
   confidence: number;  // 0.0-1.0
-  isKnown?: boolean;  // 是否为已知实体（直接复用）
 }
 
 class EntityExtractor {
-  constructor(
-    llmEndpoint: string,
-    limiter: LLMLimiter,
-    stoplist: string[]  // 停用实体列表
-  );
+  constructor(llmEndpoint: string, limiter: LLMLimiter);
 
   /**
    * 从文本中提取实体
@@ -568,29 +588,82 @@ private startIdleMaintenanceWorker(): void {
 ### 6.1 LLM 调用失败
 
 - EntityExtractor 重试机制（最多 3 次）
-- 失败后降级为 regex 提取（基础模式）
-- 记录失败日志，不影响主存储流程
+- 失败后记录日志，不影响主存储流程
+- 不降级为 regex 提取（简化设计）
 
 ### 6.2 数据库操作失败
 
-- 实体索引操作失败不阻塞记忆存储
-- 队列支持断点续处理
-- 失败项目记录到独立表 `pending_indexing`
+**简化策略：标记位设计，不需要持久化队列表**
 
+| 原设计 | 简化后 |
+|--------|--------|
+| 独立表 `pending_indexing` | `memory` 表增加 `is_indexed` 布尔字段 |
+| 失败时写入队列表 | 后台任务 `SELECT * FROM memory WHERE is_indexed = false` |
+| 增加一倍数据库 IO | 只需更新一个字段 |
+
+**Schema 变更:**
 ```sql
-DEFINE TABLE pending_indexing SCHEMAFULL;
-DEFINE FIELD memory_id ON TABLE pending_indexing TYPE int;
-DEFINE FIELD content ON TABLE pending_indexing TYPE string;
-DEFINE FIELD retry_count ON TABLE pending_indexing TYPE int DEFAULT 0;
-DEFINE FIELD last_error ON TABLE pending_indexing TYPE option<string>;
-DEFINE FIELD created_at ON TABLE pending_indexing TYPE datetime;
+DEFINE FIELD is_indexed ON TABLE memory TYPE bool DEFAULT false;
+DEFINE INDEX idx_memory_is_indexed ON TABLE memory FIELDS is_indexed WHERE is_indexed = false;
 ```
 
-### 6.3 实体归一化冲突
+**后台处理:**
+```typescript
+async processIndexingQueue(): Promise<{ indexed: number; failed: number }> {
+  const pending = await db.select('memory', { is_indexed: false });
+  let indexed = 0, failed = 0;
 
-- 使用 `normalized_name` 字段处理同义词
-- 首次创建时确定 normalized_name
-- 后续相同 normalized_name 的实体合并 mention_count
+  for (const memory of pending) {
+    try {
+      await indexMemory(memory.id, memory.content);
+      await db.update('memory', memory.id, { is_indexed: true });
+      indexed++;
+    } catch (e) {
+      failed++;
+      // 不重试，记录日志即可
+    }
+  }
+
+  return { indexed, failed };
+}
+```
+
+### 6.3 图查询超时：失忆模式
+
+**问题：** 图查询如果超过 200ms，会影响交互流畅度。
+
+**解决方案：失忆模式（Amnesia Mode）**
+
+```typescript
+async retrieveWithGraphTimeout(
+  query: string,
+  timeoutMs: number = 200
+): Promise<MemoryWithSimilarity[]> {
+  const vectorPromise = this.vectorSearch(query);
+  const graphPromise = this.graphSearch(query).withTimeout(timeoutMs);
+
+  try {
+    const [vectorResults, graphResults] = await Promise.all([
+      vectorPromise,
+      graphPromise
+    ]);
+    return this.mergeAndRerank(vectorResults, graphResults);
+  } catch (e) {
+    if (e instanceof TimeoutError) {
+      // 失忆模式：只使用向量检索结果
+      console.warn(`[HybridRetriever] Graph query timeout (${timeoutMs}ms), falling back to vector-only`);
+      const vectorResults = await vectorPromise;
+      return this.rerank(vectorResults);
+    }
+    throw e;
+  }
+}
+```
+
+**阈值设定:**
+- 图查询超时：**200ms**
+- 超过阈值立即降级为纯向量检索
+- 保证 M4 芯片上的流畅交互体验
 
 ---
 
@@ -598,10 +671,11 @@ DEFINE FIELD created_at ON TABLE pending_indexing TYPE datetime;
 
 ### 7.1 异步队列设计
 
-**队列存储策略：**
+**简化策略：标记位 + 内存队列**
 
-- **主队列**: 内存存储（Map），避免数据库轮询，高性能
-- **持久化备份**: 失败时降级写入 `pending_indexing` 表，支持重启恢复
+- **主队列**: 内存存储（Map），高性能
+- **持久化**: 通过 `memory.is_indexed` 字段实现，不需要独立队列表
+- **后台处理**: `SELECT * FROM memory WHERE is_indexed = false`
 - **批量处理**: 累积 10 条或 30 秒触发
 - **后台处理限流**: LLM 并发 ≤ 2
 
@@ -609,11 +683,53 @@ DEFINE FIELD created_at ON TABLE pending_indexing TYPE datetime;
 
 - entity 表：name、entity_type、normalized_name 建立索引
 - memory_entity 表：in、out、复合索引（图遍历加速）
+- **向量索引**: 使用 SurrealDB 的 **MTREE** 而非 HNSW
+  ```sql
+  DEFINE INDEX idx_entity_vector ON TABLE entity FIELDS embedding MTREE DIMENSION 1024 DISTANCE COSINE;
+  ```
+  - MTREE 是 SurrealDB 为本地高性能设计的向量索引算法
+  - 比 HNSW 更省内存，适合本地部署
 
 ### 7.3 缓存策略
 
 - 热点实体缓存到内存（最近访问的 100 个实体）
 - 实体→记忆关联结果缓存 5 分钟
+
+### 7.4 事务优化
+
+**批量导入文档时:**
+- 使用 `BEGIN TRANSACTION` 包裹批量操作
+- 每批处理 50 个切片再提交，避免频繁磁盘 I/O
+- 示例：
+  ```typescript
+  await db.query('BEGIN TRANSACTION');
+  try {
+    for (const chunk of chunks) {
+      await processChunk(chunk);
+    }
+    await db.query('COMMIT TRANSACTION');
+  } catch (e) {
+    await db.query('ROLLBACK TRANSACTION');
+    throw e;
+  }
+  ```
+
+### 7.5 连接池管理
+
+**配置建议:**
+```typescript
+const db = new SurrealDatabase({
+  url: 'http://localhost:8000',
+  namespace: 'openclaw',
+  database: 'memory',
+  username: 'root',
+  password: 'root',
+  max_connections: 5,  // M4 单核性能强，不需要太多并发连接
+});
+```
+- 限制 `max_connections: 5`
+- 防止内存因连接过多而碎片化
+- 充分利用 M4 芯片的单核性能
 
 ---
 
@@ -640,13 +756,13 @@ test('should extract entities when storing memory', async () => {
   await processIndexingQueue();
 
   const entities = await getEntitiesByMemory(memoryId);
-  expect(entities).toContainEqual({ name: 'TypeScript', type: 'TECH' });
-  expect(entities).toContainEqual({ name: 'SurrealDB', type: 'TECH' });
+  expect(entities).toContainEqual({ name: 'TypeScript' });
+  expect(entities).toContainEqual({ name: 'SurrealDB' });
 });
 
 // 2. 通过实体精准召回记忆
 test('should recall memories by entity', async () => {
-  const entity = await upsertEntity('TypeScript', 'TECH');
+  const entity = await upsertEntity('TypeScript');
   const memories = await getMemoriesByEntity(entity);
 
   expect(memories.every(m =>
@@ -654,16 +770,24 @@ test('should recall memories by entity', async () => {
   )).toBe(true);
 });
 
-// 3. 二度关联检索
-test('should retrieve associated memories', async () => {
+// 3. 二度关联检索（带权重过滤）
+test('should retrieve associated memories with weight filter', async () => {
   const memoryId = await storeEpisodic('session1', 'TypeScript is great');
   await storeEpisodic('session2', 'SurrealDB graph database');
   await storeEpisodic('session3', 'TypeScript with SurrealDB');
 
-  const associated = await retrieveByAssociation(memoryId);
+  const associated = await retrieveByAssociation(memoryId, { minScore: 0.8 });
 
   // Should find memory:3 via shared entities (TypeScript, SurrealDB)
+  // with relevance_score > 0.8
   expect(associated.length).toBeGreaterThan(0);
+});
+
+// 4. 失忆模式：图查询超时降级
+test('should fall back to vector-only on graph timeout', async () => {
+  const results = await retrieveWithGraphTimeout('TypeScript', 200);
+  // Should return vector results even if graph query times out
+  expect(results.length).toBeGreaterThan(0);
 });
 ```
 
@@ -695,23 +819,19 @@ test('should retrieve associated memories', async () => {
    DEFINE INDEX idx_memory_entity_score ON TABLE memory_entity FIELDS out, relevance_score;
    ```
 
-3. **创建 pending_indexing 表** - 持久化队列
+3. **扩展 memory 表** - 添加索引标记位（替代持久化队列）
    ```sql
-   DEFINE TABLE pending_indexing SCHEMAFULL;
-   DEFINE FIELD memory_id ON TABLE pending_indexing TYPE int;
-   DEFINE FIELD content ON TABLE pending_indexing TYPE string;
-   DEFINE FIELD retry_count ON TABLE pending_indexing TYPE int DEFAULT 0;
-   DEFINE FIELD last_error ON TABLE pending_indexing TYPE option<string>;
-   DEFINE FIELD created_at ON TABLE pending_indexing TYPE datetime;
+   DEFINE FIELD is_indexed ON TABLE memory TYPE bool DEFAULT false;
+   DEFINE INDEX idx_memory_is_indexed ON TABLE memory FIELDS is_indexed WHERE is_indexed = false;
    ```
 
-4. **添加 EntityType 常量** - `src/surrealdb-client.ts`
+4. **移除 EntityType 常量** - 单一 ENTITY 类型，无需定义多类型常量
 
 **代码实现步骤:**
 
-1. 实现 EntityExtractor
-2. 实现 EntityIndexer
-3. 实现 HybridRetriever
+1. 实现 EntityExtractor（LLM 直接提取，无缓存层）
+2. 实现 EntityIndexer（使用 `is_indexed` 标记位）
+3. 实现 HybridRetriever（带 200ms 超时降级）
 4. 扩展 SurrealDatabase 客户端方法
 5. 集成到存储和检索流程
 6. 添加测试
@@ -785,7 +905,8 @@ Query
    - [ ] 存储记忆时自动提取实体并建立索引
    - [ ] 查询包含实体名称时精准召回相关记忆
    - [ ] 支持通过实体联想检索相关背景知识
-   - [ ] 五类实体正确识别
+   - [ ] 二度关联检索时正确应用权重过滤（relevance_score > 0.8）
+   - [ ] 图查询超时 200ms 时正确降级为纯向量检索
 
 2. **性能验收**
    - [ ] 记忆存储延迟增加 < 100ms（异步不阻塞）
@@ -806,26 +927,15 @@ Query
 
 ## 提取标准
 1. 只提取能跨文档关联的关键词
-2. 不包括常见通用词汇（如"今天"、"很好"等）
-3. 倾向于专业术语、项目名、技术名、概念名
+2. 不包括常见通用词汇（如"今天"、"很好"、"系统"、"功能"等）
+3. 倾向于专业术语、项目名、技术名、概念名、人名、组织名
 
-## 实体类型定义
-- TECH: 技术、工具、框架、库、编程语言、硬件设备
-  示例：TypeScript, SurrealDB, M4 Chip, LLM, React
-- CONCEPT: 抽象概念、方法论、算法、设计模式
-  示例：向量索引，内存管理，GraphRAG, HNSW
-- PROJECT: 项目名、任务名、产品名、内部代号
-  示例：openclaw-memory, 图数据功能
-- PERSON: 具体人名
-  示例：刘飞，Elon Musk
-- ORG: 组织、公司、团队、部门
-  示例：Anthropic, OpenAI, 中书省
-- GENERAL: 其他具有索引价值但无法归类到上述类型的关键词
+## 实体类型
+不需要分类，所有实体统一标记为 "ENTITY"。
 
 ## 输出格式
 严格返回 JSON 数组，每个实体包含：
 - name: 实体名称（原文）
-- type: 上述类型之一
 - confidence: 置信度 (0.0-1.0)
 
 ## 示例输入
@@ -833,10 +943,10 @@ Query
 
 ## 示例输出
 [
-  {"name": "SurrealDB", "type": "TECH", "confidence": 0.95},
-  {"name": "记忆系统", "type": "PROJECT", "confidence": 0.8},
-  {"name": "向量索引", "type": "CONCEPT", "confidence": 0.9},
-  {"name": "图数据功能", "type": "CONCEPT", "confidence": 0.85}
+  {"name": "SurrealDB", "confidence": 0.95},
+  {"name": "记忆系统", "confidence": 0.8},
+  {"name": "向量索引", "confidence": 0.9},
+  {"name": "图数据功能", "confidence": 0.85}
 ]
 
 ## 待处理文本
