@@ -132,15 +132,19 @@ Reranker 重排序
 
 ### 4.1 实体表 (entity) - 扩展现有
 
+**注意:** 现有代码中 `entity` 表 (`src/surrealdb-client.ts:132-136`) 只有基础字段。
+本设计需要扩展该表，添加 `description`、`mention_count`、`last_mentioned_at` 字段。
+迁移策略见第 10 节。
+
 ```sql
 DEFINE TABLE entity SCHEMAFULL;
 
--- 基础字段
+-- 基础字段（已存在）
 DEFINE FIELD name ON TABLE entity TYPE string;
 DEFINE FIELD normalized_name ON TABLE entity TYPE option<string>;  -- 归一化名称
 DEFINE FIELD entity_type ON TABLE entity TYPE string;  -- TECH, CONCEPT, PROJECT, PERSON, ORG, GENERAL
 
--- 扩展字段
+-- 扩展字段（需要迁移添加）
 DEFINE FIELD description ON TABLE entity TYPE option<string>;  -- 实体描述/定义
 DEFINE FIELD mention_count ON TABLE entity TYPE int DEFAULT 0;  -- 被提及次数
 DEFINE FIELD last_mentioned_at ON TABLE entity TYPE option<datetime>;  -- 最后提及时间
@@ -151,7 +155,25 @@ DEFINE INDEX idx_entity_type ON TABLE entity FIELDS entity_type;
 DEFINE INDEX idx_entity_normalized ON TABLE entity FIELDS normalized_name;
 ```
 
+### 4.3 实体类型常量
+
+**文件:** `src/surrealdb-client.ts` (新增常量定义)
+
+```typescript
+export const EntityType = {
+  TECH: 'TECH',           // 技术、工具、框架、库、硬件
+  CONCEPT: 'CONCEPT',     // 抽象概念、方法论、算法
+  PROJECT: 'PROJECT',     // 项目名、任务名
+  PERSON: 'PERSON',       // 人名
+  ORG: 'ORG',             // 组织、公司、团队
+  GENERAL: 'GENERAL',     // 其他关键名词
+} as const;
+```
+
 ### 4.2 记忆 - 实体关系表 (memory_entity) - 新增
+
+**注意:** 现有代码中 `relates` 表 (`src/surrealdb-client.ts:17`) 与新的 `memory_entity` 表设计不兼容。
+本设计使用全新的 `memory_entity` 表，现有的 `relates` 表保留但暂不使用（留作第二阶段扩展）。
 
 ```sql
 DEFINE TABLE memory_entity SCHEMAFULL;
@@ -170,6 +192,7 @@ DEFINE FIELD created_at ON TABLE memory_entity TYPE datetime;
 DEFINE INDEX idx_memory_entity_memory ON TABLE memory_entity FIELDS memory_id;
 DEFINE INDEX idx_memory_entity_entity ON TABLE memory_entity FIELDS entity_id;
 DEFINE INDEX idx_memory_entity_composite ON TABLE memory_entity FIELDS memory_id, entity_id;
+DEFINE INDEX idx_memory_entity_score ON TABLE memory_entity FIELDS entity_id, relevance_score;  -- 支持按相关性排序查询
 ```
 
 ### 4.3 实体 - 实体关系表 (entity_relation) - 预留（第二阶段）
@@ -308,6 +331,15 @@ class EntityIndexer {
 - 合并和去重结果
 - 与现有 reranker 集成
 
+**查询时实体提取策略:**
+
+为了性能考虑，查询时的实体提取使用**轻量级策略**：
+1. **关键词匹配**: 检测查询中是否包含已知实体名称（通过 `entity` 表索引）
+2. **正则提取**: 使用与 `clusterer.ts` 相同的正则模式提取技术实体
+3. **降级策略**: 如果未匹配到实体，回退到纯向量检索
+
+**注意:** 不使用 LLM 进行查询时实体提取，避免增加检索延迟。
+
 **接口:**
 ```typescript
 interface HybridRetrievalOptions {
@@ -419,6 +451,8 @@ async storeSemantic(content: string, importance: number = 0.7, sessionId?: strin
 
 ### 6.2 检索流程集成
 
+**方案 A：修改现有 `retrieveRelevant` 方法**
+
 修改 `memory-manager-surreal.ts` 的 `retrieveRelevant` 方法：
 
 ```typescript
@@ -429,14 +463,47 @@ async retrieveRelevant(
   threshold: number = 0.6,
   enableFunnelStats: boolean = true
 ): Promise<MemoryWithSimilarity[]> {
-  // 新增：混合检索
+  // 新增：混合检索（如果启用了实体索引）
   if (this.hybridRetriever) {
-    return this.hybridRetriever.retrieve(query, sessionId, { topK, threshold });
+    return this.hybridRetriever.retrieve(query, sessionId, {
+      topK,
+      threshold,
+      enableAssociation: false,  // 默认不启用联想检索
+    });
   }
 
-  // ... 现有向量检索逻辑 ...
+  // ... 现有向量检索逻辑（保持不变） ...
 }
 ```
+
+**方案 B：新增独立方法（推荐）**
+
+保留现有 `retrieveRelevant` 逻辑不变，新增 `retrieveWithEntityIndex` 方法：
+
+```typescript
+async retrieveWithEntityIndex(
+  query: string,
+  sessionId: string | undefined,
+  topK: number = 5,
+  threshold: number = 0.6
+): Promise<MemoryWithSimilarity[]> {
+  // 使用混合检索
+  return this.hybridRetriever.retrieve(query, sessionId, { topK, threshold });
+}
+```
+
+**与现有 Funnel 集成:**
+
+混合检索的结果会进入现有的 reranker 和 threshold 过滤流程：
+1. 合并向量检索和实体检索结果 → 去重
+2. Reranker 重排序（LLM 基于查询相关性）
+3. 阈值过滤（默认 0.6）
+4. 重要性加权排序
+
+这样设计的好处：
+- 保持现有 retrieval funnel 逻辑完整
+- 实体检索作为"候选集扩展"手段
+- Reranker 统一处理最终排序
 
 ### 6.3 后台维护集成
 
@@ -474,6 +541,16 @@ private startIdleMaintenanceWorker(): void {
 - 队列支持断点续处理
 - 失败项目记录到独立表 `pending_indexing`
 
+```sql
+DEFINE TABLE pending_indexing SCHEMAFULL;
+DEFINE FIELD memory_id ON TABLE pending_indexing TYPE int;
+DEFINE FIELD content ON TABLE pending_indexing TYPE string;
+DEFINE FIELD retry_count ON TABLE pending_indexing TYPE int DEFAULT 0;
+DEFINE FIELD last_error ON TABLE pending_indexing TYPE option<string>;
+DEFINE FIELD created_at ON TABLE pending_indexing TYPE datetime;
+DEFINE INDEX idx_pending_retry ON TABLE pending_indexing FIELDS retry_count, created_at;
+```
+
 ### 7.3 实体归一化冲突
 
 - 使用 `normalized_name` 字段处理同义词
@@ -486,9 +563,26 @@ private startIdleMaintenanceWorker(): void {
 
 ### 8.1 异步队列设计
 
-- 队列内存存储（Map），避免数据库轮询
-- 批量处理：累积 10 条或 30 秒触发
-- 后台处理限流：LLM 并发 ≤ 2
+**队列存储策略：**
+
+- **主队列**: 内存存储（Map），避免数据库轮询，高性能
+- **持久化备份**: 失败时降级写入 `pending_indexing` 表，支持重启恢复
+- **批量处理**: 累积 10 条或 30 秒触发
+- **后台处理限流**: LLM 并发 ≤ 2
+
+**重启恢复策略:**
+
+```typescript
+// MemoryManager.initialize() 中恢复未处理队列
+async initialize(): Promise<MigrationResult> {
+  const result = await this.db.initialize();
+
+  // 恢复未处理的索引队列
+  await this.entityIndexer?.restorePendingQueue();
+
+  return result;
+}
+```
 
 ### 8.2 索引优化
 
@@ -529,13 +623,48 @@ private startIdleMaintenanceWorker(): void {
 
 ### 10.1 第一阶段（本次实现）
 
-1. 扩展 entity 表 schema
-2. 创建 memory_entity 关系表
-3. 实现 EntityExtractor
-4. 实现 EntityIndexer
-5. 实现混合检索
-6. 集成到存储和检索流程
-7. 添加测试
+**Schema 迁移步骤:**
+
+1. **扩展 entity 表** - 添加新字段
+   ```sql
+   DEFINE FIELD description ON TABLE entity TYPE option<string>;
+   DEFINE FIELD mention_count ON TABLE entity TYPE int DEFAULT 0;
+   DEFINE FIELD last_mentioned_at ON TABLE entity TYPE option<datetime>;
+   ```
+
+2. **创建 memory_entity 表** - 新建关系表
+   ```sql
+   DEFINE TABLE memory_entity SCHEMAFULL;
+   DEFINE FIELD memory_id ON TABLE memory_entity TYPE int;
+   DEFINE FIELD entity_id ON TABLE memory_entity TYPE int;
+   DEFINE FIELD relevance_score ON TABLE memory_entity TYPE float;
+   DEFINE FIELD created_at ON TABLE memory_entity TYPE datetime;
+   DEFINE INDEX idx_memory_entity_memory ON TABLE memory_entity FIELDS memory_id;
+   DEFINE INDEX idx_memory_entity_entity ON TABLE memory_entity FIELDS entity_id;
+   DEFINE INDEX idx_memory_entity_composite ON TABLE memory_entity FIELDS memory_id, entity_id;
+   DEFINE INDEX idx_memory_entity_score ON TABLE memory_entity FIELDS entity_id, relevance_score;
+   ```
+
+3. **创建 pending_indexing 表** - 持久化队列
+   ```sql
+   DEFINE TABLE pending_indexing SCHEMAFULL;
+   DEFINE FIELD memory_id ON TABLE pending_indexing TYPE int;
+   DEFINE FIELD content ON TABLE pending_indexing TYPE string;
+   DEFINE FIELD retry_count ON TABLE pending_indexing TYPE int DEFAULT 0;
+   DEFINE FIELD last_error ON TABLE pending_indexing TYPE option<string>;
+   DEFINE FIELD created_at ON TABLE pending_indexing TYPE datetime;
+   ```
+
+4. **添加 EntityType 常量** - `src/surrealdb-client.ts`
+
+**代码实现步骤:**
+
+1. 实现 EntityExtractor
+2. 实现 EntityIndexer
+3. 实现 HybridRetriever
+4. 扩展 SurrealDatabase 客户端方法
+5. 集成到存储和检索流程
+6. 添加测试
 
 ### 10.2 第二阶段（后续可选）
 
