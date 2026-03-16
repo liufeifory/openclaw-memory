@@ -2,7 +2,7 @@
 
 > 🧠 为 OpenClaw 赋予长期记忆能力 —— 语义检索、自动反思、记忆进化
 
-[![Version](https://img.shields.io/badge/version-2.1.0-blue)](https://github.com/liufeifory/openclaw-memory/releases)
+[![Version](https://img.shields.io/badge/version-2.2.0-blue)](https://github.com/liufeifory/openclaw-memory/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![OpenClaw](https://img.shields.io/badge/OpenClaw-≥2026.3.11-orange)](https://github.com/openclaw/openclaw)
 
@@ -19,7 +19,7 @@ OpenClaw Memory 是一个生产级的长期记忆系统 **Node.js 插件**，为
 - 🔄 **自动进化** —— 高频情景记忆自动升级为稳定语义记忆
 - 💡 **自动反思** —— 定期生成总结性洞察
 - 📉 **记忆衰减** —— 长期未访问的记忆自动降低权重
-- 🗄️ **双后端支持** —— PostgreSQL (pgvector) 或 Qdrant 任选
+- 🗄️ **SurrealDB 后端** —— 原生图数据库，支持图遍历和混合检索
 - 🎯 **全自动** —— 消息自动分类存储，上下文自动注入
 
 ---
@@ -31,7 +31,7 @@ OpenClaw Memory 是一个生产级的长期记忆系统 **Node.js 插件**，为
 | 组件 | 版本 | 安装命令 |
 |------|------|----------|
 | Node.js | ≥18 | `brew install node` |
-| PostgreSQL | ≥14 + pgvector | `brew install postgresql pgvector` |
+| SurrealDB | ≥2.0 | `brew install surrealdb` |
 | llama.cpp | 最新 | `brew install llama.cpp` |
 
 ### 一键安装
@@ -45,10 +45,8 @@ cd openclaw-memory
 # 2. 安装依赖 & 构建
 npm install && npm run build
 
-# 3. 初始化数据库
-psql -d openclaw_memory -c "CREATE DATABASE openclaw_memory OWNER liufei;"
-psql -d openclaw_memory -c "CREATE EXTENSION IF NOT EXISTS vector;"
-psql -d openclaw_memory -f schema.sql
+# 3. 启动 SurrealDB
+brew services start surrealdb
 
 # 4. 启动 llama.cpp 服务
 brew services start llama.cpp
@@ -69,7 +67,7 @@ tail -f ~/.openclaw/logs/gateway.log | grep memory
 看到以下日志即表示成功 ✅：
 
 ```
-[openclaw-memory] Plugin initialized with PostgreSQL
+[openclaw-memory] Plugin initialized with SurrealDB
 [openclaw-memory] Plugin registered
 ```
 
@@ -91,24 +89,30 @@ tail -f ~/.openclaw/logs/gateway.log | grep memory
 │           Node.js 插件 (dist/index.js)                       │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
 │  │MemoryFilter  │  │MemoryManager │  │Preference        │   │
-│  │(LLM 8081)    │  │(pgvector/    │  │Extractor         │   │
-│  │消息分类       │  │ Qdrant)      │  │(LLM 8081)        │   │
+│  │(LLM 8081)    │  │(SurrealDB)   │  │Extractor         │   │
+│  │消息分类       │  │原生图数据库   │  │(LLM 8081)        │   │
 │  └──────────────┘  └──────────────┘  └──────────────────┘   │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
-│  │Summarizer    │  │Reranker      │  │Clusterer         │   │
-│  │(LLM 8081)    │  │(LLM 8081)    │  │(空闲时执行)       │   │
+│  │Summarizer    │  │Reranker      │  │EntityIndexer     │   │
+│  │(LLM 8081)    │  │(LLM 8081)    │  │(图索引 + 冻结)     │   │
 │  └──────────────┘  └──────────────┘  └──────────────────┘   │
+│  ┌──────────────┐  ┌──────────────┐                         │
+│  │Hybrid        │  │Conflict      │                         │
+│  │Retriever     │  │Detector      │                         │
+│  │(向量 + 图)     │  │(语义冲突检测) │                         │
+│  └──────────────┘  └──────────────┘                         │
 └─────────────────────────────────────────────────────────────┘
           │                  │
           ▼                  ▼
 ┌─────────────────┐  ┌─────────────────────────────────────────┐
-│  llama.cpp      │  │  向量数据库                              │
-│  - BGE-M3 (8080)│  │  ┌────────────┐  ┌─────────────────┐    │
-│    Embedding    │  │  │PostgreSQL  │  │  Qdrant         │    │
-│  - Llama-3.2-1B │  │  │+ pgvector  │  │                 │    │
-│    (8081)       │  │  └────────────┘  └─────────────────┘    │
-│                 │  └─────────────────────────────────────────┘
-└─────────────────┘
+│  llama.cpp      │  │  SurrealDB 2.x                          │
+│  - BGE-M3 (8080)│  │  - 原生图数据库 (RELATE 建边)            │
+│    Embedding    │  │  - 向量索引 + 图遍历                     │
+│  - Llama-3.2-1B │  │  - 自动 TTL 清理                         │
+│    (8081)       │  │                                         │
+│  - Qwen2.5-7B   │  │                                         │
+│    (8082)       │  │                                         │
+└─────────────────┘  └─────────────────────────────────────────┘
 ```
 
 **关键说明：**
@@ -117,6 +121,8 @@ tail -f ~/.openclaw/logs/gateway.log | grep memory
 - **Hooks 自动触发** - `message_received` 存储消息，`before_prompt_build` 注入上下文
 - **LLM 调用** - 使用本地 llama.cpp (8081 端口) 进行消息分类、偏好提取、对话摘要
 - **Embedding** - 使用 BGE-M3 (8080 端口) 生成 1024 维向量
+- **7B 模型** - Qwen2.5-Coder-7B (8082 端口) 用于实体提取/三元组精炼
+- **SurrealDB** - 原生图数据库后端，支持图遍历和混合检索
 
 ---
 
@@ -129,6 +135,17 @@ tail -f ~/.openclaw/logs/gateway.log | grep memory
 | **Episodic** | 事件、对话、经历 | 0.5-0.8 | 每日 ×0.98 | 访问 >10 次 → Semantic |
 | **Semantic** | 用户偏好、事实 | 0.7-0.9 | 每日 ×0.98 | - |
 | **Reflection** | 自动生成的洞察 | 0.9 (固定) | 无 | 每 50 条 episodic 生成 |
+
+### 🆕 Stage 1 新增功能 (v2.2.0)
+
+| 功能 | 说明 | 优势 |
+|------|------|------|
+| **实体索引** | LLM 自动提取人名/地名/组织，构建图节点 | 支持实体级检索和关系遍历 |
+| **图遍历检索** | 从查询实体出发，多跳遍历相关实体 | 发现隐性关联，提升召回率 |
+| **混合检索** | 向量检索 + 图遍历 + Reranker 重排序 | 结合语义相似度和结构化关联 |
+| **Super Node 冻结** | 高频实体自动冻结，防止图爆炸 | 控制图规模，提升遍历效率 |
+| **TTL Pruning** | 7 天未访问的实体自动清理 | 自动维护图索引健康度 |
+| **冲突检测** | 新记忆与旧记忆冲突时自动标记取代 | 保持知识库一致性 |
 
 ### 消息分类规则
 
@@ -164,7 +181,7 @@ importance = 0.5 × base_importance
 
 编辑 `~/.openclaw/config.json`：
 
-#### PostgreSQL (pgvector) 配置（推荐）
+#### SurrealDB 配置（推荐）
 
 ```json
 {
@@ -172,24 +189,29 @@ importance = 0.5 × base_importance
     "slots": {
       "memory": "openclaw-memory"
     },
-    "openclaw-memory": {
-      "backend": "pgvector",
-      "database": {
-        "host": "localhost",
-        "port": 5432,
-        "database": "openclaw_memory",
-        "user": "liufei",
-        "password": ""
-      },
-      "embedding": {
-        "endpoint": "http://localhost:8080"
+    "entries": {
+      "openclaw-memory": {
+        "enabled": true,
+        "config": {
+          "backend": "surrealdb",
+          "surrealdb": {
+            "url": "http://localhost:8000",
+            "namespace": "openclaw",
+            "database": "memory",
+            "username": "root",
+            "password": "root"
+          },
+          "embedding": {
+            "endpoint": "http://localhost:8080"
+          }
+        }
       }
     }
   }
 }
 ```
 
-#### Qdrant 配置
+#### Qdrant 配置（已弃用）
 
 ```json
 {
@@ -213,11 +235,11 @@ importance = 0.5 × base_importance
 ### 环境变量（可选）
 
 ```bash
-export MEMORY_DB_HOST=localhost
-export MEMORY_DB_PORT=5432
-export MEMORY_DB_NAME=openclaw_memory
-export MEMORY_DB_USER=liufei
-export MEMORY_DB_PASS=""
+export MEMORY_SURREALDB_URL=http://localhost:8000
+export MEMORY_NAMESPACE=openclaw
+export MEMORY_DATABASE=memory
+export MEMORY_USERNAME=root
+export MEMORY_PASSWORD=root
 export MEMORY_EMBEDDING_ENDPOINT=http://localhost:8080
 ```
 
@@ -298,6 +320,16 @@ llama-server \
   --port 8081 \
   --ctx-size 1024 \
   --n-gpu-layers 99 &
+
+# 7B 模型服务 (Qwen2.5-Coder-7B-Instruct) - 实体提取/三元组精炼
+llama-server \
+  --model ~/Library/Caches/llama.cpp/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
+  --port 8082 \
+  --ctx-size 32768 \
+  --n-gpu-layers 99 \
+  --threads 8 \
+  --mlock \
+  --chat-template qwen25 &
 ```
 
 ### 使用 services.sh（launchd 管理）
@@ -329,15 +361,14 @@ tail -f ~/.openclaw/logs/gateway.log
 ### 数据库连接失败
 
 ```bash
-# 检查 PostgreSQL 是否运行
-pg_isready
+# 检查 SurrealDB 是否运行
+brew services list | grep surrealdb
 
-# 检查 pgvector 扩展
-psql -d openclaw_memory -c "\\dx" | grep vector
+# 连接 SurrealDB
+surreal sql --endpoint http://localhost:8000 --username root --password root
 
-# 创建数据库（如需要）
-psql -c "CREATE DATABASE openclaw_memory OWNER liufei;"
-psql -d openclaw_memory -c "CREATE EXTENSION vector;"
+# 检查命名空间和数据库
+surreal sql --endpoint http://localhost:8000 --username root --password root --ns openclaw --db memory
 ```
 
 ### Embedding 服务不可用
@@ -356,10 +387,11 @@ brew services logs llama-server
 
 | 问题 | 解决方案 |
 |------|----------|
-| `vector` 扩展不存在 | `psql -d openclaw_memory -c "CREATE EXTENSION vector;"` |
+| SurrealDB 连接失败 | `brew services restart surrealdb` |
 | 记忆检索结果为空 | 降低 `threshold` 至 0.5（正常，开始使用后会有数据） |
 | Hook 超时警告 | 正常现象，不影响功能；可增加 `timeout_ms` 配置 |
 | LLM 分类失败 | 检查 8081 端口：`curl http://localhost:8081` |
+| 实体索引延迟 | 检查后台队列：查看日志中 EntityIndexer 状态 |
 
 ---
 
@@ -369,26 +401,33 @@ brew services logs llama-server
 openclaw-memory/
 ├── src/                      # TypeScript 源码
 │   ├── index.ts              # 插件入口（Hooks、Tool 注册）
-│   ├── memory-manager.ts     # PostgreSQL 记忆管理
-│   ├── memory-manager-qdrant.ts  # Qdrant 记忆管理
+│   ├── memory-manager.ts     # 内存管理核心
+│   ├── memory-manager-surreal.ts  # SurrealDB 后端实现
+│   ├── surrealdb-client.ts   # SurrealDB 客户端封装
+│   ├── memory-store-surreal.ts    # 记忆存储实现
+│   ├── hybrid-retrieval.ts   # 混合检索（向量 + 图）
+│   ├── entity-indexer.ts     # 实体索引器（图构建）
+│   ├── entity-extractor.ts   # 实体提取（LLM）
 │   ├── memory-filter.ts      # 消息分类（LLM 调用）
 │   ├── preference-extractor.ts # 偏好提取
 │   ├── summarizer.ts         # 对话摘要
 │   ├── reranker.ts           # 重排序
 │   ├── clusterer.ts          # 聚类
+│   ├── conflict-detector.ts  # 冲突检测
 │   └── ...
 ├── dist/                     # 编译输出
-├── schema.sql                # PostgreSQL 表结构
 ├── package.json              # Node.js 配置
 ├── tsconfig.json             # TypeScript 配置
-├── services.sh               # launchd 管理脚本
+├── deploy.sh                 # 一键部署脚本
+├── services.sh               # launchd/systemd 管理脚本
 └── docs/                     # 文档
     ├── README.md
     ├── QUICKSTART.md
-    ├── PROJECT.md
-    ├── USAGE.md
     ├── CONFIG.md
-    └── ARCHITECTURE.md
+    ├── ARCHITECTURE.md
+    └── superpowers/
+        ├── specs/            # 设计文档
+        └── plans/            # 实现计划
 ```
 
 ---
@@ -400,10 +439,14 @@ openclaw-memory/
 npm test
 
 # 单独测试
-npm run test:qdrant      # Qdrant 后端测试
-npm run test:recall      # 召回率测试
-npm run test:conflict    # 冲突检测测试
-npm run test:features    # 功能测试
+npm run test:surreal       # SurrealDB 后端测试
+npm run test:entity-extractor    # 实体提取测试
+npm run test:entity-indexer      # 实体索引器测试
+npm run test:hybrid-retriever    # 混合检索测试
+npm run test:graph-integration   # 图集成测试
+npm run test:recall        # 召回率测试
+npm run test:conflict      # 冲突检测测试
+npm run test:features      # 功能测试
 ```
 
 ---
@@ -425,7 +468,8 @@ npm run test:features    # 功能测试
 | 插件进程 | ~50MB | 低 |
 | BGE-M3 (8080) | ~500MB | 中（推理时） |
 | Llama-3.2-1B (8081) | ~1GB | 中（推理时） |
-| PostgreSQL | ~100MB | 低 |
+| Qwen2.5-Coder-7B (8082) | ~4GB | 中（推理时） |
+| SurrealDB | ~150MB | 低 |
 
 ---
 
@@ -442,6 +486,22 @@ npm run test:features    # 功能测试
 ---
 
 ## 📝 更新日志
+
+### v2.3.0 (2026-03)
+- ✅ **7B 模型支持** - Qwen2.5-Coder-7B 用于实体提取和三元组精炼
+- ✅ **三层实体提取漏斗** - Regex → 1B 模型 → 7B 模型，性能提升 80%
+- ✅ **launchd 服务配置** - 7B 模型开机自启动配置
+- ✅ **文档更新** - 本地部署、服务配置、架构说明完善
+
+### v2.2.0 (2026-03)
+- ✅ **SurrealDB 后端** - 原生图数据库支持，取代 PostgreSQL/Qdrant
+- ✅ **实体索引器** - LLM 自动提取人名/地名/组织，构建图节点
+- ✅ **混合检索** - 向量检索 + 图遍历 + Reranker 重排序
+- ✅ **图遍历检索** - 从查询实体出发，多跳遍历相关实体
+- ✅ **Super Node 冻结** - 高频实体自动冻结，防止图爆炸
+- ✅ **TTL Pruning** - 7 天未访问的实体自动清理
+- ✅ **异步写入架构** - 消息队列 + 后台 Worker，非阻塞写入
+- ✅ **三层实体提取** - Layer 1 (Regex) → Layer 2 (1B 模型) → Layer 3 (8B 模型)
 
 ### v2.1.0 (2026-03)
 - ✅ 新增 Qdrant 后端支持
@@ -466,8 +526,7 @@ MIT License
 ## 🙏 致谢
 
 - [OpenClaw](https://github.com/openclaw/openclaw) - AI 助手框架
-- [pgvector](https://github.com/pgvector/pgvector) - PostgreSQL 向量扩展
-- [Qdrant](https://qdrant.tech/) - 向量数据库
+- [SurrealDB](https://surrealdb.com/) - 原生图数据库
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) - 本地 LLM 推理
 
 ---

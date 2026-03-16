@@ -36,7 +36,50 @@ OpenClaw 配置文件：`~/.openclaw/config.json`
 
 ## 🗄️ 后端配置
 
-### PostgreSQL (pgvector) 配置
+### SurrealDB 配置（推荐）
+
+```json
+{
+  "plugins": {
+    "slots": {
+      "memory": "openclaw-memory"
+    },
+    "openclaw-memory": {
+      "backend": "surrealdb",
+      "surrealdb": {
+        "url": "http://localhost:8000",
+        "namespace": "openclaw",
+        "database": "memory",
+        "username": "root",
+        "password": "root"
+      },
+      "embedding": {
+        "endpoint": "http://localhost:8080"
+      }
+    }
+  }
+}
+```
+
+**参数说明：**
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `backend` | string | 是 | `surrealdb` | 后端类型 |
+| `surrealdb.url` | string | 是 | `http://localhost:8000` | SurrealDB 服务地址 |
+| `surrealdb.namespace` | string | 是 | `openclaw` | 命名空间 |
+| `surrealdb.database` | string | 是 | `memory` | 数据库名称 |
+| `surrealdb.username` | string | 是 | `root` | 用户名 |
+| `surrealdb.password` | string | 否 | `root` | 密码 |
+| `embedding.endpoint` | string | 是 | `http://localhost:8080` | Embedding 服务地址 |
+
+**特性：**
+- ✅ 原生图数据库支持（RELATE 建边）
+- ✅ 向量索引 + 图遍历混合检索
+- ✅ 自动 TTL 清理
+- ✅ 单二进制部署，无需额外依赖
+
+### PostgreSQL (pgvector) 配置（已弃用）
 
 ```json
 {
@@ -265,6 +308,13 @@ importance = base_importance × 0.5
 | `llm_endpoint` | string | `http://localhost:8081` | LLM 服务地址 |
 | `llm_timeout_ms` | number | `500` | LLM 分类超时（毫秒） |
 
+**LLM 端点说明：**
+
+| 端口 | 模型 | 用途 |
+|------|------|------|
+| 8081 | Llama-3.2-1B | 消息分类、偏好提取、对话摘要、Reranker |
+| 8082 | Qwen2.5-Coder-7B | 实体提取、三元组精炼（Layer 3） |
+
 ---
 
 ## 🔒 安全配置
@@ -359,7 +409,7 @@ importance = base_importance × 0.5
 
 ## 📝 完整配置示例
 
-### 生产环境（PostgreSQL）
+### 生产环境（SurrealDB - 推荐）
 
 ```json
 {
@@ -368,12 +418,12 @@ importance = base_importance × 0.5
       "memory": "openclaw-memory"
     },
     "openclaw-memory": {
-      "backend": "pgvector",
-      "database": {
-        "host": "localhost",
-        "port": 5432,
-        "database": "openclaw_memory",
-        "user": "openclaw",
+      "backend": "surrealdb",
+      "surrealdb": {
+        "url": "http://localhost:8000",
+        "namespace": "openclaw",
+        "database": "memory",
+        "username": "root",
         "password": "your_secure_password"
       },
       "embedding": {
@@ -409,7 +459,7 @@ importance = base_importance × 0.5
 }
 ```
 
-### 开发环境（Qdrant + 调试）
+### 开发环境（SurrealDB + 调试）
 
 ```json
 {
@@ -418,9 +468,13 @@ importance = base_importance × 0.5
       "memory": "openclaw-memory"
     },
     "openclaw-memory": {
-      "backend": "qdrant",
-      "qdrant": {
-        "url": "http://localhost:6333"
+      "backend": "surrealdb",
+      "surrealdb": {
+        "url": "http://localhost:8000",
+        "namespace": "openclaw",
+        "database": "memory",
+        "username": "root",
+        "password": "root"
       },
       "embedding": {
         "endpoint": "http://localhost:8080"
@@ -452,12 +506,13 @@ importance = base_importance × 0.5
       "memory": "openclaw-memory"
     },
     "openclaw-memory": {
-      "backend": "pgvector",
-      "database": {
-        "host": "localhost",
-        "port": 5432,
-        "database": "openclaw_memory",
-        "user": "liufei"
+      "backend": "surrealdb",
+      "surrealdb": {
+        "url": "http://localhost:8000",
+        "namespace": "openclaw",
+        "database": "memory",
+        "username": "root",
+        "password": "root"
       },
       "embedding": {
         "endpoint": "http://localhost:8080"
@@ -474,15 +529,19 @@ importance = base_importance × 0.5
 也可以通过环境变量配置：
 
 ```bash
-# 数据库配置
-export MEMORY_DB_HOST=localhost
-export MEMORY_DB_PORT=5432
-export MEMORY_DB_NAME=openclaw_memory
-export MEMORY_DB_USER=liufei
-export MEMORY_DB_PASS=""
+# SurrealDB 配置
+export MEMORY_SURREALDB_URL=http://localhost:8000
+export MEMORY_NAMESPACE=openclaw
+export MEMORY_DATABASE=memory
+export MEMORY_USERNAME=root
+export MEMORY_PASSWORD=your_secure_password
 
 # Embedding 配置
 export MEMORY_EMBEDDING_ENDPOINT=http://localhost:8080
+
+# LLM 配置
+export MEMORY_LLM_ENDPOINT=http://localhost:8081        # 1B 模型
+export MEMORY_ENTITY_LLM_ENDPOINT=http://localhost:8082 # 7B 模型（实体提取）
 
 # 检索配置
 export MEMORY_TOP_K=5
@@ -516,7 +575,7 @@ tail -f ~/.openclaw/logs/gateway.log | grep memory
 ### 预期日志输出
 
 ```
-[openclaw-memory] Plugin initialized with PostgreSQL
+[openclaw-memory] Plugin initialized with SurrealDB
 [openclaw-memory] Plugin registered
 ```
 
@@ -532,7 +591,7 @@ tail -f ~/.openclaw/logs/gateway.log | grep memory
 
 <div align="center">
 
-**最后更新：** 2026-03-15  
-**版本：** 2.1.0
+**最后更新：** 2026-03-16
+**版本：** 2.2.0
 
 </div>
