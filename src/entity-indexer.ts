@@ -179,7 +179,7 @@ export class EntityIndexer {
 
   /**
    * 3. checkSuperNode - Check if entity should be frozen (Super Node protection)
-   * Returns true if entity should be frozen
+   * Returns true if entity is frozen (or should be frozen)
    */
   async checkSuperNode(entityId: string): Promise<boolean> {
     if (!this.db) {
@@ -193,7 +193,7 @@ export class EntityIndexer {
       // Query entity's current link count from database
       const entityRecordId = `entity:${entityId}`;
       const result = await this.db.query(
-        `SELECT relation_count FROM ${entityRecordId}`
+        `SELECT relation_count, is_frozen FROM ${entityRecordId}`
       );
 
       let data: any[] = [];
@@ -207,7 +207,24 @@ export class EntityIndexer {
 
       if (data && data.length > 0) {
         const relationCount = data[0].relation_count || 0;
-        return relationCount >= GRAPH_PROTECTION.MAX_MEMORY_LINKS;
+        const isFrozen = data[0].is_frozen || false;
+
+        // Already frozen
+        if (isFrozen) {
+          return true;
+        }
+
+        // Check if should be frozen
+        if (relationCount >= GRAPH_PROTECTION.MAX_MEMORY_LINKS) {
+          // Actually freeze the entity
+          await this.db.query(
+            `UPDATE ${entityRecordId} SET is_frozen = true WHERE is_frozen = false`
+          );
+          console.log(`[EntityIndexer] Frozen super node "${entityId}" (relation_count: ${relationCount})`);
+          return true;
+        }
+
+        return false;
       }
 
       return false;

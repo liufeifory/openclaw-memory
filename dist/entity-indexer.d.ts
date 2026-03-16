@@ -77,7 +77,7 @@ export declare class EntityIndexer {
     checkEntityFrequency(entityId: string): Promise<number>;
     /**
      * 3. checkSuperNode - Check if entity should be frozen (Super Node protection)
-     * Returns true if entity should be frozen
+     * Returns true if entity is frozen (or should be frozen)
      */
     checkSuperNode(entityId: string): Promise<boolean>;
     /**
