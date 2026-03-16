@@ -105,8 +105,11 @@ export class HybridRetriever {
       avgSimilarity: 0,
     };
 
+    // Amnesia Mode: 100ms timeout for graph operations
+    const GRAPH_TIMEOUT_MS = 100;
+
     try {
-      // Step 1: Vector search (semantic similarity)
+      // Step 1: Vector search (semantic similarity) - always runs
       const INITIAL_K = Math.max(topK * 4, 20);  // Get more for reranking
       const vectorResults = await this.vectorSearch(query, sessionId, INITIAL_K);
       stats.vectorCount = vectorResults.length;
@@ -116,11 +119,26 @@ export class HybridRetriever {
       const entityIds = await Promise.all(entities.map(e => this.getEntityIdByName(e.name)));
       const validEntityIds = entityIds.filter(id => id !== 0 && !isNaN(id));
 
-      // Step 3: Graph traversal search (find memories via entities)
+      // Step 3: Graph traversal search with timeout (Amnesia Mode)
       let graphResults: MemoryResult[] = [];
       if (validEntityIds.length > 0) {
-        graphResults = await this.graphSearch(validEntityIds, INITIAL_K);
-        stats.graphCount = graphResults.length;
+        try {
+          graphResults = await Promise.race([
+            this.graphSearch(validEntityIds, INITIAL_K),
+            new Promise<MemoryResult[]>((_, reject) =>
+              setTimeout(() => reject(new Error('Graph search timeout')), GRAPH_TIMEOUT_MS)
+            )
+          ]);
+          stats.graphCount = graphResults.length;
+        } catch (timeoutError: any) {
+          if (timeoutError.message === 'Graph search timeout') {
+            console.warn(`[HybridRetriever] Amnesia Mode: graph search timeout after ${GRAPH_TIMEOUT_MS}ms, using vector-only results`);
+          } else {
+            console.error('[HybridRetriever] graphSearch failed:', timeoutError.message);
+          }
+          // Continue with vector-only results
+          graphResults = [];
+        }
       }
 
       // Step 4: Merge results (deduplicate by ID)

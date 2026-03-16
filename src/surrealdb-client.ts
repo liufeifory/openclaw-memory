@@ -172,6 +172,7 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${ENTITY_TABLE} TYPE string;
       DEFINE FIELD IF NOT EXISTS is_active ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT true;
       DEFINE FIELD IF NOT EXISTS is_frozen ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT false;
+      DEFINE FIELD IF NOT EXISTS canonical_id ON TABLE ${ENTITY_TABLE} TYPE option<int>;
     `);
     console.log('[SurrealDB] Entity table defined with graph protection fields');
 

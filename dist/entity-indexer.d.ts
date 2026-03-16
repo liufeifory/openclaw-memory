@@ -5,7 +5,7 @@
  * 1. Entity Frequency Filtering - MIN_MENTION_COUNT = 3
  * 2. Super Node Freezing - MAX_MEMORY_LINKS = 500
  * 3. TTL Pruning - TTL_DAYS = 90, PRUNE_INTERVAL_DAYS = 7
- * 4. Write Backpressure - Dynamic index interval (5-60 seconds)
+ * 4. Write Backpressure - Dynamic index interval (5-60 seconds) based on queue + system load
  * 5. Alias Merging - Detect and merge aliases to canonical names
  *
  * Uses GRAPH_PROTECTION constants from surrealdb-client.ts
@@ -47,6 +47,8 @@ export declare class EntityIndexer {
     private readonly minIntervalMs;
     private readonly maxIntervalMs;
     private readonly pressureThreshold;
+    private readonly memoryThreshold;
+    private readonly cpuThreshold;
     private readonly ttlDays;
     private readonly pruneIntervalDays;
     private db;
@@ -101,7 +103,20 @@ export declare class EntityIndexer {
      */
     getCurrentIndexInterval(): number;
     /**
-     * Adjust backpressure based on queue size
+     * Get system memory usage (0-1)
+     */
+    private getMemoryUsage;
+    /**
+     * Get system CPU load average (0-1, normalized)
+     * Uses 1-minute load average on Unix systems
+     */
+    private getCPULoad;
+    /**
+     * Adjust backpressure based on queue size AND system load
+     * Multi-factor backpressure:
+     * - Queue size > threshold: increase interval
+     * - Memory usage > 80%: increase interval
+     * - CPU load > 70%: increase interval
      */
     private adjustBackpressure;
     /**

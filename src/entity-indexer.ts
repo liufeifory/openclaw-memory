@@ -5,7 +5,7 @@
  * 1. Entity Frequency Filtering - MIN_MENTION_COUNT = 3
  * 2. Super Node Freezing - MAX_MEMORY_LINKS = 500
  * 3. TTL Pruning - TTL_DAYS = 90, PRUNE_INTERVAL_DAYS = 7
- * 4. Write Backpressure - Dynamic index interval (5-60 seconds)
+ * 4. Write Backpressure - Dynamic index interval (5-60 seconds) based on queue + system load
  * 5. Alias Merging - Detect and merge aliases to canonical names
  *
  * Uses GRAPH_PROTECTION constants from surrealdb-client.ts
@@ -13,6 +13,7 @@
 
 import { SurrealDatabase, GRAPH_PROTECTION } from './surrealdb-client.js';
 import { EntityExtractor, ExtractedEntity } from './entity-extractor.js';
+import * as os from 'os';
 
 /**
  * Indexer statistics
@@ -75,6 +76,10 @@ export class EntityIndexer {
   private readonly minIntervalMs: number = 5000;   // 5 seconds
   private readonly maxIntervalMs: number = 60000;  // 60 seconds
   private readonly pressureThreshold: number = 100;  // Queue size threshold for pressure
+
+  // System monitoring for backpressure
+  private readonly memoryThreshold: number = 0.8;  // 80% memory usage
+  private readonly cpuThreshold: number = 0.7;     // 70% CPU usage (simulated via load average)
 
   // TTL configuration
   private readonly ttlDays: number = GRAPH_PROTECTION.TTL_DAYS;
@@ -227,25 +232,36 @@ export class EntityIndexer {
       ttlDate.setDate(ttlDate.getDate() - this.ttlDays);
       const ttlISOString = ttlDate.toISOString();
 
-      // Find entities not accessed since TTL date
-      const sql = `UPDATE entity SET is_active = false WHERE last_accessed < '${ttlISOString}' AND is_active = true`;
+      // Step 1: Mark entities as inactive (not accessed since TTL date)
+      const markSql = `UPDATE entity SET is_active = false WHERE last_accessed < '${ttlISOString}' AND is_active = true`;
+      const markResult = await this.db.query(markSql);
 
-      const result = await this.db.query(sql);
-
-      // Count affected entities (approximation)
-      let prunedCount = 0;
-      if (Array.isArray(result) && result.length > 0) {
-        if (Array.isArray(result[0])) {
-          prunedCount = result[0].length;
-        } else if ((result as any)[0]?.result) {
-          prunedCount = (result as any)[0].result?.length || 0;
+      let markedCount = 0;
+      if (Array.isArray(markResult) && markResult.length > 0) {
+        if (Array.isArray(markResult[0])) {
+          markedCount = markResult[0].length;
+        } else if ((markResult as any)[0]?.result) {
+          markedCount = (markResult as any)[0].result?.length || 0;
         }
       }
 
-      this.totalPruned += prunedCount;
-      console.log(`[EntityIndexer] TTL Pruning: pruned ${prunedCount} entities older than ${this.ttlDays} days`);
+      // Step 2: Actually DELETE inactive entities (hard delete)
+      const deleteSql = `DELETE FROM entity WHERE is_active = false AND last_accessed < '${ttlISOString}'`;
+      const deleteResult = await this.db.query(deleteSql);
 
-      return prunedCount;
+      let deletedCount = 0;
+      if (Array.isArray(deleteResult) && deleteResult.length > 0) {
+        if (Array.isArray(deleteResult[0])) {
+          deletedCount = deleteResult[0].length;
+        } else if ((deleteResult as any)[0]?.result) {
+          deletedCount = (deleteResult as any)[0].result?.length || 0;
+        }
+      }
+
+      this.totalPruned += deletedCount;
+      console.log(`[EntityIndexer] TTL Pruning: marked ${markedCount} inactive, deleted ${deletedCount} entities older than ${this.ttlDays} days`);
+
+      return deletedCount;
     } catch (error: any) {
       console.error('[EntityIndexer] TTL Pruning failed:', error.message);
       return 0;
@@ -287,6 +303,12 @@ export class EntityIndexer {
         const aliasEntity = aliasData[0];
         const aliasId = this.extractId(aliasEntity.id);
 
+        // Skip if alias already has canonical_id (already merged)
+        if (aliasEntity.canonical_id) {
+          console.log(`[EntityIndexer] Alias "${alias}" already merged to canonical_id ${aliasEntity.canonical_id}, skipping`);
+          continue;
+        }
+
         // Find or create canonical entity
         const canonicalResult = await this.db.query(
           `SELECT * FROM entity WHERE name = '${canonical}' LIMIT 1`
@@ -312,13 +334,15 @@ export class EntityIndexer {
         // Transfer links from alias to canonical
         await this.transferEntityLinks(aliasId, canonicalId);
 
-        // Delete alias entity
-        await this.db.query(`DELETE entity:${aliasId}`);
+        // Mark alias as merged (set canonical_id, don't delete)
+        await this.db.query(
+          `UPDATE entity:${aliasId} SET canonical_id = ${canonicalId}, is_active = false`
+        );
 
         mergedCount++;
         this.totalMerged += mergedCount;
 
-        console.log(`[EntityIndexer] Merged alias "${alias}" -> "${canonical}"`);
+        console.log(`[EntityIndexer] Merged alias "${alias}" -> "${canonical}" (canonical_id: ${canonicalId})`);
       }
 
       return mergedCount;
@@ -367,27 +391,77 @@ export class EntityIndexer {
   }
 
   /**
-   * Adjust backpressure based on queue size
+   * Get system memory usage (0-1)
+   */
+  private getMemoryUsage(): number {
+    const total = os.totalmem();
+    const free = os.freemem();
+    const used = total - free;
+    return used / total;
+  }
+
+  /**
+   * Get system CPU load average (0-1, normalized)
+   * Uses 1-minute load average on Unix systems
+   */
+  private getCPULoad(): number {
+    const cpus = os.cpus();
+    const loads = os.loadavg();
+
+    // Use 1-minute load average, normalized by CPU count
+    const oneMinLoad = loads[0];
+    const normalizedLoad = oneMinLoad / cpus.length;
+
+    // Cap at 1.0 (100% utilization)
+    return Math.min(normalizedLoad, 1.0);
+  }
+
+  /**
+   * Adjust backpressure based on queue size AND system load
+   * Multi-factor backpressure:
+   * - Queue size > threshold: increase interval
+   * - Memory usage > 80%: increase interval
+   * - CPU load > 70%: increase interval
    */
   private adjustBackpressure(): void {
     const queueSize = this.queue.length;
+    const memoryUsage = this.getMemoryUsage();
+    const cpuLoad = this.getCPULoad();
 
-    if (queueSize > this.pressureThreshold * 2) {
-      // High pressure: max interval
+    // Calculate pressure factors (0-1 scale)
+    const queuePressure = queueSize > this.pressureThreshold * 2
+      ? 1.0
+      : queueSize > this.pressureThreshold
+        ? (queueSize - this.pressureThreshold) / this.pressureThreshold
+        : 0;
+
+    const memoryPressure = memoryUsage > this.memoryThreshold
+      ? (memoryUsage - this.memoryThreshold) / (1 - this.memoryThreshold)
+      : 0;
+
+    const cpuPressure = cpuLoad > this.cpuThreshold
+      ? (cpuLoad - this.cpuThreshold) / (1 - this.cpuThreshold)
+      : 0;
+
+    // Take maximum pressure from all factors
+    const maxPressure = Math.max(queuePressure, memoryPressure, cpuPressure);
+
+    // Scale interval based on maximum pressure
+    if (maxPressure >= 1.0) {
       this.currentIndexIntervalMs = this.maxIntervalMs;
-    } else if (queueSize > this.pressureThreshold) {
-      // Medium pressure: scale interval
-      const ratio = (queueSize - this.pressureThreshold) / this.pressureThreshold;
+    } else if (maxPressure > 0) {
       this.currentIndexIntervalMs = Math.min(
         this.maxIntervalMs,
-        this.minIntervalMs + (this.maxIntervalMs - this.minIntervalMs) * ratio
+        this.minIntervalMs + (this.maxIntervalMs - this.minIntervalMs) * maxPressure
       );
     } else {
-      // Low pressure: min interval
       this.currentIndexIntervalMs = this.minIntervalMs;
     }
 
-    console.log(`[EntityIndexer] Backpressure adjusted interval to ${this.currentIndexIntervalMs}ms (queue: ${queueSize})`);
+    console.log(
+      `[EntityIndexer] Backpressure adjusted interval to ${this.currentIndexIntervalMs}ms ` +
+      `(queue: ${queueSize}, memory: ${(memoryUsage * 100).toFixed(1)}%, CPU: ${(cpuLoad * 100).toFixed(1)}%)`
+    );
   }
 
   /**
