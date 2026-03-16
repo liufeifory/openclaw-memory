@@ -25,6 +25,17 @@
 
 ---
 
+## 用户反馈整合（第三轮）
+
+| 反馈点 | 整合位置 | 实现方案 |
+|--------|----------|----------|
+| 两阶段聚类孤立点处理 | Task 5 | 增加 General/Unclassified Topic 收容离群记忆 |
+| Alias 合并连锁反应 | Task 3B | 合并后检查阈值，超 400 立即加入优先队列 |
+| 检索权重抵消问题 | Task 6 | 路径衰减因子：Vector 1.0 / Entity 0.9 / Topic 0.6 |
+| 16GB M4 冷热数据优化 | Task 3A | Map Cache 启动时加载全量 alias 表 |
+
+---
+
 ## Chunk 1: Schema 迁移和客户端扩展
 
 ### Task 1: 创建 Topic Schema
@@ -1028,6 +1039,8 @@ git commit -m "feat: implement Super Node freeze management"
 - Create: `src/topic-indexer.ts`
 - Test: `src/test-topic-indexer.ts`
 
+**User feedback:** 处理聚类孤立点，创建 General/Unclassified Topic 收容离群记忆
+
 - [ ] **Step 1: 创建 TopicIndexer 类骨架**
 
 Create `src/topic-indexer.ts`:
@@ -1192,6 +1205,21 @@ export class TopicIndexer {
     // 2. Stage 1: Embedding clustering
     const clusters = await this.clusterMemoriesByEmbedding(memories.map(m => m.id));
     console.log(`[TopicIndexer] Created ${clusters.length} clusters`);
+
+    // 2b. Handle outliers - create General/Unclassified topic for orphan memories
+    // User feedback: avoid forcing unrelated memories into topics
+    const totalClustered = clusters.reduce((sum, c) => sum + c.memoryIds.length, 0);
+    const outlierIds = memories.map(m => m.id).filter(id =>
+      !clusters.some(c => c.memoryIds.includes(id))
+    );
+
+    if (outlierIds.length > 0) {
+      console.log(`[TopicIndexer] Found ${outlierIds.length} outlier memories, creating General topic`);
+      const generalTopicId = await this.db.upsertTopic('未分类', '暂未归类的记忆', entityId);
+      for (const memoryId of outlierIds) {
+        await this.db.linkTopicMemory(generalTopicId, memoryId, 0.5);
+      }
+    }
 
     // 3. Stage 2: LLM naming
     const topics = await this.nameTopics(clusters, memories);
@@ -1656,6 +1684,12 @@ async retrieveWithTopicRecall(
 /**
  * Merge vector, graph, and topic results with efficient deduplication
  * User feedback: reduce 4-path merge overhead, prefer precision paths
+ * User feedback: apply path decay factor to prevent topic flooding
+ *
+ * Path Decay Factors:
+ * - Vector (semantic): 1.0 (baseline)
+ * - Entity exact match: 0.9 (precise but narrow)
+ * - Topic (broad association): 0.6 (background knowledge)
  */
 mergeResultsWithTopics(
   vectorResults: MemoryResult[],
@@ -1665,17 +1699,28 @@ mergeResultsWithTopics(
   const mergedMap: Map<number, MemoryResult> = new Map();
   const memorySources: Map<number, string[]> = new Map();  // Track sources
 
-  // Priority order: topic > graph > vector (precision-first)
+  // Apply path decay factors to prevent score inflation from broad paths
+  const PATH_DECAY = {
+    vector: 1.0,    // Baseline
+    graph: 0.9,     // Entity exact match - precise
+    topic: 0.6,     // Broad association - background knowledge
+  };
+
+  // Process in order: vector first (baseline), then apply decayed scores
   const allResults = [
-    ...topicResults.map(r => ({ ...r, _source: 'topic' as const })),
-    ...graphResults.map(r => ({ ...r, _source: 'graph' as const })),
     ...vectorResults.map(r => ({ ...r, _source: 'vector' as const })),
+    ...graphResults.map(r => ({ ...r, _source: 'graph' as const })),
+    ...topicResults.map(r => ({ ...r, _source: 'topic' as const })),
   ];
 
   for (const result of allResults) {
+    const decayedScore = (result.score ?? result.similarity ?? result.weight ?? 0) * PATH_DECAY[result._source];
+
     if (!mergedMap.has(result.id)) {
       mergedMap.set(result.id, {
         ...result,
+        score: decayedScore,
+        similarity: decayedScore,
         source: result._source,
       });
       memorySources.set(result.id, [result._source]);
@@ -1683,15 +1728,11 @@ mergeResultsWithTopics(
       const existing = mergedMap.get(result.id)!;
       const sources = memorySources.get(result.id)!;
 
-      // Prefer precision path score
-      const existingScore = existing.score ?? existing.similarity ?? 0;
-      const newScore = result.score ?? result.similarity ?? result.weight ?? 0;
+      // Keep higher decayed score
+      const existingScore = existing.score ?? 0;
 
-      // Use higher score, but boost if from precision path (topic/graph)
-      let mergedScore = Math.max(existingScore, newScore);
-      if (result._source === 'topic' || result._source === 'graph') {
-        mergedScore = Math.max(mergedScore, newScore * 1.1);  // 10% boost
-      }
+      // Prefer higher score after decay
+      const mergedScore = Math.max(existingScore, decayedScore);
 
       sources.push(result._source);
       mergedMap.set(result.id, {
@@ -1699,7 +1740,7 @@ mergeResultsWithTopics(
         score: mergedScore,
         similarity: mergedScore,
         weight: result.weight ?? existing.weight,
-        source: 'hybrid' as const,
+        source: sources.includes('vector') ? 'hybrid' : result._source,
         topic_id: result.topic_id || existing.topic_id,
         topic_name: result.topic_name || existing.topic_name,
       });
@@ -2159,6 +2200,7 @@ git commit -m "feat: implement incremental memory mount to avoid re-clustering"
 /**
  * Merge an alias entity into a canonical entity (using transaction)
  * User feedback: use SurrealDB transaction for atomic edge transfer
+ * User feedback: check re-cluster threshold after merge, trigger immediately if exceeded
  * Performance: ~50-100ms for 500 edges on M4
  */
 async mergeEntities(aliasEntityId: string, canonicalEntityId: string): Promise<void> {
@@ -2200,6 +2242,20 @@ async mergeEntities(aliasEntityId: string, canonicalEntityId: string): Promise<v
     // Warn if slow
     if (elapsed > 200) {
       console.warn(`[EntityIndexer] Merge took ${elapsed}ms, consider batching for large merges`);
+    }
+
+    // ===== USER FEEDBACK: Check re-cluster threshold after merge =====
+    // If merged entity exceeds soft limit, trigger immediate topic creation
+    const stats = await this.getEntityStats(canonicalEntityId);
+    if (stats.memory_count >= TOPIC_SOFT_LIMIT) {
+      console.log(`[EntityIndexer] Merged entity ${canonicalEntityId} now has ${stats.memory_count} memories (>= ${TOPIC_SOFT_LIMIT}), triggering immediate topic creation`);
+
+      // Import TopicIndexer and enqueue
+      const { TopicIndexer } = await import('./topic-indexer.js');
+      const topicIndexer = new TopicIndexer(this);
+      await topicIndexer.enqueueTopicCreation(canonicalEntityId);
+
+      console.log(`[EntityIndexer] Enqueued high-priority topic creation for ${canonicalEntityId}`);
     }
   } catch (error: any) {
     console.error(`[EntityIndexer] Transaction merge failed:`, error.message);
