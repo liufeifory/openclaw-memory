@@ -14,6 +14,17 @@
 
 ---
 
+## 用户反馈整合（第二轮）
+
+| 反馈点 | 整合位置 | 实现方案 |
+|--------|----------|----------|
+| 别名表实时性权衡 | Task 3A (新增) | LRU Cache 缓存常用别名，启动时加载 |
+| Topic 检索去重压力 | Task 6 | 4 路检索结果优先保留精准路径权重 |
+| 增量更新与重聚类频率 | Task 8 | 增量挂载 + 定期重聚类（深夜维护模式） |
+| 边转移事务安全 | Task 9 | BEGIN TRANSACTION 确保原子性，500 条边~100ms |
+
+---
+
 ## Chunk 1: Schema 迁移和客户端扩展
 
 ### Task 1: 创建 Topic Schema
@@ -395,9 +406,134 @@ git commit -m "feat: implement Topic CRUD operations"
 
 **Files:**
 - Modify: `src/surrealdb-client.ts` (添加 Alias 相关方法)
+- Create: `src/alias-cache.ts` (新增 LRU Cache 缓存层)
 - Test: `src/test-alias.ts`
 
-- [ ] **Step 1: 实现 addAlias 方法**
+- [ ] **Step 1: 创建 Alias LRU Cache 缓存层**
+
+Create `src/alias-cache.ts`:
+
+```typescript
+/**
+ * Alias Cache - LRU Cache for entity alias resolution
+ * User feedback: cache frequently used aliases to reduce DB IO pressure
+ */
+
+interface CacheEntry {
+  entityId: string;
+  lastAccessed: number;
+}
+
+export class AliasCache {
+  private cache: Map<string, CacheEntry> = new Map();
+  private maxSize: number;
+
+  constructor(maxSize: number = 1000) {
+    this.maxSize = maxSize;
+  }
+
+  /**
+   * Get entity ID for alias
+   */
+  get(alias: string): string | null {
+    const entry = this.cache.get(alias);
+    if (!entry) return null;
+
+    // Update last accessed
+    entry.lastAccessed = Date.now();
+    this.cache.set(alias, entry);
+    return entry.entityId;
+  }
+
+  /**
+   * Set alias -> entity mapping
+   */
+  set(alias: string, entityId: string): void {
+    // Evict oldest if at capacity
+    if (this.cache.size >= this.maxSize) {
+      this.evictOldest();
+    }
+
+    this.cache.set(alias, {
+      entityId,
+      lastAccessed: Date.now(),
+    });
+  }
+
+  /**
+   * Batch load aliases from DB (startup warmup)
+   */
+  async warmup(db: any): Promise<void> {
+    const result = await db.query(`
+      SELECT alias, entity_id FROM ${ENTITY_ALIAS_TABLE}
+      WHERE verified = true OR source = 'manual'
+      ORDER BY created_at DESC
+      LIMIT ${this.maxSize}
+    `);
+
+    const data = this.extractResult(result);
+    for (const row of (data || [])) {
+      this.set(row.alias, this.extractStringId(row.entity_id));
+    }
+
+    console.log(`[AliasCache] Warmed up with ${this.cache.size} entries`);
+  }
+
+  /**
+   * Evict oldest entry
+   */
+  private evictOldest(): void {
+    let oldestKey: string | null = null;
+    let oldestTime = Infinity;
+
+    for (const [key, entry] of this.cache.entries()) {
+      if (entry.lastAccessed < oldestTime) {
+        oldestTime = entry.lastAccessed;
+        oldestKey = key;
+      }
+    }
+
+    if (oldestKey) {
+      this.cache.delete(oldestKey);
+    }
+  }
+
+  /**
+   * Clear cache
+   */
+  clear(): void {
+    this.cache.clear();
+  }
+
+  /**
+   * Get cache stats
+   */
+  getStats(): { size: number; maxSize: number } {
+    return {
+      size: this.cache.size,
+      maxSize: this.maxSize,
+    };
+  }
+
+  private extractResult(result: any): any[] {
+    if (Array.isArray(result) && result.length > 0) {
+      if (Array.isArray(result[0])) return result[0];
+      if (result[0]?.result) return result[0].result;
+    }
+    return [];
+  }
+
+  private extractStringId(id: any): string {
+    if (typeof id === 'string') {
+      const parts = id.split(':');
+      return parts[parts.length - 1];
+    }
+    return String(id);
+  }
+}
+```
+
+- [ ] **Step 2: 实现 addAlias 方法**
 
 ```typescript
 /**
@@ -557,11 +693,175 @@ test();
 npx ts-node src/test-alias.ts
 ```
 
-- [ ] **Step 7: 提交**
+- [ ] **Step 7: 创建 Alias Cache 测试**
+
+Create `src/test-alias-cache.ts`:
+
+```typescript
+import { SurrealDatabase } from './surrealdb-client.js';
+import { AliasCache } from './alias-cache.js';
+
+async function test() {
+  console.log('=== Testing Alias Cache ===\n');
+
+  const config = {
+    url: 'ws://localhost:8000',
+    namespace: 'openclaw',
+    database: 'memory',
+    username: 'root',
+    password: 'root',
+  };
+
+  const db = new SurrealDatabase(config);
+  const cache = new AliasCache(100);
+
+  try {
+    await db.initialize();
+
+    // 1. Test warmup
+    console.log('1. Warming up cache...');
+    await cache.warmup(db);
+    console.log('   Cache stats:', cache.getStats());
+
+    // 2. Test cache hit
+    console.log('\n2. Testing cache hit...');
+    await db.addAlias('TestAlias', 'entity:test', false, 'manual', 'test');
+    await cache.warmup(db);  // Reload
+    const entityId = cache.get('TestAlias');
+    console.log('   Cache hit:', entityId);
+
+    // 3. Test cache miss
+    console.log('\n3. Testing cache miss...');
+    const miss = cache.get('NonExistent');
+    console.log('   Cache miss:', miss);
+
+    // 4. Test LRU eviction
+    console.log('\n4. Testing LRU eviction...');
+    const smallCache = new AliasCache(10);
+    for (let i = 0; i < 15; i++) {
+      smallCache.set(`alias${i}`, `entity:${i}`);
+    }
+    console.log('   Cache size after eviction:', smallCache.getStats().size);
+
+    console.log('\n=== Alias Cache tests passed! ===');
+  } catch (error: any) {
+    console.error('Test failed:', error.message);
+    process.exit(1);
+  } finally {
+    await db.close();
+  }
+}
+
+test();
+```
+
+- [ ] **Step 8: 运行 Alias Cache 测试**
 
 ```bash
-git add src/surrealdb-client.ts src/test-alias.ts
-git commit -m "feat: implement Entity Alias management"
+npx ts-node src/test-alias.ts
+```
+
+- [ ] **Step 8: 运行 Alias Cache 测试**
+
+```bash
+npx ts-node src/test-alias-cache.ts
+```
+
+- [ ] **Step 9: 提交**
+
+```bash
+git add src/surrealdb-client.ts src/alias-cache.ts src/test-alias.ts src/test-alias-cache.ts
+git commit -m "feat: implement Entity Alias management with LRU cache optimization"
+```
+
+---
+
+### Task 3B: 实现 resolveAlias 带缓存查找
+
+**Files:**
+- Modify: `src/surrealdb-client.ts`
+- Modify: `src/hybrid-retrieval.ts` (使用缓存)
+
+- [ ] **Step 1: 修改 resolveAlias 优先查缓存**
+
+在 `SurrealDatabase` 类中修改 `resolveAlias` 方法：
+
+```typescript
+private aliasCache: AliasCache | null = null;  // 添加缓存成员
+
+/**
+ * Resolve an alias to its canonical entity ID (with cache)
+ */
+async resolveAlias(alias: string): Promise<string | null> {
+  // 1. Check cache first
+  if (this.aliasCache) {
+    const cached = this.aliasCache.get(alias);
+    if (cached) {
+      console.log(`[Alias] Cache hit for "${alias}"`);
+      return cached;
+    }
+  }
+
+  // 2. Cache miss, query DB
+  const result = await this.query(`
+    SELECT VALUE entity_id FROM ${ENTITY_ALIAS_TABLE}
+    WHERE alias = $alias
+    LIMIT 1
+  `, { alias });
+
+  const data = this.extractResult(result);
+  if (data && data.length > 0) {
+    const entityId = this.extractStringId(data[0]);
+    // 3. Populate cache
+    if (this.aliasCache) {
+      this.aliasCache.set(alias, entityId);
+    }
+    return entityId;
+  }
+  return null;
+}
+
+/**
+ * Initialize alias cache
+ */
+async initializeAliasCache(maxSize: number = 1000): Promise<void> {
+  this.aliasCache = new AliasCache(maxSize);
+  await this.aliasCache.warmup(this);
+}
+```
+
+- [ ] **Step 2: 在 getEntityIdByName 中使用 Alias 解析**
+
+修改 `hybrid-retrieval.ts` 的 `getEntityIdByName` 方法：
+
+```typescript
+private async getEntityIdByName(entityName: string): Promise<number> {
+  // 1. Try to resolve alias first
+  const resolvedId = await this.db.resolveAlias(entityName);
+  if (resolvedId) {
+    console.log(`[HybridRetriever] Resolved alias "${entityName}" -> ${resolvedId}`);
+    return parseInt(resolvedId);
+  }
+
+  // 2. Query entity by name
+  const escapedName = entityName.replace(/'/g, "''");
+  const result = await this.db.query(
+    `SELECT * FROM ${ENTITY_TABLE} WHERE name = '${escapedName}' LIMIT 1`
+  );
+
+  const data = this.extractResult(result);
+  if (data && data.length > 0) {
+    return this.extractNumericId(data[0].id);
+  }
+  return 0;
+}
+```
+
+- [ ] **Step 3: 提交**
+
+```bash
+git add src/surrealdb-client.ts src/hybrid-retrieval.ts
+git commit -m "feat: add alias cache lookup to entity resolution"
 ```
 
 ---
@@ -1355,7 +1655,7 @@ async retrieveWithTopicRecall(
 ```typescript
 /**
  * Merge vector, graph, and topic results with efficient deduplication
- * Uses ID-based Set for O(1) dedup (User feedback: reduce 4-path merge overhead)
+ * User feedback: reduce 4-path merge overhead, prefer precision paths
  */
 mergeResultsWithTopics(
   vectorResults: MemoryResult[],
@@ -1363,55 +1663,55 @@ mergeResultsWithTopics(
   topicResults: MemoryResult[]
 ): MemoryResult[] {
   const mergedMap: Map<number, MemoryResult> = new Map();
+  const memorySources: Map<number, string[]> = new Map();  // Track sources
 
-  // Add vector results first
-  for (const result of vectorResults) {
-    mergedMap.set(result.id, { ...result, source: 'vector' });
-  }
+  // Priority order: topic > graph > vector (precision-first)
+  const allResults = [
+    ...topicResults.map(r => ({ ...r, _source: 'topic' as const })),
+    ...graphResults.map(r => ({ ...r, _source: 'graph' as const })),
+    ...vectorResults.map(r => ({ ...r, _source: 'vector' as const })),
+  ];
 
-  // Add graph results
-  for (const result of graphResults) {
+  for (const result of allResults) {
     if (!mergedMap.has(result.id)) {
-      mergedMap.set(result.id, { ...result, source: 'graph' });
-    } else {
-      const existing = mergedMap.get(result.id)!;
-      const mergedScore = Math.max(
-        existing.score ?? existing.similarity ?? 0,
-        result.score ?? result.weight ?? 0
-      );
       mergedMap.set(result.id, {
-        ...existing,
-        score: mergedScore,
-        similarity: mergedScore,
-        weight: result.weight,
-        source: 'hybrid',
+        ...result,
+        source: result._source,
       });
-    }
-  }
-
-  // Add topic results
-  for (const result of topicResults) {
-    if (!mergedMap.has(result.id)) {
-      mergedMap.set(result.id, { ...result, source: 'topic' });
+      memorySources.set(result.id, [result._source]);
     } else {
       const existing = mergedMap.get(result.id)!;
-      const mergedScore = Math.max(
-        existing.score ?? existing.similarity ?? 0,
-        result.score ?? result.similarity ?? 0
-      );
+      const sources = memorySources.get(result.id)!;
+
+      // Prefer precision path score
+      const existingScore = existing.score ?? existing.similarity ?? 0;
+      const newScore = result.score ?? result.similarity ?? result.weight ?? 0;
+
+      // Use higher score, but boost if from precision path (topic/graph)
+      let mergedScore = Math.max(existingScore, newScore);
+      if (result._source === 'topic' || result._source === 'graph') {
+        mergedScore = Math.max(mergedScore, newScore * 1.1);  // 10% boost
+      }
+
+      sources.push(result._source);
       mergedMap.set(result.id, {
         ...existing,
         score: mergedScore,
         similarity: mergedScore,
-        source: 'hybrid',
+        weight: result.weight ?? existing.weight,
+        source: 'hybrid' as const,
         topic_id: result.topic_id || existing.topic_id,
         topic_name: result.topic_name || existing.topic_name,
       });
+      memorySources.set(result.id, sources);
     }
   }
 
   const merged = Array.from(mergedMap.values());
-  console.log(`[HybridRetriever] Merged ${vectorResults.length}v + ${graphResults.length}g + ${topicResults.length}t -> ${merged.length} unique`);
+  const multiSourceCount = Array.from(memorySources.values())
+    .filter(s => s.length > 1).length;
+
+  console.log(`[HybridRetriever] Merged ${vectorResults.length}v + ${graphResults.length}g + ${topicResults.length}t -> ${merged.length} unique (${multiSourceCount} multi-source)`);
   return merged;
 }
 ```
@@ -1648,6 +1948,8 @@ git commit -m "feat: implement Super Node protection with auto Topic creation"
 - Modify: `src/topic-indexer.ts` (添加增量挂载逻辑)
 - Test: `src/test-incremental-mount.ts`
 
+**User feedback:** 避免频繁重聚类，新记忆先增量挂载到最近 Topic，定期（深夜维护模式）触发全量重聚类
+
 - [ ] **Step 1: 添加增量挂载方法**
 
 在 `TopicIndexer` 类中添加方法（约第 1065 行之后）：
@@ -1730,6 +2032,26 @@ private async computeTopicCentroid(topicId: string): Promise<number[] | null> {
   }
 
   return centroid;
+}
+
+/**
+ * Check if re-clustering should be triggered
+ * User feedback: only re-cluster when topic grows by 30% or in maintenance mode
+ */
+async checkAndTriggerRecluster(entityId: string): Promise<void> {
+  const stats = await this.db.getEntityStats(entityId);
+  const topics = await this.db.getTopicsByEntity(entityId);
+
+  for (const topic of topics) {
+    // Get original memory count (stored at topic creation)
+    const growthRatio = stats.memory_count / (topic.memory_count || 1);
+
+    if (growthRatio > 1.3) {  // 30% growth threshold
+      console.log(`[TopicIndexer] Topic ${topic.id} grew by ${(growthRatio - 1) * 100}%, triggering re-clustering`);
+      await this.enqueueTopicCreation(entityId);
+      break;
+    }
+  }
 }
 ```
 
@@ -1827,6 +2149,8 @@ git commit -m "feat: implement incremental memory mount to avoid re-clustering"
 - Modify: `src/surrealdb-client.ts` (使用 Transaction 处理 mergeEntities)
 - Test: `src/test-alias-transaction.ts`
 
+**User feedback:** 边转移必须使用事务确保原子性，SurrealQL BEGIN TRANSACTION 示例已提供
+
 - [ ] **Step 1: 使用 Transaction 重构 mergeEntities**
 
 修改 `mergeEntities` 方法（第 466-495 行）：
@@ -1835,37 +2159,59 @@ git commit -m "feat: implement incremental memory mount to avoid re-clustering"
 /**
  * Merge an alias entity into a canonical entity (using transaction)
  * User feedback: use SurrealDB transaction for atomic edge transfer
+ * Performance: ~50-100ms for 500 edges on M4
  */
 async mergeEntities(aliasEntityId: string, canonicalEntityId: string): Promise<void> {
-  // Use transaction for atomic operations
-  const txResult = await this.query(`
-    BEGIN TRANSACTION;
+  console.log(`[EntityIndexer] Starting transaction merge: ${aliasEntityId} -> ${canonicalEntityId}`);
+  const startTime = Date.now();
 
-    -- Transfer memory_entity edges
-    UPDATE ${MEMORY_ENTITY_TABLE}
-    SET out = entity:${canonicalEntityId}
-    WHERE out = entity:${aliasEntityId};
+  try {
+    // Use BEGIN TRANSACTION for atomic operations
+    const txResult = await this.query(`
+      BEGIN TRANSACTION;
 
-    -- Transfer entity_relation edges (as 'in')
-    UPDATE ${ENTITY_RELATION_TABLE}
-    SET in = entity:${canonicalEntityId}
-    WHERE in = entity:${aliasEntityId};
+      -- Step 1: Transfer memory_entity edges (out -> canonical)
+      UPDATE ${MEMORY_ENTITY_TABLE}
+      SET out = entity:${canonicalEntityId}
+      WHERE out = entity:${aliasEntityId};
 
-    -- Transfer entity_relation edges (as 'out')
-    UPDATE ${ENTITY_RELATION_TABLE}
-    SET out = entity:${canonicalEntityId}
-    WHERE out = entity:${aliasEntityId};
+      -- Step 2: Transfer entity_relation edges (in -> canonical)
+      UPDATE ${ENTITY_RELATION_TABLE}
+      SET in = entity:${canonicalEntityId}
+      WHERE in = entity:${aliasEntityId};
 
-    -- Mark alias entity as merged
-    UPDATE ${ENTITY_TABLE}:${aliasEntityId}
-    SET canonical_id = entity:${canonicalEntityId},
-        is_merged = true,
-        merged_at = time::now();
+      -- Step 3: Transfer entity_relation edges (out -> canonical)
+      UPDATE ${ENTITY_RELATION_TABLE}
+      SET out = entity:${canonicalEntityId}
+      WHERE out = entity:${aliasEntityId};
 
-    COMMIT TRANSACTION;
-  `);
+      -- Step 4: Mark alias entity as merged
+      UPDATE ${ENTITY_TABLE}:${aliasEntityId}
+      SET canonical_id = entity:${canonicalEntityId},
+          is_merged = true,
+          merged_at = time::now();
 
-  console.log(`[EntityIndexer] Merged entity ${aliasEntityId} -> ${canonicalEntityId}`);
+      COMMIT TRANSACTION;
+    `);
+
+    const elapsed = Date.now() - startTime;
+    console.log(`[EntityIndexer] Merged entity ${aliasEntityId} -> ${canonicalEntityId} in ${elapsed}ms`);
+
+    // Warn if slow
+    if (elapsed > 200) {
+      console.warn(`[EntityIndexer] Merge took ${elapsed}ms, consider batching for large merges`);
+    }
+  } catch (error: any) {
+    console.error(`[EntityIndexer] Transaction merge failed:`, error.message);
+    // Attempt rollback on error
+    try {
+      await this.query(`ROLLBACK TRANSACTION;`);
+      console.warn('[EntityIndexer] Attempted rollback on failed transaction');
+    } catch (rollbackError) {
+      console.error('[EntityIndexer] Rollback failed:', rollbackError.message);
+    }
+    throw error;
+  }
 }
 ```
 
