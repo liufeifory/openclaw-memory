@@ -1,0 +1,10 @@
+#V2
+SELECT count() FROM episodic_memory GROUP ALL;
+SELECT count() FROM semantic_memory GROUP ALL;
+SELECT count() FROM reflection_memory GROUP ALL;
+INFO FOR DB;
+SELECT count() FROM memory GROUP ALL;
+SELECT * FROM memory LIMIT 5;
+SELECT count() FROM memory;
+SELECT content, type, importance FROM memory LIMIT 3;
+EXIT;

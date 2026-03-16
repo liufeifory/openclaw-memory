@@ -115,7 +115,7 @@ const memoryPlugin = {
         }
         console.log('[openclaw-memory] Plugin initialized with SurrealDB backend');
     },
-    register(api) {
+    async register(api) {
         // Get plugin config from OpenClaw - use api.pluginConfig property (not getConfig method)
         const pluginConfig = api.pluginConfig;
         // Debug: log what we received
@@ -133,8 +133,26 @@ const memoryPlugin = {
             console.warn('[openclaw-memory] No SurrealDB config found, plugin disabled');
             return;
         }
-        // Initialize memory manager
+        // Initialize memory manager and SurrealDB backend
+        console.log('[openclaw-memory] Creating MemoryManager...');
         const mm = getMemoryManager(config);
+        console.log('[openclaw-memory] MemoryManager created, instance:', mm?.constructor?.name);
+        // Initialize SurrealDB connection if not already done by init()
+        // This ensures connection even if OpenClaw doesn't call init()
+        if (mm instanceof SurrealMemoryManager) {
+            try {
+                console.log('[openclaw-memory] Initializing SurrealDB connection...');
+                const result = await mm.initialize();
+                if (result.migrated) {
+                    console.log('[openclaw-memory] SurrealDB schema migration:', result.changes);
+                }
+                console.log('[openclaw-memory] SurrealDB connection established');
+            }
+            catch (error) {
+                console.error('[openclaw-memory] Failed to initialize SurrealDB:', error.message);
+                console.error('[openclaw-memory] Stack:', error.stack);
+            }
+        }
         // Initialize 1B model helpers (Llama-3.2-1B-Instruct on port 8081)
         const llamaEndpoint = config.embedding?.endpoint?.replace('8080', '8081') ?? 'http://localhost:8081';
         // Create shared LLM limiter

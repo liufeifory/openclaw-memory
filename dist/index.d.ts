@@ -29,7 +29,7 @@ declare const memoryPlugin: {
     description: string;
     kind: string;
     init(config: MemoryPluginConfig): Promise<void>;
-    register(api: any): void;
+    register(api: any): Promise<void>;
 };
 export default memoryPlugin;
 //# sourceMappingURL=index.d.ts.map
