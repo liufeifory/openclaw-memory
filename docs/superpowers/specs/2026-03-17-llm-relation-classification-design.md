@@ -79,7 +79,19 @@
 - **数据库**：SurrealDB (`entity_relation` 表)
 - **调度器**：`setInterval` 后台任务（6 小时间隔）
 - **批处理**：每次最多处理 100 个关系
-- **架构依赖**：`EntityIndexer` 持有 `EntityExtractor` 实例，通过其调用 7B 模型
+- **架构依赖**：
+  - `EntityIndexer` 持有 `EntityExtractor` 实例
+  - `EntityExtractor` 内置 `limiter7B` 限流器（构造函数注入端点）
+  - 限流器配置：`maxConcurrent: 2, minInterval: 100ms`
+
+**依赖注入链：**
+```
+EntityIndexer
+  ↓ (持有)
+EntityExtractor
+  ↓ (内置)
+limiter7B (endpoint: http://localhost:8083)
+```
 
 ### Schema 扩展
 
@@ -90,6 +102,7 @@ DEFINE FIELD is_manual_refined ON TABLE entity_relation TYPE bool DEFAULT false;
 DEFINE FIELD confidence ON TABLE entity_relation TYPE float DEFAULT 0.0;
 DEFINE FIELD reasoning ON TABLE entity_relation TYPE option<string>;
 DEFINE FIELD last_occurrence_at ON TABLE entity_relation TYPE datetime;
+DEFINE FIELD updated_at ON TABLE entity_relation TYPE datetime DEFAULT time::now();
 
 -- 关系类型约束（可选，加强验证）
 DEFINE FIELD relation_type ON TABLE entity_relation
@@ -316,7 +329,8 @@ async classifyEntityRelations(): Promise<number> {
                reasoning = $reasoning,
                is_manual_refined = true,
                evidence_memory_ids = $evidence_memory_ids,
-               weight = weight;  // 保留原有权重
+               weight = weight,  // 保留原有权重
+               updated_at = time::now();
        }
 ```
 
