@@ -30,3 +30,6 @@ logs/
 # Runtime directories
 qdrant/
 llama.cpp/
+
+# Git worktrees
+.worktrees/
