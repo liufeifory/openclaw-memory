@@ -177,6 +177,7 @@ export class EntityIndexer {
 ## 方向性说明
 - 默认关系方向：A → B
 - 如果实际关系是 B → A（如"B 创建了 A"），请设置 reverse_direction = true
+- 或者返回 source 字段指定关系的源实体（如"Facebook"表示 Facebook -> created_by -> React）
 
 ## 输出格式
 严格返回 JSON 格式：
@@ -184,7 +185,8 @@ export class EntityIndexer {
   "relation_type": "<选择的类型>",
   "confidence": <0.0-1.0>,
   "reasoning": "<简短解释，50 字以内>",
-  "reverse_direction": <true/false>  // 如果需要反转边的方向
+  "reverse_direction": <true/false>,  // 如果需要反转边的方向
+  "source": "<实体名称，关系的源头>"  // 与 reverse_direction 互斥，优先使用
 }
 ```
 
@@ -291,10 +293,11 @@ async classifyEntityRelations(): Promise<number> {
        SELECT name, entity_type FROM entity:$in_id
    2.2 获取实体 B 信息
        SELECT name, entity_type FROM entity:$out_id
-   2.3 获取共现 memory 内容（带窗口切片）
-       SELECT content FROM memory
-       WHERE id IN (evidence_memory_ids[0:3])
-       // 使用 extractContextWindow() 提取窗口
+   2.3 获取共现 memory 内容（带窗口切片，按多样性采样）
+       SELECT content, created_at, document_id FROM memory
+       WHERE id IN (evidence_memory_ids)
+       ORDER BY created_at ASC
+       // 使用 diverseSample() 选择"头、中、尾"各一条，或按 document_id 去重
    2.4 构建 LLM Prompt
    2.5 调用 7B 模型（使用 limiter7B 限流）
        // 使用 Promise.race 实现 10 秒超时
@@ -304,7 +307,7 @@ async classifyEntityRelations(): Promise<number> {
            setTimeout(() => reject(new Error('Timeout')), 10000)
          )
        ]);
-   2.6 解析响应，提取 relation_type、confidence、reverse_direction
+   2.6 解析响应，提取 relation_type、confidence、reverse_direction、source
    2.7 验证关系类型（白名单验证）
        const VALID_TYPES = ['causes', 'used_for', 'member_of',
                             'located_in', 'created_by', 'related_to',
@@ -312,26 +315,80 @@ async classifyEntityRelations(): Promise<number> {
        if (!VALID_TYPES.includes(predictedType)) {
          relationType = 'related_to';  // 默认值
        }
-   2.8 更新 entity_relation
-       UPDATE entity_relation:$id SET
-         relation_type = $new_type,
-         confidence = $confidence,
-         reasoning = $reasoning,
-         is_manual_refined = true,
-         updated_at = time::now()
-
-       // 如果需要反转方向
-       IF reverse_direction {
+   2.8 方向修正：如果 LLM 返回 source 字段，检查是否与当前边方向一致
+       IF source AND source != relation.in {
+         // 方向不一致，需要重建边
          DELETE entity_relation:$id;
          RELATE entity:$out_id->entity_relation->entity:$in_id
            SET relation_type = $new_type,
+               source = $source,  // 记录关系源实体
                confidence = $confidence,
                reasoning = $reasoning,
                is_manual_refined = true,
                evidence_memory_ids = $evidence_memory_ids,
-               weight = weight,  // 保留原有权重
+               weight = weight,
                updated_at = time::now();
+       } ELSE {
+         UPDATE entity_relation:$id SET
+           relation_type = $new_type,
+           confidence = $confidence,
+           reasoning = $reasoning,
+           is_manual_refined = true,
+           updated_at = time::now()
        }
+```
+
+### 2.3 Memory 多样性采样策略
+
+**问题：** 如果只取"前 3 条"Memory，可能这 3 条都来自同一个文档的同一个段落，导致 LLM 片面理解。
+
+**解决方案：** 采用"头、中、尾"采样 + 文档去重。
+
+```typescript
+/**
+ * 多样化采样 Memory 片段
+ * @param memories - 按时间排序的 memory 列表
+ * @param targetCount - 目标采样数量（默认 3）
+ * @returns 采样后的 memory 列表
+ */
+diverseSample(memories: Memory[], targetCount: number = 3): Memory[] {
+  if (memories.length <= targetCount) {
+    return memories;
+  }
+
+  // 策略 1：按 document_id 去重，优先保留不同文档的 memory
+  const byDocument = new Map<string, Memory>();
+  for (const mem of memories) {
+    if (!byDocument.has(mem.document_id)) {
+      byDocument.set(mem.document_id, mem);
+    }
+  }
+
+  if (byDocument.size >= targetCount) {
+    // 有足够多的不同文档，直接返回
+    return Array.from(byDocument.values()).slice(0, targetCount);
+  }
+
+  // 策略 2：如果文档数不足，采用"头、中、尾"采样
+  const result: Memory[] = [];
+  const step = Math.floor(memories.length / targetCount);
+
+  for (let i = 0; i < targetCount; i++) {
+    const index = Math.min(i * step, memories.length - 1);
+    result.push(memories[index]);
+  }
+
+  return result;
+}
+```
+
+**SQL 查询优化：**
+```sql
+-- 原查询：按 created_at 排序后直接 LIMIT
+SELECT content FROM memory WHERE id IN ($ids) ORDER BY created_at ASC LIMIT 3
+
+-- 新查询：获取完整列表供应用层采样
+SELECT content, created_at, document_id FROM memory WHERE id IN ($ids) ORDER BY created_at ASC
 ```
 
 ## 错误处理
@@ -346,6 +403,8 @@ async classifyEntityRelations(): Promise<number> {
 | 关系类型未知 | 使用 `related_to` 作为默认值（白名单验证） |
 | 边冲突（Edge Overwriting） | 设置 `is_manual_refined = true`，buildEntityCooccurrence 保留已分类类型 |
 | 并发冲突 | 使用事务包裹更新，检测到冲突时重试（最多 3 次） |
+| 边方向不一致 | 检测 LLM 返回的 source 与当前边 in 不一致时，DELETE 原边 + RELATE 新边 |
+| Memory 采样单一 | 采用"头、中、尾"采样 + document_id 去重，确保多样性 |
 
 ## 性能考虑
 

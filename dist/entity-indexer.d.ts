@@ -11,6 +11,7 @@
  * Uses GRAPH_PROTECTION constants from surrealdb-client.ts
  */
 import { SurrealDatabase } from './surrealdb-client.js';
+import { EntityExtractor } from './entity-extractor.js';
 /**
  * Indexer statistics
  */
@@ -20,6 +21,7 @@ export interface IndexerStats {
     totalFrozen: number;
     totalPruned: number;
     totalMerged: number;
+    totalRelationsBuilt: number;
     currentIntervalMs: number;
 }
 /**
@@ -41,6 +43,7 @@ export declare class EntityIndexer {
     private totalFrozen;
     private totalPruned;
     private totalMerged;
+    private totalRelationsBuilt;
     private entityMentions;
     private aliasPairs;
     private currentIndexIntervalMs;
@@ -120,6 +123,10 @@ export declare class EntityIndexer {
      */
     private adjustBackpressure;
     /**
+     * Get EntityExtractor instance (for loading known entities cache)
+     */
+    getExtractor(): EntityExtractor;
+    /**
      * 6. processQueue - Process indexing queue in background
      */
     processQueue(): Promise<void>;
@@ -135,6 +142,30 @@ export declare class EntityIndexer {
      * Start TTL pruning scheduler (runs every PRUNE_INTERVAL_DAYS)
      */
     private startTTLPruningScheduler;
+    /**
+     * Start co-occurrence builder scheduler (Stage 2)
+     * Runs every 7 days to build entity-entity relationships
+     */
+    private startCooccurrenceScheduler;
+    /**
+     * Build entity co-occurrence relationships (Stage 2)
+     * Delegates to SurrealDatabase.buildEntityCooccurrence()
+     */
+    buildEntityCooccurrence(): Promise<number>;
+    /**
+     * Prune low-weight entity-entity edges (Stage 2)
+     * Delegates to SurrealDatabase.pruneLowWeightEdges()
+     */
+    pruneLowWeightEdges(minWeight?: number): Promise<number>;
+    /**
+     * Multi-degree association search (Stage 2)
+     * Delegates to SurrealDatabase.searchByMultiDegree()
+     */
+    searchByMultiDegree(seedMemoryId: number, degree?: number, minWeight?: number, limit?: number): Promise<any[]>;
+    /**
+     * Get relation statistics (Stage 2)
+     */
+    getRelationStats(): Promise<any>;
     /**
      * Get indexer statistics
      */
@@ -155,5 +186,50 @@ export declare class EntityIndexer {
      * Utility: extract numeric ID from various ID formats
      */
     private extractId;
+    private readonly relationClassifierIntervalMs;
+    private readonly relationClassifierBatchSize;
+    private totalClassified;
+    /**
+     * Start relation classifier scheduler
+     * Runs every 6 hours to classify co_occurs relations using LLM
+     */
+    private startRelationClassifierScheduler;
+    /**
+     * Classify entity relations using LLM
+     * Queries all co_occurs relations and classifies them with semantic types
+     *
+     * @returns Number of successfully classified relations
+     */
+    classifyEntityRelations(): Promise<number>;
+    /**
+     * Get entity by ID
+     */
+    private getEntityById;
+    /**
+     * Get memory snippets with context window
+     * Uses diverse sampling to ensure variety from different documents/time periods
+     */
+    private getMemorySnippets;
+    /**
+     * Build relation classification prompt for LLM
+     */
+    private buildRelationClassificationPrompt;
+    /**
+     * Parse LLM classification response
+     */
+    private parseClassificationResponse;
+    /**
+     * Update relation with classification result
+     * Handles direction reversal and source-based direction healing
+     */
+    private updateRelationClassification;
+    /**
+     * Helper: extract array from SurrealDB result
+     */
+    private extractResultArray;
+    /**
+     * Helper: extract result ID
+     */
+    private extractResultId;
 }
 //# sourceMappingURL=entity-indexer.d.ts.map

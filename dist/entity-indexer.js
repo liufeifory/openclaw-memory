@@ -10,8 +10,9 @@
  *
  * Uses GRAPH_PROTECTION constants from surrealdb-client.ts
  */
-import { GRAPH_PROTECTION } from './surrealdb-client.js';
+import { GRAPH_PROTECTION, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE } from './surrealdb-client.js';
 import { EntityExtractor } from './entity-extractor.js';
+import { extractContextWindow, diverseSample } from './context-window.js';
 import * as os from 'os';
 /**
  * Entity Indexer with graph explosion protection
@@ -23,6 +24,7 @@ export class EntityIndexer {
     totalFrozen = 0;
     totalPruned = 0;
     totalMerged = 0;
+    totalRelationsBuilt = 0; // Stage 2: entity-entity relations
     // Entity mention tracking for frequency filtering
     entityMentions = new Map();
     // Alias pairs for merging
@@ -49,6 +51,10 @@ export class EntityIndexer {
         this.startBackgroundProcessor();
         // Start TTL pruning scheduler
         this.startTTLPruningScheduler();
+        // Start co-occurrence builder scheduler (Stage 2)
+        this.startCooccurrenceScheduler();
+        // Start relation classifier scheduler (Stage 2: LLM classification)
+        this.startRelationClassifierScheduler();
     }
     /**
      * Set database client
@@ -368,6 +374,12 @@ export class EntityIndexer {
             `(queue: ${queueSize}, memory: ${(memoryUsage * 100).toFixed(1)}%, CPU: ${(cpuLoad * 100).toFixed(1)}%)`);
     }
     /**
+     * Get EntityExtractor instance (for loading known entities cache)
+     */
+    getExtractor() {
+        return this.extractor;
+    }
+    /**
      * 6. processQueue - Process indexing queue in background
      */
     async processQueue() {
@@ -454,6 +466,88 @@ export class EntityIndexer {
         console.log(`[EntityIndexer] TTL Pruning scheduled every ${this.pruneIntervalDays} days`);
     }
     /**
+     * Start co-occurrence builder scheduler (Stage 2)
+     * Runs every 7 days to build entity-entity relationships
+     */
+    startCooccurrenceScheduler() {
+        const cooccurrenceIntervalMs = 7 * 24 * 60 * 60 * 1000; // 7 days
+        setInterval(async () => {
+            await this.buildEntityCooccurrence().catch(console.error);
+        }, cooccurrenceIntervalMs);
+        console.log(`[EntityIndexer] Co-occurrence builder scheduled every 7 days`);
+    }
+    /**
+     * Build entity co-occurrence relationships (Stage 2)
+     * Delegates to SurrealDatabase.buildEntityCooccurrence()
+     */
+    async buildEntityCooccurrence() {
+        if (!this.db) {
+            console.log('[EntityIndexer] Skip co-occurrence build: no database connection');
+            return 0;
+        }
+        try {
+            const relationsBuilt = await this.db.buildEntityCooccurrence(1000);
+            this.totalRelationsBuilt += relationsBuilt;
+            console.log(`[EntityIndexer] Built ${relationsBuilt} entity relations`);
+            return relationsBuilt;
+        }
+        catch (error) {
+            console.error('[EntityIndexer] buildEntityCooccurrence failed:', error.message);
+            return 0;
+        }
+    }
+    /**
+     * Prune low-weight entity-entity edges (Stage 2)
+     * Delegates to SurrealDatabase.pruneLowWeightEdges()
+     */
+    async pruneLowWeightEdges(minWeight = 0.1) {
+        if (!this.db) {
+            console.log('[EntityIndexer] Skip edge pruning: no database connection');
+            return 0;
+        }
+        try {
+            const pruned = await this.db.pruneLowWeightEdges(minWeight);
+            console.log(`[EntityIndexer] Pruned ${pruned} low-weight entity relations`);
+            return pruned;
+        }
+        catch (error) {
+            console.error('[EntityIndexer] pruneLowWeightEdges failed:', error.message);
+            return 0;
+        }
+    }
+    /**
+     * Multi-degree association search (Stage 2)
+     * Delegates to SurrealDatabase.searchByMultiDegree()
+     */
+    async searchByMultiDegree(seedMemoryId, degree = 2, minWeight = 0.1, limit = 20) {
+        if (!this.db) {
+            console.log('[EntityIndexer] Skip multi-degree search: no database connection');
+            return [];
+        }
+        try {
+            return await this.db.searchByMultiDegree(seedMemoryId, degree, minWeight, limit);
+        }
+        catch (error) {
+            console.error('[EntityIndexer] searchByMultiDegree failed:', error.message);
+            return [];
+        }
+    }
+    /**
+     * Get relation statistics (Stage 2)
+     */
+    async getRelationStats() {
+        if (!this.db) {
+            return { total_relations: 0, avg_weight: 0, max_weight: 0, min_weight: 0, by_type: {} };
+        }
+        try {
+            return await this.db.getRelationStats();
+        }
+        catch (error) {
+            console.error('[EntityIndexer] getRelationStats failed:', error.message);
+            return { total_relations: 0, avg_weight: 0, max_weight: 0, min_weight: 0, by_type: {} };
+        }
+    }
+    /**
      * Get indexer statistics
      */
     getStats() {
@@ -463,6 +557,7 @@ export class EntityIndexer {
             totalFrozen: this.totalFrozen,
             totalPruned: this.totalPruned,
             totalMerged: this.totalMerged,
+            totalRelationsBuilt: this.totalRelationsBuilt,
             currentIntervalMs: this.currentIndexIntervalMs,
         };
     }
@@ -481,6 +576,7 @@ export class EntityIndexer {
         this.totalFrozen = 0;
         this.totalPruned = 0;
         this.totalMerged = 0;
+        this.totalRelationsBuilt = 0;
         console.log('[EntityIndexer] Stats reset');
     }
     /**
@@ -504,6 +600,327 @@ export class EntityIndexer {
             return this.extractId(id.id);
         }
         return 0;
+    }
+    // ==================== Stage 2: LLM Relation Classification ====================
+    relationClassifierIntervalMs = 6 * 60 * 60 * 1000; // 6 hours
+    relationClassifierBatchSize = 100; // Per batch
+    totalClassified = 0; // Tracking total classified relations
+    /**
+     * Start relation classifier scheduler
+     * Runs every 6 hours to classify co_occurs relations using LLM
+     */
+    startRelationClassifierScheduler() {
+        // Check CPU load before running - backpressure aware
+        const checkLoadAndRun = async () => {
+            const load = os.loadavg();
+            const loadAvg = load[0]; // 1-minute load average
+            // Skip if system is under heavy load
+            if (loadAvg > this.cpuThreshold) {
+                console.log(`[EntityIndexer] Skip relation classification: high CPU load (${loadAvg.toFixed(2)})`);
+                return;
+            }
+            await this.classifyEntityRelations().catch(console.error);
+        };
+        setInterval(checkLoadAndRun, this.relationClassifierIntervalMs);
+        console.log(`[EntityIndexer] Relation classifier scheduled every 6 hours (CPU threshold: ${this.cpuThreshold})`);
+    }
+    /**
+     * Classify entity relations using LLM
+     * Queries all co_occurs relations and classifies them with semantic types
+     *
+     * @returns Number of successfully classified relations
+     */
+    async classifyEntityRelations() {
+        if (!this.db) {
+            console.log('[EntityIndexer] Skip relation classification: no database');
+            return 0;
+        }
+        try {
+            // Step 1: Query unclassified relations
+            const unclassifiedSql = `
+        SELECT * FROM ${ENTITY_RELATION_TABLE}
+        WHERE relation_type = 'co_occurs' OR is_manual_refined = false
+        ORDER BY created_at ASC
+        LIMIT ${this.relationClassifierBatchSize}
+      `;
+            const unclassifiedResult = await this.db.query(unclassifiedSql);
+            const relations = this.extractResultArray(unclassifiedResult);
+            if (relations.length === 0) {
+                console.log('[EntityIndexer] No unclassified relations found');
+                return 0;
+            }
+            console.log(`[EntityIndexer] Found ${relations.length} relations to classify`);
+            let classified = 0;
+            for (const relation of relations) {
+                try {
+                    // Step 2: Get entity A and B info
+                    const inEntityId = this.extractId(relation.in);
+                    const outEntityId = this.extractId(relation.out);
+                    const entityA = await this.getEntityById(inEntityId);
+                    const entityB = await this.getEntityById(outEntityId);
+                    if (!entityA || !entityB) {
+                        console.log(`[EntityIndexer] Skip relation ${relation.id}: entity not found (may be pruned)`);
+                        continue;
+                    }
+                    // Step 3: Get co-occurrence memory snippets with context window
+                    const memoryIds = relation.evidence_memory_ids || [];
+                    const memorySnippets = await this.getMemorySnippets(memoryIds.slice(0, 3), [entityA.name, entityB.name]);
+                    // Step 4: Build LLM prompt
+                    const prompt = this.buildRelationClassificationPrompt(entityA.name, entityA.entity_type || 'unknown', entityB.name, entityB.entity_type || 'unknown', relation.weight || 1.0, memorySnippets);
+                    // Step 5: Call 7B LLM with timeout
+                    const llmResult = await this.extractor.call7B(prompt, 10000);
+                    // Step 6: Parse and validate response
+                    const classification = this.parseClassificationResponse(llmResult);
+                    // Step 7: Update relation with classification
+                    await this.updateRelationClassification(relation, classification);
+                    classified++;
+                }
+                catch (error) {
+                    console.error(`[EntityIndexer] Failed to classify relation ${relation.id}:`, error.message);
+                    // Continue to next relation
+                }
+            }
+            this.totalClassified += classified;
+            console.log(`[EntityIndexer] Classified ${classified} relations (total: ${this.totalClassified})`);
+            return classified;
+        }
+        catch (error) {
+            console.error('[EntityIndexer] Relation classification failed:', error.message);
+            return 0;
+        }
+    }
+    /**
+     * Get entity by ID
+     */
+    async getEntityById(entityId) {
+        try {
+            if (!this.db)
+                return null;
+            const result = await this.db.query(`SELECT name, entity_type FROM ${ENTITY_TABLE}:${entityId}`);
+            const entities = this.extractResultArray(result);
+            return entities.length > 0 ? entities[0] : null;
+        }
+        catch {
+            return null;
+        }
+    }
+    /**
+     * Get memory snippets with context window
+     * Uses diverse sampling to ensure variety from different documents/time periods
+     */
+    async getMemorySnippets(memoryIds, entities) {
+        if (!this.db || memoryIds.length === 0) {
+            return [];
+        }
+        try {
+            // Query all memories with metadata for diverse sampling
+            const idsStr = memoryIds.map(id => `'${id}'`).join(', ');
+            const result = await this.db.query(`SELECT content, created_at, document_id FROM ${MEMORY_TABLE} WHERE id IN [${idsStr}] ORDER BY created_at ASC`);
+            const memories = this.extractResultArray(result);
+            if (memories.length === 0) {
+                return [];
+            }
+            // Use diverse sampling to select memories from different documents/time periods
+            const sampledMemories = diverseSample(memories, 3);
+            const snippets = [];
+            for (const memory of sampledMemories) {
+                if (memory.content) {
+                    // Use context window extraction
+                    const windows = extractContextWindow(memory.content, entities, {
+                        windowSize: 100,
+                        maxSnippets: 1
+                    });
+                    snippets.push(...windows);
+                }
+            }
+            return snippets.slice(0, 3);
+        }
+        catch (error) {
+            console.error('[EntityIndexer] Failed to get memory snippets:', error.message);
+            return [];
+        }
+    }
+    /**
+     * Build relation classification prompt for LLM
+     */
+    buildRelationClassificationPrompt(entityAName, entityAType, entityBName, entityBType, cooccurrenceCount, memorySnippets) {
+        const snippetsText = memorySnippets.map((s, i) => `${i + 1}. "${s.substring(0, 200)}"`).join('\n');
+        return `你是一名知识图谱关系分类专家。根据以下实体信息和共现上下文，
+选择最合适的关系类型。
+
+## 实体 A（in）
+- 名称：${entityAName}
+- 类型：${entityAType}
+
+## 实体 B（out）
+- 名称：${entityBName}
+- 类型：${entityBType}
+
+## 共现信息
+- 共现次数：${cooccurrenceCount}
+
+## 共现的 Memory 片段（前 3 条，每条约 200 字窗口）
+${snippetsText}
+
+## 可选关系类型
+- causes: 因果关系（A 导致 B）
+- used_for: 用途关系（A 用于 B）
+- member_of: 成员关系（A 属于 B 的组成部分）
+- located_in: 位置关系（A 位于 B 的范围内）
+- created_by: 创建关系（A 由 B 创建）
+- related_to: 通用关联（有语义关联但无法归类）
+- no_logical_relation: 无逻辑关系（仅偶然共现，无语义关联）
+
+## 方向性说明
+- 默认关系方向：A → B
+- 如果实际关系是 B → A（如"B 创建了 A"），请设置 reverse_direction = true
+
+## 输出格式
+严格返回 JSON 格式：
+{
+  "relation_type": "<选择的类型>",
+  "confidence": <0.0-1.0>,
+  "reasoning": "<简短解释，50 字以内>",
+  "reverse_direction": <true/false>
+}
+
+JSON:`;
+    }
+    /**
+     * Parse LLM classification response
+     */
+    parseClassificationResponse(llmResult) {
+        const VALID_TYPES = [
+            'causes', 'used_for', 'member_of', 'located_in',
+            'created_by', 'related_to', 'no_logical_relation'
+        ];
+        try {
+            // Try to extract JSON from response
+            let output = llmResult.content || llmResult.generated_text || '';
+            // Try to find JSON object
+            const jsonMatch = output.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                output = jsonMatch[0];
+            }
+            const parsed = JSON.parse(output);
+            let relationType = parsed.relation_type || 'related_to';
+            let confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
+            let reasoning = parsed.reasoning || '';
+            let reverseDirection = parsed.reverse_direction === true;
+            let source = parsed.source; // New: source entity name
+            // Validate relation type
+            if (!VALID_TYPES.includes(relationType)) {
+                console.log(`[EntityIndexer] Unknown relation type "${relationType}", using related_to`);
+                relationType = 'related_to';
+            }
+            // Normalize confidence
+            confidence = Math.max(0, Math.min(1, confidence));
+            return { relation_type: relationType, confidence, reasoning, reverse_direction: reverseDirection, source };
+        }
+        catch {
+            // Default fallback
+            console.log('[EntityIndexer] Parse failed, using default values');
+            return {
+                relation_type: 'related_to',
+                confidence: 0.5,
+                reasoning: 'Parse failed, using default',
+                reverse_direction: false,
+                source: undefined
+            };
+        }
+    }
+    /**
+     * Update relation with classification result
+     * Handles direction reversal and source-based direction healing
+     */
+    async updateRelationClassification(relation, classification) {
+        if (!this.db) {
+            console.log('[EntityIndexer] Skip relation update: no database');
+            return;
+        }
+        const { relation_type, confidence, reasoning, reverse_direction, source } = classification;
+        // Get current relation's "in" entity name for direction comparison
+        const currentInId = this.extractId(relation.in);
+        let needsDirectionCorrection = reverse_direction;
+        // New: Check if source field indicates different direction
+        if (source) {
+            // Get entity names to compare with source
+            const inEntity = await this.getEntityById(currentInId);
+            const outEntity = await this.getEntityById(this.extractId(relation.out));
+            // If source matches "out" entity, the direction should be reversed
+            // Example: source="Facebook" means Facebook -> created_by -> React
+            // But current edge is React -> Facebook, so we need to reverse
+            if (inEntity && outEntity) {
+                if (source.toLowerCase() === outEntity.name.toLowerCase()) {
+                    needsDirectionCorrection = true;
+                    console.log(`[EntityIndexer] Direction healing: source "${source}" matches out entity "${outEntity.name}", reversing direction`);
+                }
+                else if (source.toLowerCase() === inEntity.name.toLowerCase()) {
+                    // Source matches current "in", direction is correct
+                    console.log(`[EntityIndexer] Direction healing: source "${source}" matches in entity "${inEntity.name}", keeping direction`);
+                }
+            }
+        }
+        if (needsDirectionCorrection) {
+            // Delete old relation and create reverse
+            const relationId = this.extractId(relation.id);
+            const deleteSql = `DELETE ${ENTITY_RELATION_TABLE}:${relationId}`;
+            await this.db.query(deleteSql);
+            const createSql = `
+        RELATE ${this.extractResultId(relation.out)}->${ENTITY_RELATION_TABLE}->${this.extractResultId(relation.in)}
+        SET
+          relation_type = '${relation_type}',
+          confidence = ${confidence},
+          reasoning = '${reasoning.replace(/'/g, "\\'")}',
+          is_manual_refined = true,
+          evidence_memory_ids = ${JSON.stringify(relation.evidence_memory_ids || [])},
+          weight = ${relation.weight || 1.0},
+          source = ${source ? `'${source.replace(/'/g, "\\'")}'` : 'NULL'},
+          updated_at = time::now()
+      `;
+            await this.db.query(createSql);
+            console.log(`[EntityIndexer] Reversed relation direction: ${relation_type} (source: ${source || 'reverse_direction flag'})`);
+        }
+        else {
+            // Update existing relation
+            const updateSql = `
+        UPDATE ${ENTITY_RELATION_TABLE}:${this.extractId(relation.id)}
+        SET
+          relation_type = '${relation_type}',
+          confidence = ${confidence},
+          reasoning = '${reasoning.replace(/'/g, "\\'")}',
+          is_manual_refined = true,
+          source = ${source ? `'${source.replace(/'/g, "\\'")}'` : 'NULL'},
+          updated_at = time::now()
+      `;
+            await this.db.query(updateSql);
+        }
+    }
+    /**
+     * Helper: extract array from SurrealDB result
+     */
+    extractResultArray(result) {
+        if (Array.isArray(result)) {
+            if (result.length > 0 && Array.isArray(result[0])) {
+                return result[0];
+            }
+            if (result[0]?.result && Array.isArray(result[0].result)) {
+                return result[0].result;
+            }
+            return result;
+        }
+        return [];
+    }
+    /**
+     * Helper: extract result ID
+     */
+    extractResultId(id) {
+        if (typeof id === 'string')
+            return id;
+        if (id && typeof id === 'object' && id.tb && id.id) {
+            return `${id.tb}:${id.id}`;
+        }
+        return `entity:${id}`;
     }
 }
 //# sourceMappingURL=entity-indexer.js.map

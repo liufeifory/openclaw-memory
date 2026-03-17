@@ -6,9 +6,11 @@
  * 2. Prompt building
  * 3. Response parsing
  * 4. Full classification pipeline (mock LLM)
+ * 5. Diverse sampling
+ * 6. Direction healing
  */
 
-import { extractContextWindow, joinContextSnippets } from './context-window.js';
+import { extractContextWindow, joinContextSnippets, diverseSample, MemorySnippet } from './context-window.js';
 import { EntityExtractor } from './entity-extractor.js';
 
 // ==================== Context Window Tests ====================
@@ -237,47 +239,6 @@ async function testResponseParsing() {
   }
 }
 
-/**
- * Parse classification response (copied from entity-indexer for testing)
- */
-function parseClassificationResponse(llmResult: any, VALID_TYPES: string[]): {
-  relation_type: string;
-  confidence: number;
-  reasoning: string;
-  reverse_direction: boolean;
-} {
-  try {
-    let output = llmResult.content || llmResult.generated_text || '';
-
-    const jsonMatch = output.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      output = jsonMatch[0];
-    }
-
-    const parsed = JSON.parse(output);
-
-    let relationType = parsed.relation_type || 'related_to';
-    let confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
-    let reasoning = parsed.reasoning || '';
-    let reverseDirection = parsed.reverse_direction === true;
-
-    if (!VALID_TYPES.includes(relationType)) {
-      relationType = 'related_to';
-    }
-
-    confidence = Math.max(0, Math.min(1, confidence));
-
-    return { relation_type: relationType, confidence, reasoning, reverse_direction: reverseDirection };
-
-  } catch {
-    return {
-      relation_type: 'related_to',
-      confidence: 0.5,
-      reasoning: 'Parse failed, using default',
-      reverse_direction: false
-    };
-  }
-}
 
 // ==================== Integration Test (Mock LLM) ====================
 
@@ -375,6 +336,180 @@ async function testDirectionReversal() {
   } else {
     console.log('[FAIL] Direction reversal test failed');
     return false;
+  }
+}
+
+// ==================== Source Field Test (Direction Healing) ====================
+
+async function testSourceFieldDirection() {
+  console.log('\n=== Test Source Field for Direction Healing ===');
+
+  // Simulate LLM returning source field instead of reverse_direction
+  // Example: source="Facebook" means the relation should be Facebook -> created_by -> React
+  const mockLLMResponse = {
+    content: '{"relation_type": "created_by", "confidence": 0.95, "reasoning": "Facebook created React", "source": "Facebook"}'
+  };
+
+  const VALID_TYPES = ['causes', 'used_for', 'member_of', 'located_in', 'created_by', 'related_to', 'no_logical_relation'];
+  const classification = parseClassificationResponse(mockLLMResponse, VALID_TYPES);
+
+  console.log('Classification with source field:', classification);
+
+  // Verify source field is parsed
+  const hasSource = (classification as any).source === 'Facebook';
+  const hasCorrectType = classification.relation_type === 'created_by';
+  const hasHighConfidence = classification.confidence === 0.95;
+
+  if (hasSource && hasCorrectType && hasHighConfidence) {
+    console.log('[PASS] Source field parsed correctly for direction healing');
+    return true;
+  } else {
+    console.log('[FAIL] Source field parsing failed');
+    console.log(`  hasSource: ${hasSource}, hasCorrectType: ${hasCorrectType}, hasHighConfidence: ${hasHighConfidence}`);
+    return false;
+  }
+}
+
+// ==================== Diverse Sampling Test ====================
+
+async function testDiverseSamplingByDocument() {
+  console.log('\n=== Test Diverse Sampling: By Document ===');
+
+  const memories: MemorySnippet[] = [
+    { id: 1, content: 'Doc A content 1', created_at: '2024-01-01', document_id: 'doc_a' },
+    { id: 2, content: 'Doc A content 2', created_at: '2024-01-02', document_id: 'doc_a' },
+    { id: 3, content: 'Doc A content 3', created_at: '2024-01-03', document_id: 'doc_a' },
+    { id: 4, content: 'Doc B content 1', created_at: '2024-01-04', document_id: 'doc_b' },
+    { id: 5, content: 'Doc C content 1', created_at: '2024-01-05', document_id: 'doc_c' },
+  ];
+
+  const sampled = diverseSample(memories, 3);
+
+  console.log('Sampled memories:', sampled.map(m => ({ id: m.id, document_id: m.document_id })));
+
+  // Should select from different documents (doc_a, doc_b, doc_c)
+  const uniqueDocs = new Set(sampled.map(m => m.document_id));
+
+  if (uniqueDocs.size === 3 && sampled.length === 3) {
+    console.log('[PASS] Diverse sampling selected from 3 different documents');
+    return true;
+  } else {
+    console.log(`[FAIL] Diverse sampling failed: ${uniqueDocs.size} unique docs, ${sampled.length} samples`);
+    return false;
+  }
+}
+
+async function testDiverseSamplingHeadMiddleTail() {
+  console.log('\n=== Test Diverse Sampling: Head/Middle/Tail ===');
+
+  // All memories from same document - should use head/middle/tail
+  const memories: MemorySnippet[] = [
+    { id: 1, content: 'Content 1', created_at: '2024-01-01', document_id: 'doc_same' },
+    { id: 2, content: 'Content 2', created_at: '2024-01-02', document_id: 'doc_same' },
+    { id: 3, content: 'Content 3', created_at: '2024-01-03', document_id: 'doc_same' },
+    { id: 4, content: 'Content 4', created_at: '2024-01-04', document_id: 'doc_same' },
+    { id: 5, content: 'Content 5', created_at: '2024-01-05', document_id: 'doc_same' },
+    { id: 6, content: 'Content 6', created_at: '2024-01-06', document_id: 'doc_same' },
+    { id: 7, content: 'Content 7', created_at: '2024-01-07', document_id: 'doc_same' },
+    { id: 8, content: 'Content 8', created_at: '2024-01-08', document_id: 'doc_same' },
+    { id: 9, content: 'Content 9', created_at: '2024-01-09', document_id: 'doc_same' },
+  ];
+
+  const sampled = diverseSample(memories, 3);
+
+  console.log('Sampled memories (head/middle/tail):', sampled.map(m => m.id));
+
+  // Should select head (1), middle (~5), tail (9)
+  const hasHead = sampled.some(m => m.id === 1);
+  const hasMiddle = sampled.some(m => m.id !== undefined && m.id >= 4 && m.id <= 6);
+  const hasTail = sampled.some(m => m.id === 9);
+
+  if (hasHead && hasMiddle && hasTail && sampled.length === 3) {
+    console.log('[PASS] Diverse sampling selected head/middle/tail correctly');
+    return true;
+  } else {
+    console.log(`[FAIL] Diverse sampling failed: head=${hasHead}, middle=${hasMiddle}, tail=${hasTail}`);
+    return false;
+  }
+}
+
+async function testDiverseSamplingEdgeCases() {
+  console.log('\n=== Test Diverse Sampling: Edge Cases ===');
+
+  // Empty array
+  const emptySampled = diverseSample([], 3);
+  const emptyPass = emptySampled.length === 0;
+
+  // Less than target count
+  const fewMemories: MemorySnippet[] = [
+    { id: 1, content: 'Content 1', document_id: 'doc_a' },
+    { id: 2, content: 'Content 2', document_id: 'doc_b' },
+  ];
+  const fewSampled = diverseSample(fewMemories, 5);
+  const fewPass = fewSampled.length === 2;
+
+  // Single item
+  const singleMemory: MemorySnippet[] = [
+    { id: 1, content: 'Single content', document_id: 'doc_single' },
+  ];
+  const singleSampled = diverseSample(singleMemory, 3);
+  const singlePass = singleSampled.length === 1;
+
+  console.log(`Empty: ${emptyPass ? 'PASS' : 'FAIL'}, Few: ${fewPass ? 'PASS' : 'FAIL'}, Single: ${singlePass ? 'PASS' : 'FAIL'}`);
+
+  if (emptyPass && fewPass && singlePass) {
+    console.log('[PASS] All edge cases handled correctly');
+    return true;
+  } else {
+    console.log('[FAIL] Some edge cases failed');
+    return false;
+  }
+}
+
+// ==================== Response Parsing with Source Field ====================
+
+/**
+ * Parse classification response with source field support
+ */
+function parseClassificationResponse(llmResult: any, VALID_TYPES: string[]): {
+  relation_type: string;
+  confidence: number;
+  reasoning: string;
+  reverse_direction: boolean;
+  source?: string;
+} {
+  try {
+    let output = llmResult.content || llmResult.generated_text || '';
+
+    const jsonMatch = output.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      output = jsonMatch[0];
+    }
+
+    const parsed = JSON.parse(output);
+
+    let relationType = parsed.relation_type || 'related_to';
+    let confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
+    let reasoning = parsed.reasoning || '';
+    let reverseDirection = parsed.reverse_direction === true;
+    let source = parsed.source;
+
+    if (!VALID_TYPES.includes(relationType)) {
+      relationType = 'related_to';
+    }
+
+    confidence = Math.max(0, Math.min(1, confidence));
+
+    return { relation_type: relationType, confidence, reasoning, reverse_direction: reverseDirection, source };
+
+  } catch {
+    return {
+      relation_type: 'related_to',
+      confidence: 0.5,
+      reasoning: 'Parse failed, using default',
+      reverse_direction: false,
+      source: undefined
+    };
   }
 }
 

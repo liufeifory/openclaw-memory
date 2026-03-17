@@ -13,7 +13,7 @@
 
 import { SurrealDatabase, GRAPH_PROTECTION, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE } from './surrealdb-client.js';
 import { EntityExtractor, ExtractedEntity } from './entity-extractor.js';
-import { extractContextWindow } from './context-window.js';
+import { extractContextWindow, diverseSample } from './context-window.js';
 import * as os from 'os';
 
 /**
@@ -896,33 +896,47 @@ export class EntityIndexer {
 
   /**
    * Get memory snippets with context window
+   * Uses diverse sampling to ensure variety from different documents/time periods
    */
   private async getMemorySnippets(memoryIds: number[], entities: string[]): Promise<string[]> {
-    const snippets: string[] = [];
+    if (!this.db || memoryIds.length === 0) {
+      return [];
+    }
 
-    for (const memoryId of memoryIds) {
-      try {
-        if (!this.db) continue;
-        const result = await this.db.query(
-          `SELECT content FROM ${MEMORY_TABLE}:${memoryId}`
-        );
-        const memories = this.extractResultArray(result);
+    try {
+      // Query all memories with metadata for diverse sampling
+      const idsStr = memoryIds.map(id => `'${id}'`).join(', ');
+      const result = await this.db.query(
+        `SELECT content, created_at, document_id FROM ${MEMORY_TABLE} WHERE id IN [${idsStr}] ORDER BY created_at ASC`
+      );
 
-        if (memories.length > 0 && memories[0].content) {
-          const content = memories[0].content;
+      const memories = this.extractResultArray(result);
+
+      if (memories.length === 0) {
+        return [];
+      }
+
+      // Use diverse sampling to select memories from different documents/time periods
+      const sampledMemories = diverseSample(memories, 3);
+
+      const snippets: string[] = [];
+      for (const memory of sampledMemories) {
+        if (memory.content) {
           // Use context window extraction
-          const windows = extractContextWindow(content, entities, {
+          const windows = extractContextWindow(memory.content, entities, {
             windowSize: 100,
             maxSnippets: 1
           });
           snippets.push(...windows);
         }
-      } catch {
-        // Skip this memory
       }
-    }
 
-    return snippets.slice(0, 3);
+      return snippets.slice(0, 3);
+
+    } catch (error: any) {
+      console.error('[EntityIndexer] Failed to get memory snippets:', error.message);
+      return [];
+    }
   }
 
   /**
@@ -988,6 +1002,7 @@ JSON:`;
     confidence: number;
     reasoning: string;
     reverse_direction: boolean;
+    source?: string;  // New: source entity for direction healing
   } {
     const VALID_TYPES = [
       'causes', 'used_for', 'member_of', 'located_in',
@@ -1010,6 +1025,7 @@ JSON:`;
       let confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
       let reasoning = parsed.reasoning || '';
       let reverseDirection = parsed.reverse_direction === true;
+      let source = parsed.source;  // New: source entity name
 
       // Validate relation type
       if (!VALID_TYPES.includes(relationType)) {
@@ -1020,7 +1036,7 @@ JSON:`;
       // Normalize confidence
       confidence = Math.max(0, Math.min(1, confidence));
 
-      return { relation_type: relationType, confidence, reasoning, reverse_direction: reverseDirection };
+      return { relation_type: relationType, confidence, reasoning, reverse_direction: reverseDirection, source };
 
     } catch {
       // Default fallback
@@ -1029,14 +1045,15 @@ JSON:`;
         relation_type: 'related_to',
         confidence: 0.5,
         reasoning: 'Parse failed, using default',
-        reverse_direction: false
+        reverse_direction: false,
+        source: undefined
       };
     }
   }
 
   /**
    * Update relation with classification result
-   * Handles direction reversal if needed
+   * Handles direction reversal and source-based direction healing
    */
   private async updateRelationClassification(
     relation: any,
@@ -1045,6 +1062,7 @@ JSON:`;
       confidence: number;
       reasoning: string;
       reverse_direction: boolean;
+      source?: string;
     }
   ): Promise<void> {
     if (!this.db) {
@@ -1052,11 +1070,36 @@ JSON:`;
       return;
     }
 
-    const { relation_type, confidence, reasoning, reverse_direction } = classification;
+    const { relation_type, confidence, reasoning, reverse_direction, source } = classification;
 
-    if (reverse_direction) {
+    // Get current relation's "in" entity name for direction comparison
+    const currentInId = this.extractId(relation.in);
+    let needsDirectionCorrection = reverse_direction;
+
+    // New: Check if source field indicates different direction
+    if (source) {
+      // Get entity names to compare with source
+      const inEntity = await this.getEntityById(currentInId);
+      const outEntity = await this.getEntityById(this.extractId(relation.out));
+
+      // If source matches "out" entity, the direction should be reversed
+      // Example: source="Facebook" means Facebook -> created_by -> React
+      // But current edge is React -> Facebook, so we need to reverse
+      if (inEntity && outEntity) {
+        if (source.toLowerCase() === outEntity.name.toLowerCase()) {
+          needsDirectionCorrection = true;
+          console.log(`[EntityIndexer] Direction healing: source "${source}" matches out entity "${outEntity.name}", reversing direction`);
+        } else if (source.toLowerCase() === inEntity.name.toLowerCase()) {
+          // Source matches current "in", direction is correct
+          console.log(`[EntityIndexer] Direction healing: source "${source}" matches in entity "${inEntity.name}", keeping direction`);
+        }
+      }
+    }
+
+    if (needsDirectionCorrection) {
       // Delete old relation and create reverse
-      const deleteSql = `DELETE ${ENTITY_RELATION_TABLE}:${this.extractId(relation.id)}`;
+      const relationId = this.extractId(relation.id);
+      const deleteSql = `DELETE ${ENTITY_RELATION_TABLE}:${relationId}`;
       await this.db.query(deleteSql);
 
       const createSql = `
@@ -1068,12 +1111,13 @@ JSON:`;
           is_manual_refined = true,
           evidence_memory_ids = ${JSON.stringify(relation.evidence_memory_ids || [])},
           weight = ${relation.weight || 1.0},
+          source = ${source ? `'${source.replace(/'/g, "\\'")}'` : 'NULL'},
           updated_at = time::now()
       `;
 
       await this.db.query(createSql);
 
-      console.log(`[EntityIndexer] Reversed relation direction: ${relation_type}`);
+      console.log(`[EntityIndexer] Reversed relation direction: ${relation_type} (source: ${source || 'reverse_direction flag'})`);
     } else {
       // Update existing relation
       const updateSql = `
@@ -1083,6 +1127,7 @@ JSON:`;
           confidence = ${confidence},
           reasoning = '${reasoning.replace(/'/g, "\\'")}',
           is_manual_refined = true,
+          source = ${source ? `'${source.replace(/'/g, "\\'")}'` : 'NULL'},
           updated_at = time::now()
       `;
 

@@ -15,6 +15,16 @@ export interface ContextWindowOptions {
 }
 
 /**
+ * Memory item for diverse sampling
+ */
+export interface MemorySnippet {
+  id?: number;
+  content: string;
+  created_at?: string;
+  document_id?: string;
+}
+
+/**
  * Extract context windows around entity mentions
  *
  * @param content - Full memory content
@@ -113,4 +123,48 @@ export function extractContextWindow(
  */
 export function joinContextSnippets(snippets: string[], separator: string = ' | '): string {
   return snippets.join(separator);
+}
+
+/**
+ * Diverse sampling of memory snippets
+ * Ensures variety by:
+ * 1. Prioritizing different documents (by document_id)
+ * 2. Using "head, middle, tail" sampling if documents are insufficient
+ *
+ * @param memories - Array of memory snippets (should be pre-sorted by created_at)
+ * @param targetCount - Target number of samples (default: 3)
+ * @returns Diverse subset of memories
+ */
+export function diverseSample<T extends MemorySnippet>(
+  memories: T[],
+  targetCount: number = 3
+): T[] {
+  if (memories.length <= targetCount) {
+    return memories;
+  }
+
+  // Strategy 1: Deduplicate by document_id, prefer memories from different documents
+  const byDocument = new Map<string, T>();
+  for (const mem of memories) {
+    const docId = mem.document_id || `unknown_${mem.id || memories.indexOf(mem)}`;
+    if (!byDocument.has(docId)) {
+      byDocument.set(docId, mem);
+    }
+  }
+
+  if (byDocument.size >= targetCount) {
+    // Have enough different documents, return them
+    return Array.from(byDocument.values()).slice(0, targetCount);
+  }
+
+  // Strategy 2: If not enough documents, use "head, middle, tail" sampling
+  const result: T[] = [];
+  const step = Math.floor(memories.length / targetCount);
+
+  for (let i = 0; i < targetCount; i++) {
+    const index = Math.min(i * step, memories.length - 1);
+    result.push(memories[index]);
+  }
+
+  return result;
 }
