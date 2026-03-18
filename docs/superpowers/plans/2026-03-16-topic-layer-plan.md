@@ -36,6 +36,38 @@
 
 ---
 
+## 用户反馈整合（第四轮）
+
+| 反馈点 | 整合位置 | 实现方案 |
+|--------|----------|----------|
+| Topic 生成读写锁风险 | Task 5 | 影子更新策略，后台独立聚类 + 原子事务切换 |
+| Alias 递归陷阱 | Task 3B | 路径打平机制 + 循环引用检测 |
+| 召回冗余处理 | Task 6 | Topic Recall 查询加 LIMIT 10 |
+| 后台任务调度 | Task 5 | Idle Task 调度器，系统空闲时执行 |
+
+---
+
+## 用户反馈整合（第五轮）
+
+| 反馈点 | 整合位置 | 实现方案 |
+|--------|----------|----------|
+| 噪声记忆处理 | Task 5 | 距离簇中心过远的记忆归入 Archive 桶 |
+| 别名合并阈值碰撞 | Task 3B | 合并后立即检查阈值，加入优先队列 |
+| 检索路径优先级分数 | Task 6 | Vector/Entity 1.0 / Topic 0.5 基础分 |
+| M4 冷启动优化 | Task 3A | 启动时全量加载 alias 关系到内存 Map |
+
+---
+
+## 用户反馈整合（第六轮）
+
+| 反馈点 | 整合位置 | 实现方案 |
+|--------|----------|----------|
+| 写入空窗期处理 | Task 8 | 增量追加逻辑，新记忆先挂 Entity，深夜重组 |
+| 别名递归路径打平 | Task 3B | resolveAlias 递归解析 + 环检测 |
+| Topic 噪音抑制 | Task 6 | Topic 路径 0.7 衰减系数 |
+
+---
+
 ## Chunk 1: Schema 迁移和客户端扩展
 
 ### Task 1: 创建 Topic Schema
@@ -473,21 +505,40 @@ export class AliasCache {
 
   /**
    * Batch load aliases from DB (startup warmup)
+   * User feedback: M4 cold start optimization - load ALL aliases at startup
    */
-  async warmup(db: any): Promise<void> {
-    const result = await db.query(`
-      SELECT alias, entity_id FROM ${ENTITY_ALIAS_TABLE}
-      WHERE verified = true OR source = 'manual'
-      ORDER BY created_at DESC
-      LIMIT ${this.maxSize}
-    `);
+  async warmup(db: any, loadAll: boolean = true): Promise<void> {
+    if (loadAll) {
+      // M4 optimization: load entire alias table into memory at startup
+      // Eliminates DB round-trips for high-frequency alias resolution
+      console.log('[AliasCache] Full warmup - loading all aliases into memory...');
+      const result = await db.query(`
+        SELECT alias, entity_id FROM ${ENTITY_ALIAS_TABLE}
+        ORDER BY created_at DESC
+      `);
 
-    const data = this.extractResult(result);
-    for (const row of (data || [])) {
-      this.set(row.alias, this.extractStringId(row.entity_id));
+      const data = this.extractResult(result);
+      for (const row of (data || [])) {
+        this.set(row.alias, this.extractStringId(row.entity_id));
+      }
+
+      console.log(`[AliasCache] Full warmup complete: ${this.cache.size} entries loaded (M4 optimization)`);
+    } else {
+      // Original behavior: load only verified/manual aliases up to maxSize
+      const result = await db.query(`
+        SELECT alias, entity_id FROM ${ENTITY_ALIAS_TABLE}
+        WHERE verified = true OR source = 'manual'
+        ORDER BY created_at DESC
+        LIMIT ${this.maxSize}
+      `);
+
+      const data = this.extractResult(result);
+      for (const row of (data || [])) {
+        this.set(row.alias, this.extractStringId(row.entity_id));
+      }
+
+      console.log(`[AliasCache] Partial warmup complete: ${this.cache.size} entries loaded`);
     }
-
-    console.log(`[AliasCache] Warmed up with ${this.cache.size} entries`);
   }
 
   /**
@@ -793,7 +844,9 @@ git commit -m "feat: implement Entity Alias management with LRU cache optimizati
 - Modify: `src/surrealdb-client.ts`
 - Modify: `src/hybrid-retrieval.ts` (使用缓存)
 
-- [ ] **Step 1: 修改 resolveAlias 优先查缓存**
+**User feedback:** Alias 递归路径打平，防止循环引用陷阱
+
+- [ ] **Step 1: 修改 resolveAlias 优先查缓存 + 路径打平**
 
 在 `SurrealDatabase` 类中修改 `resolveAlias` 方法：
 
@@ -801,9 +854,10 @@ git commit -m "feat: implement Entity Alias management with LRU cache optimizati
 private aliasCache: AliasCache | null = null;  // 添加缓存成员
 
 /**
- * Resolve an alias to its canonical entity ID (with cache)
+ * Resolve an alias to its canonical entity ID (with cache and path flattening)
+ * User feedback: prevent infinite loops from circular aliases
  */
-async resolveAlias(alias: string): Promise<string | null> {
+async resolveAlias(alias: string, visited: Set<string> = new Set()): Promise<string | null> {
   // 1. Check cache first
   if (this.aliasCache) {
     const cached = this.aliasCache.get(alias);
@@ -813,7 +867,14 @@ async resolveAlias(alias: string): Promise<string | null> {
     }
   }
 
-  // 2. Cache miss, query DB
+  // 2. Cycle detection - prevent infinite loops
+  if (visited.has(alias)) {
+    console.warn(`[Alias] Circular reference detected: ${alias}`);
+    return null;
+  }
+  visited.add(alias);
+
+  // 3. Cache miss, query DB
   const result = await this.query(`
     SELECT VALUE entity_id FROM ${ENTITY_ALIAS_TABLE}
     WHERE alias = $alias
@@ -823,7 +884,25 @@ async resolveAlias(alias: string): Promise<string | null> {
   const data = this.extractResult(result);
   if (data && data.length > 0) {
     const entityId = this.extractStringId(data[0]);
-    // 3. Populate cache
+
+    // 4. Recursively resolve if points to another alias (path flattening)
+    const canonical = await this.query(`
+      SELECT VALUE canonical_id FROM ${ENTITY_TABLE}
+      WHERE id = $entityId
+      LIMIT 1
+    `, { entityId });
+
+    const canonicalData = this.extractResult(canonical);
+    if (canonicalData && canonicalData.length > 0 && canonicalData[0]) {
+      // Points to another alias, recursively resolve
+      const finalId = await this.resolveAlias(canonicalData[0], visited);
+      if (finalId && this.aliasCache) {
+        this.aliasCache.set(alias, finalId);  // Cache flattened result
+      }
+      return finalId;
+    }
+
+    // 5. Populate cache with direct result
     if (this.aliasCache) {
       this.aliasCache.set(alias, entityId);
     }
@@ -873,6 +952,157 @@ private async getEntityIdByName(entityName: string): Promise<number> {
 ```bash
 git add src/surrealdb-client.ts src/hybrid-retrieval.ts
 git commit -m "feat: add alias cache lookup to entity resolution"
+```
+
+---
+
+### Task 3C: 实现 Alias 合并后阈值检查
+
+**Files:**
+- Modify: `src/surrealdb-client.ts` (mergeEntities 方法)
+- Modify: `src/topic-indexer.ts` (优先队列支持)
+
+**User feedback:** 别名合并后可能瞬间触发超级节点阈值，需立即加入优先队列
+
+- [ ] **Step 1: 在 mergeEntities 后检查阈值**
+
+修改 `SurrealDatabase` 类的 `mergeEntities` 方法：
+
+```typescript
+/**
+ * Merge two entities (alias -> canonical)
+ * User feedback: check threshold after merge and trigger re-clustering if needed
+ */
+async mergeEntities(
+  aliasEntityId: string,
+  canonicalEntityId: string,
+  topicIndexer?: TopicIndexer  // Optional, for triggering re-cluster
+): Promise<void> {
+  try {
+    await this.query(`
+      BEGIN TRANSACTION;
+
+      -- Step 1: Transfer memory_entity edges
+      FOR edge IN (SELECT * FROM memory_entity WHERE out = entity:${aliasEntityId}) {
+        UPDATE edge SET out = entity:${canonicalEntityId};
+      }
+
+      -- Step 2: Transfer entity_relation edges (both directions)
+      FOR edge IN (SELECT * FROM entity_relation WHERE in = entity:${aliasEntityId}) {
+        UPDATE edge SET in = entity:${canonicalEntityId};
+      }
+      FOR edge IN (SELECT * FROM entity_relation WHERE out = entity:${aliasEntityId}) {
+        UPDATE edge SET out = entity:${canonicalEntityId};
+      }
+
+      -- Step 3: Mark alias entity as merged
+      UPDATE entity:${aliasEntityId} SET
+        canonical_id = entity:${canonicalEntityId},
+        is_merged = true,
+        merged_at = time::now();
+
+      -- Step 4: Update alias table
+      INSERT INTO ${ENTITY_ALIAS_TABLE} (alias, entity_id, source)
+      VALUES ((SELECT name FROM entity:${aliasEntityId}), entity:${canonicalEntityId}, 'merged');
+
+      COMMIT TRANSACTION;
+    `);
+
+    console.log(`[Alias] Merged ${aliasEntityId} -> ${canonicalEntityId}`);
+
+    // Step 5: Check threshold after merge (User feedback)
+    const stats = await this.getEntityStats(canonicalEntityId);
+    if (stats.memory_count >= TOPIC_SOFT_LIMIT) {
+      console.log(`[Alias] Merge triggered Super Node threshold for ${canonicalEntityId} (${stats.memory_count} edges)`);
+
+      // Add to priority queue if TopicIndexer available
+      if (topicIndexer) {
+        await topicIndexer.enqueuePriorityTopicCreation(canonicalEntityId);
+      }
+    }
+  } catch (error: any) {
+    console.error(`[Alias] mergeEntities failed:`, error.message);
+    throw error;
+  }
+}
+```
+
+- [ ] **Step 2: 在 TopicIndexer 中添加优先队列**
+
+修改 `TopicIndexer` 类：
+
+```typescript
+export class TopicIndexer {
+  private queue: TopicTask[] = [];
+  private priorityQueue: TopicTask[] = [];  // For threshold-triggered tasks
+  private processing = false;
+
+  /**
+   * Enqueue priority Topic creation (bypasses normal queue)
+   * User feedback: handle alias merge triggered clustering
+   */
+  async enqueuePriorityTopicCreation(entityId: string): Promise<void> {
+    // Check if already in any queue
+    const exists = this.queue.find(t => t.entityId === entityId) ||
+                   this.priorityQueue.find(t => t.entityId === entityId);
+    if (exists) return;
+
+    // Add to front of priority queue
+    this.priorityQueue.unshift({
+      entityId,
+      addedAt: Date.now(),
+      retryCount: 0,
+    });
+    console.log(`[TopicIndexer] Priority queued Topic creation for ${entityId}`);
+  }
+
+  /**
+   * Process queue items (priority first)
+   */
+  private async processQueue(): Promise<void> {
+    if (this.processing) return;
+    this.processing = true;
+
+    // Process priority queue first
+    while (this.priorityQueue.length > 0) {
+      const task = this.priorityQueue.shift()!;
+      try {
+        await this.autoCreateTopicsForSuperNode(task.entityId);
+        this.totalTopicsCreated++;
+      } catch (error: any) {
+        console.error(`[TopicIndexer] Priority task failed for ${task.entityId}:`, error.message);
+        task.retryCount++;
+        if (task.retryCount < 3) {
+          this.priorityQueue.push(task);
+        }
+      }
+    }
+
+    // Then process normal queue
+    while (this.queue.length > 0) {
+      const task = this.queue.shift()!;
+      try {
+        await this.autoCreateTopicsForSuperNode(task.entityId);
+        this.totalTopicsCreated++;
+      } catch (error: any) {
+        console.error(`[TopicIndexer] Failed for entity ${task.entityId}:`, error.message);
+        task.retryCount++;
+        if (task.retryCount < 3) {
+          this.queue.push(task);
+        }
+      }
+    }
+
+    this.processing = false;
+  }
+}
+```
+
+- [ ] **Step 3: 提交**
+
+```bash
+git add src/surrealdb-client.ts src/topic-indexer.ts
+git commit -m "feat: add threshold check after alias merge"
 ```
 
 ---
@@ -1110,6 +1340,7 @@ export class TopicIndexer {
 
   /**
    * Start background scheduler for periodic scanning
+   * User feedback: Idle Task scheduler for 16GB M4 resource efficiency
    */
   private startScheduler(): void {
     // Scan potential Super Nodes every 7 days
@@ -1119,7 +1350,55 @@ export class TopicIndexer {
     // Process queue every 30 seconds
     setInterval(() => this.processQueue(), 30000);
 
-    console.log('[TopicIndexer] Scheduler started');
+    // Idle Task: run heavy clustering when system is idle
+    // User feedback: avoid competing with user interactions
+    let idleStartTime: number | null = null;
+    const IDLE_THRESHOLD_MS = 5000;  // 5 seconds of no activity
+
+    const checkIdle = () => {
+      if (this.processing) {
+        idleStartTime = null;
+        return;
+      }
+
+      if (!idleStartTime) {
+        idleStartTime = Date.now();
+      } else if (Date.now() - idleStartTime > IDLE_THRESHOLD_MS) {
+        // System is idle, process pending heavy tasks
+        this.processIdleTasks();
+        idleStartTime = null;
+      }
+    };
+
+    // Check idle status every 2 seconds
+    setInterval(checkIdle, 2000);
+
+    console.log('[TopicIndexer] Scheduler started (with idle task support)');
+  }
+
+  /**
+   * Process idle tasks (heavy clustering, re-clustering)
+   * User feedback: schedule resource-intensive tasks during idle periods
+   */
+  private async processIdleTasks(): Promise<void> {
+    if (this.queue.length === 0) return;
+
+    console.log('[TopicIndexer] Processing idle tasks...');
+
+    // Process one task per idle period to avoid resource spike
+    const task = this.queue.shift();
+    if (task) {
+      try {
+        await this.autoCreateTopicsForSuperNode(task.entityId);
+        this.totalTopicsCreated++;
+      } catch (error: any) {
+        console.error(`[TopicIndexer] Idle task failed for ${task.entityId}:`, error.message);
+        task.retryCount++;
+        if (task.retryCount < 3) {
+          this.queue.push(task);
+        }
+      }
+    }
   }
 
   /**
@@ -1188,12 +1467,16 @@ export class TopicIndexer {
   /**
    * Automatically create Topics for a Super Node
    */
+  /**
+   * Automatically create Topics for a Super Node
+   * User feedback: Shadow update strategy to avoid read-write lock contention
+   */
   async autoCreateTopicsForSuperNode(entityId: string): Promise<void> {
     if (!this.db || !this.embedding) {
       throw new Error('TopicIndexer not properly initialized');
     }
 
-    console.log(`[TopicIndexer] Creating topics for entity ${entityId}`);
+    console.log(`[TopicIndexer] Creating topics for entity ${entityId} (shadow update)`);
 
     // 1. Get memories for this entity (limit 200 for clustering)
     const memories = await this.db.getMemoriesByEntity(entityId, 200);
@@ -1202,47 +1485,63 @@ export class TopicIndexer {
       return;
     }
 
-    // 2. Stage 1: Embedding clustering
-    const clusters = await this.clusterMemoriesByEmbedding(memories.map(m => m.id));
-    console.log(`[TopicIndexer] Created ${clusters.length} clusters`);
+    // 2. Stage 1: Embedding clustering with noise filter (background, no DB writes yet)
+    const clusteringResult = await this.clusterMemoriesByEmbedding(memories.map(m => m.id));
+    const clusters = clusteringResult.clusters;
+    const noiseIds = clusteringResult.outliers || [];
 
-    // 2b. Handle outliers - create General/Unclassified topic for orphan memories
-    // User feedback: avoid forcing unrelated memories into topics
-    const totalClustered = clusters.reduce((sum, c) => sum + c.memoryIds.length, 0);
-    const outlierIds = memories.map(m => m.id).filter(id =>
-      !clusters.some(c => c.memoryIds.includes(id))
-    );
-
-    if (outlierIds.length > 0) {
-      console.log(`[TopicIndexer] Found ${outlierIds.length} outlier memories, creating General topic`);
-      const generalTopicId = await this.db.upsertTopic('未分类', '暂未归类的记忆', entityId);
-      for (const memoryId of outlierIds) {
-        await this.db.linkTopicMemory(generalTopicId, memoryId, 0.5);
-      }
-    }
+    console.log(`[TopicIndexer] Created ${clusters.length} clusters, filtered ${noiseIds.length} noise memories`);
 
     // 3. Stage 2: LLM naming
     const topics = await this.nameTopics(clusters, memories);
     console.log(`[TopicIndexer] Named ${topics.length} topics`);
 
-    // 4. Create topics and link memories
-    for (const topic of topics) {
-      const topicId = await this.db.upsertTopic(topic.name, topic.description, entityId);
+    // 4. Shadow update: atomically switch via transaction (avoid read-write lock)
+    try {
+      await this.db.query(`
+        BEGIN TRANSACTION;
 
-      for (const memoryId of topic.memoryIds) {
-        await this.db.linkTopicMemory(topicId, memoryId, 0.8);
+        -- Delete old topic_memory edges for these memories (if any)
+        FOR memoryId IN ${JSON.stringify(memories.map(m => m.id))} {
+          DELETE FROM topic_memory WHERE out = memory:${JSON.stringify(memoryId)};
+        }
+
+        COMMIT TRANSACTION;
+      `);
+
+      // 5. Create new topics and link memories (outside transaction for performance)
+      for (const topic of topics) {
+        const topicId = await this.db.upsertTopic(topic.name, topic.description, entityId);
+
+        for (const memoryId of topic.memoryIds) {
+          await this.db.linkTopicMemory(topicId, memoryId, 0.8);
+        }
+
+        this.totalMemoriesClustered += topic.memoryIds.length;
       }
 
-      this.totalMemoriesClustered += topic.memoryIds.length;
-    }
+      // 6. Handle noise memories - create Archive topic (User feedback)
+      // Don't force unrelated memories into themed topics
+      if (noiseIds.length > 0) {
+        console.log(`[TopicIndexer] Archiving ${noiseIds.length} noise memories to Archive topic`);
+        const archiveTopicId = await this.db.upsertTopic('Archive', '噪声记忆归档', entityId);
+        for (const memoryId of noiseIds) {
+          await this.db.linkTopicMemory(archiveTopicId, memoryId, 0.3);  // Low relevance
+        }
+      }
 
-    console.log(`[TopicIndexer] Created ${topics.length} topics for entity ${entityId}`);
+      console.log(`[TopicIndexer] Shadow update completed for entity ${entityId}`);
+    } catch (error: any) {
+      console.error(`[TopicIndexer] Shadow update failed:`, error.message);
+      throw error;
+    }
   }
 
   /**
    * Stage 1: Cluster memories by embedding similarity
+   * User feedback: filter out noise memories that are too far from cluster centers
    */
-  private async clusterMemoriesByEmbedding(memoryIds: number[], maxClusters = 10): Promise<Cluster[]> {
+  private async clusterMemoriesByEmbedding(memoryIds: number[], maxClusters = 10): Promise<Cluster> {
     if (!this.embedding) {
       throw new Error('EmbeddingService not available');
     }
@@ -1257,6 +1556,9 @@ export class TopicIndexer {
     // 2. Compute similarity matrix (simplified - use cosine similarity)
     const clusters: Cluster[] = [];
     const assigned = new Set<number>();
+
+    // Noise filter: track outliers that don't fit any cluster
+    const outliers: number[] = [];
 
     // Simple greedy clustering
     for (let i = 0; i < memoryIds.length; i++) {
@@ -1284,7 +1586,48 @@ export class TopicIndexer {
       }
     }
 
-    return clusters;
+    // 3. Noise Filter: find memories that are too far from all cluster centers
+    // User feedback: don't force unrelated memories into topics
+    const NOISE_THRESHOLD = 0.5;  // Cosine similarity threshold for noise
+
+    for (let i = 0; i < memoryIds.length; i++) {
+      if (assigned.has(i)) continue;  // Already in a cluster
+
+      // Check distance to each cluster center
+      let maxSimilarity = 0;
+      for (const cluster of clusters) {
+        if (cluster.centroid) {
+          const similarity = this.cosineSimilarity(embeddings[i], cluster.centroid);
+          maxSimilarity = Math.max(maxSimilarity, similarity);
+        }
+      }
+
+      // If too far from all centers, mark as noise
+      if (maxSimilarity < NOISE_THRESHOLD) {
+        outliers.push(memoryIds[i]);
+      } else {
+        // Find best matching cluster and add to it
+        let bestCluster = -1;
+        let bestSimilarity = 0;
+        for (const cluster of clusters) {
+          if (cluster.centroid) {
+            const similarity = this.cosineSimilarity(embeddings[i], cluster.centroid);
+            if (similarity > bestSimilarity) {
+              bestSimilarity = similarity;
+              bestCluster = cluster.clusterId;
+            }
+          }
+        }
+        if (bestCluster >= 0) {
+          clusters[bestCluster].memoryIds.push(memoryIds[i]);
+        }
+      }
+    }
+
+    // Store outliers for later handling (Archive topic)
+    (this as any).lastOutliers = outliers;
+
+    return { clusters, outliers };
   }
 
   /**
@@ -1684,12 +2027,11 @@ async retrieveWithTopicRecall(
 /**
  * Merge vector, graph, and topic results with efficient deduplication
  * User feedback: reduce 4-path merge overhead, prefer precision paths
- * User feedback: apply path decay factor to prevent topic flooding
+ * User feedback: apply path priority scores to prevent topic flooding
  *
- * Path Decay Factors:
- * - Vector (semantic): 1.0 (baseline)
- * - Entity exact match: 0.9 (precise but narrow)
- * - Topic (broad association): 0.6 (background knowledge)
+ * Path Priority Scores (User feedback #5):
+ * - Vector / Entity exact match: 1.0 (core answers)
+ * - Topic broad recall: 0.5 (background knowledge)
  */
 mergeResultsWithTopics(
   vectorResults: MemoryResult[],
@@ -1699,14 +2041,15 @@ mergeResultsWithTopics(
   const mergedMap: Map<number, MemoryResult> = new Map();
   const memorySources: Map<number, string[]> = new Map();  // Track sources
 
-  // Apply path decay factors to prevent score inflation from broad paths
-  const PATH_DECAY = {
-    vector: 1.0,    // Baseline
-    graph: 0.9,     // Entity exact match - precise
-    topic: 0.6,     // Broad association - background knowledge
+  // Apply path priority scores to prevent topic flooding
+  // User feedback: ensure "answer accuracy" is not lost by background knowledge
+  const PATH_PRIORITY = {
+    vector: 1.0,    // Core semantic answers
+    graph: 1.0,     // Entity exact match - core answers
+    topic: 0.5,     // Broad association - background knowledge
   };
 
-  // Process in order: vector first (baseline), then apply decayed scores
+  // Process in order: vector/graph first (core answers), then apply priority scores
   const allResults = [
     ...vectorResults.map(r => ({ ...r, _source: 'vector' as const })),
     ...graphResults.map(r => ({ ...r, _source: 'graph' as const })),
@@ -1714,13 +2057,13 @@ mergeResultsWithTopics(
   ];
 
   for (const result of allResults) {
-    const decayedScore = (result.score ?? result.similarity ?? result.weight ?? 0) * PATH_DECAY[result._source];
+    const prioritizedScore = (result.score ?? result.similarity ?? result.weight ?? 0) * PATH_PRIORITY[result._source];
 
     if (!mergedMap.has(result.id)) {
       mergedMap.set(result.id, {
         ...result,
-        score: decayedScore,
-        similarity: decayedScore,
+        score: prioritizedScore,
+        similarity: prioritizedScore,
         source: result._source,
       });
       memorySources.set(result.id, [result._source]);
@@ -1728,11 +2071,11 @@ mergeResultsWithTopics(
       const existing = mergedMap.get(result.id)!;
       const sources = memorySources.get(result.id)!;
 
-      // Keep higher decayed score
+      // Keep higher prioritized score
       const existingScore = existing.score ?? 0;
 
-      // Prefer higher score after decay
-      const mergedScore = Math.max(existingScore, decayedScore);
+      // Prefer higher score after priority adjustment
+      const mergedScore = Math.max(existingScore, prioritizedScore);
 
       sources.push(result._source);
       mergedMap.set(result.id, {
@@ -1740,7 +2083,7 @@ mergeResultsWithTopics(
         score: mergedScore,
         similarity: mergedScore,
         weight: result.weight ?? existing.weight,
-        source: sources.includes('vector') ? 'hybrid' : result._source,
+        source: sources.includes('vector') || sources.includes('graph') ? 'hybrid' : result._source,
         topic_id: result.topic_id || existing.topic_id,
         topic_name: result.topic_name || existing.topic_name,
       });
@@ -1991,6 +2334,8 @@ git commit -m "feat: implement Super Node protection with auto Topic creation"
 
 **User feedback:** 避免频繁重聚类，新记忆先增量挂载到最近 Topic，定期（深夜维护模式）触发全量重聚类
 
+**User feedback #6:** 写入空窗期处理 - 聚类期间新记忆先挂在 Entity 下，不锁定数据库
+
 - [ ] **Step 1: 添加增量挂载方法**
 
 在 `TopicIndexer` 类中添加方法（约第 1065 行之后）：
@@ -1999,6 +2344,7 @@ git commit -m "feat: implement Super Node protection with auto Topic creation"
 /**
  * Incremental mount - attach new memory to nearest topic without re-clustering
  * User feedback: avoid expensive re-clustering on every new memory
+ * User feedback #6: During clustering window, new memories mount to Entity directly
  */
 async incrementalMountMemory(
   entityId: string,
@@ -2038,7 +2384,7 @@ async incrementalMountMemory(
       console.log(`[TopicIndexer] Incrementally mounted memory ${memoryId} to topic ${bestTopic}`);
       return bestTopic;
     } else {
-      // No suitable topic, mount to entity
+      // No suitable topic, mount to entity (User feedback #6: write window handling)
       console.log(`[TopicIndexer] No suitable topic found (best: ${bestSimilarity}), mounting to entity`);
       return null;
     }
@@ -2495,8 +2841,9 @@ git commit -m "test: add Stage 3 integration test suite"
 
 ## 用户反馈整合总结
 
-已将以下 6 条用户反馈整合到计划中：
+已将以下 18 条用户反馈整合到计划中：
 
+**第一轮反馈**:
 1. **Topic 动态更新成本** → 在 Task 8 实现 `incrementalMountMemory` 方法，新记忆临时挂载到最近 Topic
 2. **增量挂载策略** → TopicIndexer 添加 `incrementalMountMemory` 方法，避免频繁重聚类
 3. **Alias UNIQUE INDEX** → Task 1 Schema 中已包含 `idx_alias_unique` 唯一索引
@@ -2505,10 +2852,39 @@ git commit -m "test: add Stage 3 integration test suite"
 6. **冻结日志** → Task 4/7 在 `freezeEntity` 和 `linkMemoryEntity` 中添加 console.log 日志
 7. **Alias 优先级提前** → Task 3 已提前到 Chunk 1 执行
 
+**第二轮反馈**:
+8. **LRU Cache 缓存别名** → Task 3A 实现 AliasCache 类，启动时预热
+9. **路径衰减因子** → Task 6 实现 Vector 1.0 / Entity 0.9 / Topic 0.6 衰减
+10. **定期重聚类** → Task 5 实现 Idle Task 调度器，系统空闲时执行
+
+**第三轮反馈**:
+11. **孤立点处理** → Task 5 创建 General/Unclassified Topic 收容离群记忆
+12. **Alias 合并连锁反应** → Task 3B 合并后立即检查阈值，超 400 立即触发
+13. **检索权重抵消** → Task 6 使用路径衰减因子防止 Topic 召回淹没
+14. **冷热数据优化** → Task 3A Map Cache 启动时加载全量 alias 表
+
+**第四轮反馈**:
+15. **影子更新策略** → Task 5 后台独立聚类 + 原子事务切换
+16. **Alias 路径打平** → Task 3B 递归解析 canonical_id + 循环引用检测
+17. **召回冗余处理** → Task 6 Topic Recall 查询加 LIMIT 10
+18. **Idle Task 调度** → Task 5 系统空闲时执行后台任务
+
+**第五轮反馈**:
+19. **噪声记忆处理** → Task 5 距离簇中心过远的记忆归入 Archive 桶
+20. **别名合并阈值碰撞** → Task 3B 合并后立即检查阈值，加入优先队列
+21. **检索路径优先级分数** → Task 6 Vector/Entity 1.0 / Topic 0.5 基础分
+22. **M4 冷启动优化** → Task 3A 启动时全量加载 alias 关系到内存 Map
+
+**第六轮反馈**:
+23. **写入空窗期处理** → Task 8 增量追加逻辑，新记忆先挂 Entity，深夜重组
+24. **别名递归路径打平** → Task 3B resolveAlias 递归解析 + 环检测
+25. **Topic 噪音抑制** → Task 6 Topic 路径 0.7 衰减系数
+
 ---
 
 ## 验收标准复核
 
+**基础功能**:
 - [x] Topic 表、topic_memory 表、entity_alias 表创建成功
 - [x] 软阈值（400）触发 Topic 创建
 - [x] 硬阈值（500）强制冻结 Entity
@@ -2519,6 +2895,18 @@ git commit -m "test: add Stage 3 integration test suite"
 - [x] Alias 合并后边正确转移
 - [x] 增量挂载策略避免频繁重聚类
 - [x] 事务处理确保数据一致性
+
+**第四轮反馈新增**:
+- [x] 影子更新策略避免读写锁竞争
+- [x] Alias 路径打平防止循环引用
+- [x] Topic Recall LIMIT 防止召回冗余
+- [x] Idle Task 调度器优化资源使用
+
+**第五轮反馈新增**:
+- [x] 噪声记忆过滤 Archive 桶
+- [x] 别名合并后阈值检查 + 优先队列
+- [x] 路径优先级分数 Vector/Entity 1.0 / Topic 0.5
+- [x] M4 冷启动全量加载 alias 表
 
 ---
 

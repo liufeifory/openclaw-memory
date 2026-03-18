@@ -327,7 +327,7 @@ export class EntityIndexer {
         }
 
         const aliasEntity = aliasData[0];
-        const aliasId = this.extractId(aliasEntity.id);
+        const aliasId = this.extractStringId(aliasEntity.id);
 
         // Skip if alias already has canonical_id (already merged)
         if (aliasEntity.canonical_id) {
@@ -349,9 +349,9 @@ export class EntityIndexer {
           }
         }
 
-        let canonicalId: number;
+        let canonicalId: string;
         if (canonicalData.length > 0) {
-          canonicalId = this.extractId(canonicalData[0].id);
+          canonicalId = this.extractStringId(canonicalData[0].id);
         } else {
           // Create canonical entity
           canonicalId = await this.db.upsertEntity(canonical, 'merged');
@@ -361,8 +361,9 @@ export class EntityIndexer {
         await this.transferEntityLinks(aliasId, canonicalId);
 
         // Mark alias as merged (set canonical_id, don't delete)
+        const canonicalRecordId = `entity:${canonicalId}`;
         await this.db.query(
-          `UPDATE entity:${aliasId} SET canonical_id = ${canonicalId}, is_active = false`
+          `UPDATE entity:${aliasId} SET canonical_id = '${canonicalRecordId}', is_active = false`
         );
 
         mergedCount++;
@@ -381,12 +382,12 @@ export class EntityIndexer {
   /**
    * Transfer links from one entity to another
    */
-  private async transferEntityLinks(fromEntityId: number, toEntityId: number): Promise<void> {
+  private async transferEntityLinks(fromEntityId: string, toEntityId: string): Promise<void> {
     if (!this.db) return;
 
     try {
       // Update memory_entity edges to point to new entity
-      const sql = `UPDATE memory_entity SET entity = entity:${toEntityId} WHERE entity = entity:${fromEntityId}`;
+      const sql = `UPDATE memory_entity SET entity = '${toEntityId}' WHERE entity = '${fromEntityId}'`;
       await this.db.query(sql);
     } catch (error: any) {
       console.error('[EntityIndexer] transferEntityLinks failed:', error.message);
@@ -759,6 +760,23 @@ export class EntityIndexer {
       return this.extractId(id.id);
     }
     return 0;
+  }
+
+  /**
+   * Utility: extract string ID from various ID formats
+   */
+  private extractStringId(id: any): string {
+    if (typeof id === 'string') {
+      const parts = id.split(':');
+      return parts[parts.length - 1];
+    }
+    if (typeof id === 'number') {
+      return String(id);
+    }
+    if (id && typeof id === 'object' && id.id !== undefined) {
+      return this.extractStringId(id.id);
+    }
+    return String(id);
   }
 
   // ==================== Stage 2: LLM Relation Classification ====================

@@ -114,6 +114,7 @@ async function testDataStructures() {
         stats: {
             vectorCount: 5,
             graphCount: 3,
+            topicCount: 0,
             mergedCount: 7,
             finalCount: 5,
             avgSimilarity: 0.82,

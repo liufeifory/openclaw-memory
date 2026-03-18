@@ -237,7 +237,7 @@ export class EntityIndexer {
                     continue; // Alias entity not found
                 }
                 const aliasEntity = aliasData[0];
-                const aliasId = this.extractId(aliasEntity.id);
+                const aliasId = this.extractStringId(aliasEntity.id);
                 // Skip if alias already has canonical_id (already merged)
                 if (aliasEntity.canonical_id) {
                     console.log(`[EntityIndexer] Alias "${alias}" already merged to canonical_id ${aliasEntity.canonical_id}, skipping`);
@@ -256,7 +256,7 @@ export class EntityIndexer {
                 }
                 let canonicalId;
                 if (canonicalData.length > 0) {
-                    canonicalId = this.extractId(canonicalData[0].id);
+                    canonicalId = this.extractStringId(canonicalData[0].id);
                 }
                 else {
                     // Create canonical entity
@@ -265,7 +265,8 @@ export class EntityIndexer {
                 // Transfer links from alias to canonical
                 await this.transferEntityLinks(aliasId, canonicalId);
                 // Mark alias as merged (set canonical_id, don't delete)
-                await this.db.query(`UPDATE entity:${aliasId} SET canonical_id = ${canonicalId}, is_active = false`);
+                const canonicalRecordId = `entity:${canonicalId}`;
+                await this.db.query(`UPDATE entity:${aliasId} SET canonical_id = '${canonicalRecordId}', is_active = false`);
                 mergedCount++;
                 this.totalMerged += mergedCount;
                 console.log(`[EntityIndexer] Merged alias "${alias}" -> "${canonical}" (canonical_id: ${canonicalId})`);
@@ -285,7 +286,7 @@ export class EntityIndexer {
             return;
         try {
             // Update memory_entity edges to point to new entity
-            const sql = `UPDATE memory_entity SET entity = entity:${toEntityId} WHERE entity = entity:${fromEntityId}`;
+            const sql = `UPDATE memory_entity SET entity = '${toEntityId}' WHERE entity = '${fromEntityId}'`;
             await this.db.query(sql);
         }
         catch (error) {
@@ -600,6 +601,22 @@ export class EntityIndexer {
             return this.extractId(id.id);
         }
         return 0;
+    }
+    /**
+     * Utility: extract string ID from various ID formats
+     */
+    extractStringId(id) {
+        if (typeof id === 'string') {
+            const parts = id.split(':');
+            return parts[parts.length - 1];
+        }
+        if (typeof id === 'number') {
+            return String(id);
+        }
+        if (id && typeof id === 'object' && id.id !== undefined) {
+            return this.extractStringId(id.id);
+        }
+        return String(id);
     }
     // ==================== Stage 2: LLM Relation Classification ====================
     relationClassifierIntervalMs = 6 * 60 * 60 * 1000; // 6 hours

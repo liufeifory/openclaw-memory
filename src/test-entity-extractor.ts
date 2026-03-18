@@ -97,27 +97,27 @@ async function testLayer2_1BFilter() {
   }
 }
 
-async function testLayer3_8BRefine() {
-  console.log('\n=== Test Layer 3: 8B Model Refine ===');
+async function testLayer3_7BRefine() {
+  console.log('\n=== Test Layer 3: 7B Model Refine ===');
 
-  const extractor = new EntityExtractor('http://localhost:8081', 'http://localhost:8082');
+  const extractor = new EntityExtractor('http://localhost:8081', 'http://localhost:8083');
 
   const text = 'The user prefers using VSCode with the Prettier extension for formatting TypeScript code.';
 
   try {
-    const entities = await extractor.layer3_8BRefine(text);
-    console.log('8B Refine results:', entities);
+    const entities = await extractor.layer3_7BRefine(text);
+    console.log('7B Refine results:', entities);
 
     // Should return some entities
     if (Array.isArray(entities)) {
-      console.log(`[PASS] Layer 3 8B refine returned ${entities.length} entities`);
+      console.log(`[PASS] Layer 3 7B refine returned ${entities.length} entities`);
       return true;
     } else {
-      console.log('[FAIL] Layer 3 8B refine did not return an array');
+      console.log('[FAIL] Layer 3 7B refine did not return an array');
       return false;
     }
   } catch (error: any) {
-    console.log(`[INFO] Layer 3 8B refine test skipped (LLM not available): ${error.message}`);
+    console.log(`[INFO] Layer 3 7B refine test skipped (LLM not available): ${error.message}`);
     return true;  // Don't fail test if LLM is unavailable
   }
 }
@@ -158,7 +158,7 @@ async function testMiniBatchBuffer() {
 async function testExtractFullPipeline() {
   console.log('\n=== Test Full Extract Pipeline ===');
 
-  const extractor = new EntityExtractor('http://localhost:8081', 'http://localhost:8082');
+  const extractor = new EntityExtractor('http://localhost:8081', 'http://localhost:8083');
 
   const text = `
     I've been working with TypeScript and JavaScript for years.
@@ -222,7 +222,7 @@ async function runAllTests() {
   results.push(await testMiniBatchBuffer());
   results.push(await testKnownEntityCache());
   results.push(await testLayer2_1BFilter());
-  results.push(await testLayer3_8BRefine());
+  results.push(await testLayer3_7BRefine());
   results.push(await testExtractFullPipeline());
 
   console.log('\n' + '=' .repeat(50));

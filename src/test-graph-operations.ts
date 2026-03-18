@@ -99,7 +99,7 @@ async function test() {
 
     // 5. Test getEntityStats
     console.log('\n5. Testing getEntityStats...');
-    const stats = await db.getEntityStats();
+    const stats = await db.getGlobalEntityStats();
     console.log('   Entity stats:', stats);
     if (stats.total_entities < 3) {
       throw new Error('getEntityStats should report at least 3 entities');

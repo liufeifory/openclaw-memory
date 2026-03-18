@@ -50,6 +50,10 @@ export declare class MemoryManager {
      */
     initialize(): Promise<MigrationResult>;
     /**
+     * Load known entities from database into EntityExtractor cache
+     */
+    private loadKnownEntitiesToCache;
+    /**
      * Start idle clustering worker - runs semantic clustering during idle time.
      */
     private startIdleClusteringWorker;

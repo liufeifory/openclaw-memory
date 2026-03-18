@@ -140,7 +140,7 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${ENTITY_TABLE} TYPE string DEFAULT time::now();
       DEFINE FIELD IF NOT EXISTS is_active ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT true;
       DEFINE FIELD IF NOT EXISTS is_frozen ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT false;
-      DEFINE FIELD IF NOT EXISTS canonical_id ON TABLE ${ENTITY_TABLE} TYPE option<int>;
+      DEFINE FIELD IF NOT EXISTS canonical_id ON TABLE ${ENTITY_TABLE} TYPE option<string>;
       DEFINE FIELD IF NOT EXISTS is_merged ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT false;
     `);
         console.log('[SurrealDB] Entity table defined with graph protection fields');
@@ -255,7 +255,7 @@ export class SurrealDatabase {
       DEFINE TABLE IF NOT EXISTS ${TOPIC_TABLE} SCHEMAFULL;
       DEFINE FIELD IF NOT EXISTS name ON TABLE ${TOPIC_TABLE} TYPE string;
       DEFINE FIELD IF NOT EXISTS description ON TABLE ${TOPIC_TABLE} TYPE option<string>;
-      DEFINE FIELD IF NOT EXISTS parent_entity_id ON TABLE ${TOPIC_TABLE} TYPE option<int>;
+      DEFINE FIELD IF NOT EXISTS parent_entity_id ON TABLE ${TOPIC_TABLE} TYPE option<string>;
       DEFINE FIELD IF NOT EXISTS memory_count ON TABLE ${TOPIC_TABLE} TYPE int DEFAULT 0;
       DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${TOPIC_TABLE} TYPE datetime DEFAULT time::now();
       DEFINE FIELD IF NOT EXISTS updated_at ON TABLE ${TOPIC_TABLE} TYPE datetime;
@@ -316,7 +316,7 @@ export class SurrealDatabase {
         await this.query(`
       DEFINE TABLE IF NOT EXISTS ${ENTITY_ALIAS_TABLE} SCHEMAFULL;
       DEFINE FIELD IF NOT EXISTS alias ON TABLE ${ENTITY_ALIAS_TABLE} TYPE string;
-      DEFINE FIELD IF NOT EXISTS entity_id ON TABLE ${ENTITY_ALIAS_TABLE} TYPE int;
+      DEFINE FIELD IF NOT EXISTS entity_id ON TABLE ${ENTITY_ALIAS_TABLE} TYPE string;
       DEFINE FIELD IF NOT EXISTS verified ON TABLE ${ENTITY_ALIAS_TABLE} TYPE bool DEFAULT false;
       DEFINE FIELD IF NOT EXISTS source ON TABLE ${ENTITY_ALIAS_TABLE} TYPE string DEFAULT 'manual';
       DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${ENTITY_ALIAS_TABLE} TYPE datetime DEFAULT time::now();
@@ -349,7 +349,7 @@ export class SurrealDatabase {
         }
         // Add canonical_id field to entity table (if not exists)
         await this.query(`
-      DEFINE FIELD IF NOT EXISTS canonical_id ON TABLE ${ENTITY_TABLE} TYPE option<int>;
+      DEFINE FIELD IF NOT EXISTS canonical_id ON TABLE ${ENTITY_TABLE} TYPE option<string>;
       DEFINE FIELD IF NOT EXISTS is_merged ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT false;
       DEFINE FIELD IF NOT EXISTS merged_at ON TABLE ${ENTITY_TABLE} TYPE option<datetime>;
     `);
@@ -770,6 +770,13 @@ export class SurrealDatabase {
         }
         return String(record?.id || 0);
     }
+    /**
+     * Extract numeric ID from Record ID string (e.g., 'entity:123' -> 123)
+     */
+    extractIdFromRecordId(recordId) {
+        const parts = recordId.split(':');
+        return parseInt(parts[parts.length - 1], 10);
+    }
     toPayload(record) {
         return {
             type: record.type || 'episodic',
@@ -810,7 +817,7 @@ export class SurrealDatabase {
         }
         if (data && data.length > 0) {
             // Entity exists, update mention_count and return ID
-            const existingId = this.extractIdFromRecord(data[0]);
+            const existingId = this.extractStringIdFromRecord(data[0]);
             await this.client.query(`UPDATE ${ENTITY_TABLE}:${existingId} SET mention_count = mention_count + 1, last_accessed = $now, last_mentioned_at = $now`, { now });
             return existingId;
         }
@@ -845,7 +852,7 @@ export class SurrealDatabase {
                 }
             }
             if (createData && createData.length > 0) {
-                return this.extractIdFromRecord(createData[0]);
+                return this.extractStringIdFromRecord(createData[0]);
             }
             throw new Error('[SurrealDB] Failed to get entity ID after create');
         }
@@ -862,6 +869,16 @@ export class SurrealDatabase {
     ) {
         if (!this.client) {
             throw new Error('[SurrealDB] Client not connected');
+        }
+        // Convert entityId to string Record ID if needed
+        let entityRecordId;
+        if (typeof entityId === 'string') {
+            entityRecordId = entityId.includes(':') ? entityId : `${ENTITY_TABLE}:${entityId}`;
+            // Extract numeric ID for frozen check query
+            entityId = this.extractIdFromRecordId(entityRecordId);
+        }
+        else {
+            entityRecordId = `${ENTITY_TABLE}:${entityId}`;
         }
         // Check if entity is frozen (Super Node protection)
         const entityCheck = await this.client.query(`SELECT is_frozen FROM ${ENTITY_TABLE}:${entityId}`, {});
@@ -880,7 +897,6 @@ export class SurrealDatabase {
         }
         const now = new Date().toISOString();
         const memoryRecordId = `${MEMORY_TABLE}:${memoryId}`;
-        const entityRecordId = `${ENTITY_TABLE}:${entityId}`;
         try {
             // Use INSERT to create the edge (alternative to RELATE for SurrealDB 2.x)
             const sql = `
@@ -905,8 +921,10 @@ export class SurrealDatabase {
                 weight: relevanceScore,
                 created_at: now,
             });
+            // Extract numeric ID for entity's relation_count update
+            const numericEntityId = this.extractIdFromRecordId(entityRecordId);
             // Increment entity's relation_count
-            await this.client.query(`UPDATE ${ENTITY_TABLE}:${entityId} SET relation_count += 1`, {});
+            await this.client.query(`UPDATE ${ENTITY_TABLE}:${numericEntityId} SET relation_count += 1`, {});
             // Check Super Node threshold after linking (User feedback)
             const stats = await this.getEntityStats(entityId);
             if (stats.memory_count >= TOPIC_SOFT_LIMIT) {
@@ -932,7 +950,10 @@ export class SurrealDatabase {
         if (!this.client) {
             throw new Error('[SurrealDB] Client not connected');
         }
-        const entityRecordId = `${ENTITY_TABLE}:${entityId}`;
+        // Convert entityId to string Record ID
+        const entityRecordId = typeof entityId === 'string'
+            ? (entityId.includes(':') ? entityId : `${ENTITY_TABLE}:${entityId}`)
+            : `${ENTITY_TABLE}:${entityId}`;
         // Query through memory_entity edge table to find associated memories
         // SurrealDB doesn't support table aliases, use subquery instead
         const sql = `
@@ -1079,11 +1100,27 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
-            const result = await this.client.query(`SELECT * FROM memory_entity WHERE out = entity:${entityId} ORDER BY relevance DESC LIMIT ${limit}`, {});
+            // Convert entityId to proper record string format
+            let entityRecordId;
+            if (typeof entityId === 'string') {
+                // If it's already a record ID (contains ':'), use it directly
+                if (entityId.includes(':')) {
+                    entityRecordId = entityId;
+                }
+                else {
+                    // Otherwise, construct the record ID
+                    entityRecordId = `entity:${entityId}`;
+                }
+            }
+            else {
+                entityRecordId = `entity:${entityId}`;
+            }
+            // Query using 'entity' field (not 'out') since memory_entity uses named fields
+            const result = await this.client.query(`SELECT * FROM memory_entity WHERE entity = ${entityRecordId} ORDER BY weight DESC LIMIT ${limit}`, {});
             const data = this.extractResult(result);
             return data.map((r) => ({
                 id: this.extractIdFromRecord(r),
-                entityId: this.extractId(r.in),
+                entityId: this.extractId(r.entity),
                 relevance: r.relevance || 0,
                 created_at: r.created_at ? String(r.created_at) : undefined,
             }));
@@ -1205,17 +1242,15 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
-            // Extract numeric ID if parentEntityId is a record string
+            // Keep parentEntityId as string (Record ID) for Schema compatibility
             let parentId = null;
             if (parentEntityId) {
                 if (typeof parentEntityId === 'string') {
-                    const parts = parentEntityId.split(':');
-                    parentId = parseInt(parts[parts.length - 1], 10);
-                    if (isNaN(parentId))
-                        parentId = null;
+                    parentId = parentEntityId;
                 }
                 else if (typeof parentEntityId === 'number') {
-                    parentId = parentEntityId;
+                    // Convert numeric ID to record string
+                    parentId = `entity:${parentEntityId}`;
                 }
             }
             const sql = `
@@ -1223,6 +1258,7 @@ export class SurrealDatabase {
           name = $name,
           description = $description,
           parent_entity_id = $parent_entity_id,
+          last_accessed_at = time::now(),
           updated_at = time::now()
       `;
             await this.client.query(sql, {
@@ -1275,15 +1311,15 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
-            let numericId;
+            // Extract bare entity ID to match what upsertTopic stores in parent_entity_id
+            let bareEntityId;
             if (typeof entityId === 'string') {
-                const parts = entityId.split(':');
-                numericId = parseInt(parts[parts.length - 1], 10);
+                bareEntityId = entityId.includes(':') ? entityId.split(':')[1] : entityId;
             }
             else {
-                numericId = entityId;
+                bareEntityId = String(entityId);
             }
-            const result = await this.client.query(`SELECT * FROM ${TOPIC_TABLE} WHERE parent_entity_id = $entityId ORDER BY created_at DESC`, { entity_id: numericId });
+            const result = await this.client.query(`SELECT id, name, description, parent_entity_id, created_at FROM ${TOPIC_TABLE} WHERE parent_entity_id = $parent_entity_id ORDER BY created_at DESC`, { parent_entity_id: bareEntityId });
             const data = this.extractResult(result);
             return data || [];
         }
@@ -1301,7 +1337,11 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
-            await this.client.query(`DELETE ${TOPIC_TABLE}:${topicId}`, {});
+            // Handle both bare ID and Record ID format
+            const topicRecordId = typeof topicId === 'string' && topicId.includes(':')
+                ? topicId
+                : `${TOPIC_TABLE}:${topicId}`;
+            await this.client.query(`DELETE ${topicRecordId}`, {});
             console.log(`[SurrealDB] Deleted topic ${topicId}`);
         }
         catch (error) {
@@ -1320,12 +1360,28 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
+            // Construct proper record IDs
+            const topicRecordId = topicId.includes(':') ? topicId : `${TOPIC_TABLE}:${topicId}`;
+            const memoryRecordId = `memory:${memoryId}`;
+            // Use INSERT INTO instead of RELATE to avoid RELATION table issues
+            // topic_memory has in/out fields but we treat it as a regular edge table
             const sql = `
-        RELATE ${TOPIC_MEMORY_TABLE}:${topicId}->${TOPIC_TABLE}:${topicId}->${MEMORY_TABLE}:${memoryId}
-        SET
+        INSERT INTO ${TOPIC_MEMORY_TABLE} (
+          in,
+          out,
+          relevance_score,
+          weight,
+          created_at
+        ) VALUES (
+          ${topicRecordId},
+          ${memoryRecordId},
+          $relevance_score,
+          $weight,
+          time::now()
+        )
+        ON DUPLICATE KEY UPDATE
           relevance_score = $relevance_score,
-          weight = $weight,
-          created_at = time::now()
+          weight = $weight
       `;
             await this.client.query(sql, {
                 relevance_score: relevanceScore,
@@ -1349,18 +1405,19 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
+            const topicRecordId = topicId.includes(':') ? topicId : `${TOPIC_TABLE}:${topicId}`;
+            // Use subquery instead of table alias (SurrealDB 3.x doesn't support aliases)
             const sql = `
         SELECT
-          m.id,
-          m.content,
-          m.type,
-          edge.weight,
-          edge.relevance_score,
-          m.created_at
-        FROM ${TOPIC_MEMORY_TABLE} edge
-        WHERE edge.in = ${TOPIC_TABLE}:${topicId}
-        JOIN edge.out AS m
-        ORDER BY edge.weight DESC
+          out.id AS id,
+          out.content AS content,
+          out.type AS type,
+          weight,
+          relevance_score,
+          out.created_at AS created_at
+        FROM ${TOPIC_MEMORY_TABLE}
+        WHERE in = ${topicRecordId}
+        ORDER BY weight DESC
         LIMIT ${limit}
       `;
             const result = await this.client.query(sql, {});
@@ -1401,14 +1458,14 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
-            // Extract numeric ID
-            let numericId;
+            // Keep entityId as string (Record ID) for Schema compatibility
+            let recordId;
             if (typeof entityId === 'string') {
-                const parts = entityId.split(':');
-                numericId = parseInt(parts[parts.length - 1], 10);
+                recordId = entityId;
             }
             else {
-                numericId = entityId;
+                // Convert numeric ID to record string
+                recordId = `entity:${entityId}`;
             }
             const sql = `
         UPSERT ${ENTITY_ALIAS_TABLE} SET
@@ -1421,12 +1478,12 @@ export class SurrealDatabase {
       `;
             await this.client.query(sql, {
                 alias,
-                entity_id: numericId,
+                entity_id: recordId,
                 verified,
                 source,
                 created_by: createdBy,
             });
-            console.log(`[SurrealDB] Added alias "${alias}" -> entity:${numericId}`);
+            console.log(`[SurrealDB] Added alias "${alias}" -> ${recordId}`);
         }
         catch (error) {
             console.error('[SurrealDB] addAlias failed:', error.message);
@@ -1445,19 +1502,41 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
+            console.log(`[SurrealDB] resolveAlias: resolving alias="${alias}"`);
             // Cycle detection - prevent infinite loops
             if (visited.has(alias)) {
                 console.warn(`[SurrealDB] Circular alias reference detected: ${alias}`);
                 return null;
             }
             visited.add(alias);
-            // Query alias
+            // First check if this is already a canonical entity (not an alias)
+            // Handle both bare ID and Record ID format
+            let entityRecordId;
+            if (alias.includes(':')) {
+                entityRecordId = alias;
+            }
+            else {
+                entityRecordId = `entity:${alias}`;
+            }
+            console.log(`[SurrealDB] resolveAlias: checking entity with Record ID="${entityRecordId}"`);
+            // Use direct string interpolation for Record ID (SurrealDB requires this for id comparisons)
+            const entityCheckResult = await this.client.query(`SELECT id, is_merged FROM ${ENTITY_TABLE} WHERE id = ${entityRecordId} LIMIT 1`, {});
+            const entityCheck = this.extractResult(entityCheckResult);
+            console.log(`[SurrealDB] resolveAlias: entity check result=`, JSON.stringify(entityCheck));
+            if (entityCheck && entityCheck.length > 0 && !entityCheck[0].is_merged) {
+                // This is a canonical entity, return it directly
+                const result = this.extractStringId(entityCheck[0].id);
+                console.log(`[SurrealDB] resolveAlias: returning canonical entity ID="${result}"`);
+                return result;
+            }
+            // Query alias table
             const result = await this.client.query(`SELECT VALUE entity_id FROM ${ENTITY_ALIAS_TABLE} WHERE alias = $alias LIMIT 1`, { alias });
             const data = this.extractResult(result);
+            console.log(`[SurrealDB] resolveAlias: alias query result=`, JSON.stringify(data));
             if (data && data.length > 0) {
                 const entityId = String(data[0]);
                 // Check if points to another alias (path flattening)
-                const canonicalResult = await this.client.query(`SELECT VALUE canonical_id FROM ${ENTITY_TABLE} WHERE id = $entityId LIMIT 1`, { entityId });
+                const canonicalResult = await this.client.query(`SELECT VALUE canonical_id FROM ${ENTITY_TABLE} WHERE id = ${entityId} LIMIT 1`, {});
                 const canonicalData = this.extractResult(canonicalResult);
                 if (canonicalData && canonicalData.length > 0 && canonicalData[0]) {
                     // Points to another alias, recursively resolve
@@ -1466,6 +1545,7 @@ export class SurrealDatabase {
                 }
                 return entityId;
             }
+            console.log(`[SurrealDB] resolveAlias: no match found, returning null`);
             return null;
         }
         catch (error) {
@@ -1512,7 +1592,7 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
-            // Extract numeric IDs
+            // Extract numeric IDs for record construction
             const aliasId = typeof aliasEntityId === 'string' ? aliasEntityId.split(':').pop() : aliasEntityId;
             const canonicalId = typeof canonicalEntityId === 'string' ? canonicalEntityId.split(':').pop() : canonicalEntityId;
             if (!aliasId || !canonicalId) {
@@ -1535,13 +1615,14 @@ export class SurrealDatabase {
             }
             // Step 3: Delete old edges from alias entity
             await this.client.query(`DELETE FROM memory_entity WHERE out = entity:${aliasId}`, {});
-            // Step 4: Mark alias entity as merged
-            await this.client.query(`UPDATE entity:${aliasId} SET canonical_id = ${canonicalId}, is_merged = true, merged_at = time::now()`, {});
-            // Step 5: Add alias record
+            // Step 4: Mark alias entity as merged (use string Record ID for canonical_id)
+            const canonicalRecordId = `entity:${canonicalId}`;
+            await this.client.query(`UPDATE entity:${aliasId} SET canonical_id = $canonical_id, is_merged = true, merged_at = time::now()`, { canonical_id: canonicalRecordId });
+            // Step 5: Add alias record (use string Record ID)
             const aliasNameResult = await this.client.query(`SELECT name FROM entity:${aliasId}`, {});
             const aliasNameData = this.extractResult(aliasNameResult);
             const aliasName = aliasNameData && aliasNameData.length > 0 ? aliasNameData[0].name : `entity_${aliasId}`;
-            await this.addAlias(aliasName, canonicalId, true, 'merged');
+            await this.addAlias(aliasName, canonicalRecordId, true, 'merged');
             console.log(`[SurrealDB] Merged entity:${aliasId} -> entity:${canonicalId}`);
             // Step 6: Check threshold after merge (User feedback)
             const stats = await this.getEntityStats(String(canonicalId));
@@ -1623,20 +1704,27 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
-            let numericId;
+            // Convert entityId to proper record string format
+            let entityRecordId;
             if (typeof entityId === 'string') {
-                const parts = entityId.split(':');
-                numericId = parseInt(parts[parts.length - 1], 10);
+                // If it's already a record ID (contains ':'), use it directly
+                if (entityId.includes(':')) {
+                    entityRecordId = entityId;
+                }
+                else {
+                    // Otherwise, construct the record ID
+                    entityRecordId = `entity:${entityId}`;
+                }
             }
             else {
-                numericId = entityId;
+                entityRecordId = `entity:${entityId}`;
             }
             // Count memory_entity edges
-            const memoryResult = await this.client.query(`SELECT count() as count FROM memory_entity WHERE out = entity:${numericId} GROUP ALL`, {});
+            const memoryResult = await this.client.query(`SELECT count() as count FROM memory_entity WHERE out = ${entityRecordId} GROUP ALL`, {});
             const memoryData = this.extractResult(memoryResult);
             const memoryCount = memoryData && memoryData.length > 0 ? memoryData[0].count : 0;
             // Count topics
-            const topicResult = await this.client.query(`SELECT count() as count FROM ${TOPIC_TABLE} WHERE parent_entity_id = ${numericId} GROUP ALL`, {});
+            const topicResult = await this.client.query(`SELECT count() as count FROM ${TOPIC_TABLE} WHERE parent_entity_id = ${entityRecordId} GROUP ALL`, {});
             const topicData = this.extractResult(topicResult);
             const topicCount = topicData && topicData.length > 0 ? topicData[0].count : 0;
             return {

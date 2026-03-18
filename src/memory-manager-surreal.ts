@@ -95,10 +95,31 @@ export class MemoryManager {
     const result = await this.db.initialize();
     console.log('[MemoryManager] Initialized with SurrealDB');
 
+    // Load known entities into EntityExtractor cache
+    await this.loadKnownEntitiesToCache();
+
     // Start idle clustering worker
     this.startIdleClusteringWorker();
 
     return result;
+  }
+
+  /**
+   * Load known entities from database into EntityExtractor cache
+   */
+  private async loadKnownEntitiesToCache(): Promise<void> {
+    try {
+      const knownEntities = await this.db.loadKnownEntities(10000);
+      if (knownEntities.length > 0) {
+        // Load entities into EntityExtractor cache via EntityIndexer
+        this.entityIndexer.getExtractor().addKnownEntities(knownEntities);
+        console.log(`[MemoryManager] Loaded ${knownEntities.length} known entities to EntityExtractor cache`);
+      } else {
+        console.log('[MemoryManager] No known entities to load (fresh database)');
+      }
+    } catch (error: any) {
+      console.error('[MemoryManager] Failed to load known entities:', error.message);
+    }
   }
 
   /**

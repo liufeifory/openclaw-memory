@@ -1,17 +1,18 @@
 /**
- * HybridRetriever - Vector + Graph Hybrid Retrieval
+ * HybridRetriever - Vector + Graph + Topic Hybrid Retrieval (Stage 3)
  *
  * Combines semantic vector search with graph-based entity traversal
- * to retrieve relevant memories from SurrealDB.
+ * and topic-based broad recall from SurrealDB.
  *
- * Retrieval Pipeline:
+ * Retrieval Pipeline (4-path parallel):
  * 1. Vector Search (semantic similarity)
- * 2. Extract entities from query
+ * 2. Entity Search (exact match)
  * 3. Graph Traversal Search (find memories via entities)
- * 4. Merge results (deduplicate)
- * 5. Reranker re-sorting
- * 6. Threshold filtering
- * 7. Return topK
+ * 4. Topic Recall (broad association)
+ * 5. Merge results (deduplicate with path priority)
+ * 6. Reranker re-sorting
+ * 7. Threshold filtering
+ * 8. Return topK
  */
 import { SurrealDatabase } from './surrealdb-client.js';
 import { EmbeddingService } from './embedding.js';
@@ -32,16 +33,19 @@ export interface MemoryResult {
     access_count?: number;
     importance?: number;
     cluster_id?: string;
-    source?: 'vector' | 'graph' | 'hybrid' | 'reranked';
+    source?: 'vector' | 'graph' | 'hybrid' | 'reranked' | 'topic';
+    topic_id?: string;
+    topic_name?: string;
 }
 /**
- * Hybrid retrieval result with statistics
+ * Hybrid retrieval result with statistics (Stage 3: 4-path)
  */
 export interface HybridRetrievalResult {
     results: MemoryResult[];
     stats: {
         vectorCount: number;
         graphCount: number;
+        topicCount: number;
         mergedCount: number;
         finalCount: number;
         avgSimilarity: number;
@@ -57,6 +61,10 @@ export declare class HybridRetriever {
     private reranker;
     private entityExtractor;
     constructor(db: SurrealDatabase, embedding: EmbeddingService, entityIndexer: EntityIndexer, reranker: Reranker);
+    /**
+     * Get database client (for Stage 2 multi-degree retrieval)
+     */
+    private getDb;
     /**
      * Main hybrid retrieval method
      * @param query - The search query
@@ -95,6 +103,24 @@ export declare class HybridRetriever {
      */
     mergeResults(vectorResults: MemoryResult[], graphResults: MemoryResult[]): MemoryResult[];
     /**
+     * Topic Recall search - retrieve memories via Topic layer
+     * User feedback: add LIMIT 10 to prevent topic flooding
+     * @param entityIds - Entity IDs to search topics for (string Record IDs or numeric IDs)
+     * @param topK - Maximum number of results to return
+     * @returns Topic recall results
+     */
+    topicSearch(entityIds: (string | number)[], topK?: number): Promise<MemoryResult[]>;
+    /**
+     * Merge vector, graph, and topic results with efficient deduplication
+     * User feedback: reduce 4-path merge overhead, prefer precision paths
+     * User feedback: apply path priority scores to prevent topic flooding
+     *
+     * Path Priority Scores (User feedback #5):
+     * - Vector / Entity exact match: 1.0 (core answers)
+     * - Topic broad recall: 0.5 (background knowledge)
+     */
+    mergeResultsWithTopics(vectorResults: MemoryResult[], graphResults: MemoryResult[], topicResults: MemoryResult[]): MemoryResult[];
+    /**
      * Rerank results using LLM
      * @param query - The search query
      * @param results - Results to rerank
@@ -111,5 +137,30 @@ export declare class HybridRetriever {
      * Extract numeric ID from various formats
      */
     private extractId;
+    /**
+     * Extract string ID from various formats (for topic IDs)
+     */
+    private extractStringId;
+    /**
+     * Multi-degree retrieval - combines vector search with multi-hop graph traversal
+     *
+     * Enhanced retrieval pipeline:
+     * 1. Vector Search (semantic similarity)
+     * 2. Extract entities from query
+     * 3. Graph Traversal Search (find memories via entities)
+     * 4. Multi-degree expansion (entity -> entity -> memory)
+     * 5. Merge results (deduplicate)
+     * 6. Reranker re-sorting
+     * 7. Threshold filtering
+     * 8. Return topK
+     *
+     * @param query - The search query
+     * @param sessionId - Optional session filter
+     * @param topK - Final number of results to return
+     * @param threshold - Minimum similarity/threshold for results
+     * @param degree - Multi-degree hops (default: 2 for second-degree)
+     * @returns Hybrid retrieval result with statistics
+     */
+    retrieveWithMultiDegree(query: string, sessionId: string | undefined, topK?: number, threshold?: number, degree?: number): Promise<HybridRetrievalResult>;
 }
 //# sourceMappingURL=hybrid-retrieval.d.ts.map

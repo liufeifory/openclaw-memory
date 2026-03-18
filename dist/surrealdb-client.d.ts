@@ -115,21 +115,25 @@ export declare class SurrealDatabase {
     storeSchemaVersion(): Promise<void>;
     private extractIdFromRecord;
     private extractStringIdFromRecord;
+    /**
+     * Extract numeric ID from Record ID string (e.g., 'entity:123' -> 123)
+     */
+    private extractIdFromRecordId;
     private toPayload;
     /**
      * 1. upsertEntity - Create or get entity (ON DUPLICATE KEY UPDATE mode)
      * Returns entity ID
      */
-    upsertEntity(name: string, type: string): Promise<number>;
+    upsertEntity(name: string, type: string): Promise<string>;
     /**
      * 2. linkMemoryEntity - Create memory-entity edge
      * Includes Super Node frozen check and Topic creation trigger
      */
-    linkMemoryEntity(memoryId: number, entityId: number, relevanceScore: number, topicIndexer?: any): Promise<void>;
+    linkMemoryEntity(memoryId: number, entityId: string | number, relevanceScore: number, topicIndexer?: any): Promise<void>;
     /**
      * 3. searchByEntity - Retrieve memories associated with an entity (graph traversal)
      */
-    searchByEntity(entityId: number, limit?: number): Promise<Array<LinkedMemory>>;
+    searchByEntity(entityId: string | number, limit?: number): Promise<Array<LinkedMemory>>;
     /**
      * 4. searchByAssociation - Second-degree association search
      * Find memories related to a seed memory through shared entities
@@ -150,7 +154,7 @@ export declare class SurrealDatabase {
     /**
      * Get memories by entity
      */
-    getMemoriesByEntity(entityId: number, limit?: number): Promise<LinkedMemory[]>;
+    getMemoriesByEntity(entityId: number | string, limit?: number): Promise<LinkedMemory[]>;
     /**
      * 5. getGlobalEntityStats - Get global entity statistics
      * Returns total entities, count by type, and total links
@@ -188,7 +192,7 @@ export declare class SurrealDatabase {
      * Delete a topic
      * @param topicId - Topic ID
      */
-    deleteTopic(topicId: string): Promise<void>;
+    deleteTopic(topicId: string | number): Promise<void>;
     /**
      * Link topic to memory
      * @param topicId - Topic ID

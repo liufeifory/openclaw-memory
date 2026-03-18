@@ -186,6 +186,10 @@ export declare class EntityIndexer {
      * Utility: extract numeric ID from various ID formats
      */
     private extractId;
+    /**
+     * Utility: extract string ID from various ID formats
+     */
+    private extractStringId;
     private readonly relationClassifierIntervalMs;
     private readonly relationClassifierBatchSize;
     private totalClassified;

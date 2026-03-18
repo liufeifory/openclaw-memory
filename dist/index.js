@@ -15,6 +15,8 @@ import { MemoryFilter } from './memory-filter.js';
 import { PreferenceExtractor } from './preference-extractor.js';
 import { Summarizer } from './summarizer.js';
 import { createDocumentImporter } from './document-importer.js';
+import { DocumentParser } from './document-parser.js';
+import { DocumentSplitter } from './document-splitter.js';
 import * as fs from 'fs';
 import * as path from 'path';
 // Global instance for reuse across requests
@@ -425,10 +427,9 @@ const memoryPlugin = {
                             return { success: true, chunks: count, source: url };
                         }
                         if (filePath) {
-                            const { parser, splitter } = createDocumentImporter(mm, {
-                                chunkSize: config.documentImport?.chunkSize,
-                                chunkOverlap: config.documentImport?.chunkOverlap,
-                            });
+                            // Create parser and splitter directly for local file import
+                            const parser = new DocumentParser();
+                            const splitter = new DocumentSplitter(config.documentImport?.chunkSize || 500, config.documentImport?.chunkOverlap || 50);
                             const parsed = await parser.parse(filePath);
                             const chunks = splitter.split(parsed.content, filePath);
                             for (const chunk of chunks) {

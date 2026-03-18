@@ -105,7 +105,7 @@ async function testGraphIntegration() {
         // Test 5: Entity statistics
         // ========================================
         console.log('Test 5: Entity statistics');
-        const stats = await db.getEntityStats();
+        const stats = await db.getGlobalEntityStats();
         console.log('   Entity stats:', stats);
         console.log(`   - Total entities: ${stats.total_entities}`);
         console.log(`   - Types: ${JSON.stringify(stats.by_type)}`);
