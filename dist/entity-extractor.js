@@ -8,7 +8,7 @@
  *   ↓
  * Layer 2: 1B Model Pre-Filter (very low cost, ~30% coverage)
  *   ↓
- * Layer 3: 8B Model Refine (high cost, ~10% coverage)
+ * Layer 3: 7B Model Refine (high cost, ~10% coverage)
  *
  * Features:
  * - Alias normalization (Postgres → PostgreSQL, TS → TypeScript)
@@ -200,9 +200,9 @@ const ENTITY_PATTERNS = [
  */
 export class EntityExtractor {
     endpoint1B;
-    endpoint8B;
+    endpoint7B;
     limiter1B;
-    limiter8B;
+    limiter7B;
     knownEntities = new Map();
     buffer = [];
     stats = {
@@ -217,11 +217,11 @@ export class EntityExtractor {
     // Buffer configuration
     bufferFlushInterval = 5000; // 5 seconds
     minBatchSize = 3; // Minimum batch for LLM call
-    constructor(endpoint1B = 'http://localhost:8081', endpoint8B = 'http://localhost:8082') {
+    constructor(endpoint1B = 'http://localhost:8081', endpoint7B = 'http://localhost:8083') {
         this.endpoint1B = endpoint1B;
-        this.endpoint8B = endpoint8B;
+        this.endpoint7B = endpoint7B;
         this.limiter1B = getGlobalLimiter({ maxConcurrent: 3, minInterval: 50 });
-        this.limiter8B = getGlobalLimiter({ maxConcurrent: 2, minInterval: 100 });
+        this.limiter7B = getGlobalLimiter({ maxConcurrent: 2, minInterval: 100 });
         // Start periodic buffer flush
         this.startPeriodicFlush();
     }
@@ -421,15 +421,15 @@ Answers:`;
         return results;
     }
     /**
-     * Layer 3: 8B Model Refine
+     * Layer 3: 7B Model Refine
      * High-quality entity extraction with proper noun detection
      */
-    async layer3_8BRefine(text) {
+    async layer3_7BRefine(text) {
         this.stats.layer3Total++;
         const prompt = this.buildRefinePrompt(text);
         try {
-            const result = await this.limiter8B.execute(async () => {
-                const response = await fetch(`${this.endpoint8B}/completion`, {
+            const result = await this.limiter7B.execute(async () => {
+                const response = await fetch(`${this.endpoint7B}/completion`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -450,7 +450,7 @@ Answers:`;
             return entities;
         }
         catch (error) {
-            console.error('[EntityExtractor] Layer 3 8B refine failed:', error.message);
+            console.error('[EntityExtractor] Layer 3 7B refine failed:', error.message);
             return [];
         }
     }
@@ -568,7 +568,7 @@ JSON:`;
         }
         // Layer 1 found nothing, use Layer 3 directly for this text
         // (In production, you might want to batch these through Layer 2 first)
-        const layer3Entities = await this.layer3_8BRefine(text);
+        const layer3Entities = await this.layer3_7BRefine(text);
         for (const entity of layer3Entities) {
             const key = entity.name.toLowerCase();
             if (!allEntities.has(key)) {
@@ -625,6 +625,42 @@ JSON:`;
             knownCacheSize: this.knownEntities.size,
             bufferSize: this.buffer.length,
         };
+    }
+    /**
+     * Public method to call 7B LLM endpoint directly
+     * Used by EntityIndexer for relation classification
+     *
+     * @param prompt - The prompt to send to the 7B model
+     * @param timeout - Timeout in milliseconds (default: 10000)
+     * @returns Parsed JSON response from the model
+     */
+    async call7B(prompt, timeout = 10000) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeout);
+            const result = await this.limiter7B.execute(async () => {
+                const response = await fetch(`${this.endpoint7B}/completion`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        prompt: prompt,
+                        n_predict: 500,
+                        temperature: 0.3,
+                        top_p: 0.9,
+                    }),
+                    signal: controller.signal,
+                });
+                clearTimeout(timeoutId);
+                return await response.json();
+            });
+            return result;
+        }
+        catch (error) {
+            if (error.name === 'AbortError') {
+                throw new Error(`[EntityExtractor] 7B call timed out after ${timeout}ms`);
+            }
+            throw error;
+        }
     }
 }
 //# sourceMappingURL=entity-extractor.js.map

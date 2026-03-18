@@ -774,6 +774,7 @@ ${snippetsText}
 ## 方向性说明
 - 默认关系方向：A → B
 - 如果实际关系是 B → A（如"B 创建了 A"），请设置 reverse_direction = true
+- 或者返回 source 字段指定关系的源实体（如"Facebook"表示 Facebook -> created_by -> React）
 
 ## 输出格式
 严格返回 JSON 格式：
@@ -781,7 +782,8 @@ ${snippetsText}
   "relation_type": "<选择的类型>",
   "confidence": <0.0-1.0>,
   "reasoning": "<简短解释，50 字以内>",
-  "reverse_direction": <true/false>
+  "reverse_direction": <true/false>,
+  "source": "<实体名称，关系的源头>"
 }
 
 JSON:`;

@@ -14,6 +14,7 @@ import { LLMLimiter } from './llm-limiter.js';
 import { MemoryFilter } from './memory-filter.js';
 import { PreferenceExtractor } from './preference-extractor.js';
 import { Summarizer } from './summarizer.js';
+import { createDocumentImporter } from './document-importer.js';
 import * as fs from 'fs';
 import * as path from 'path';
 // Global instance for reuse across requests
@@ -162,6 +163,18 @@ const memoryPlugin = {
         const filter = getMemoryFilter(llamaEndpoint, limiter);
         const extractor = getPreferenceExtractor(llamaEndpoint, limiter);
         const summarizer = getSummarizer(llamaEndpoint, limiter);
+        // Document Import Configuration
+        const docConfig = config.documentImport || {};
+        const watchDir = docConfig.watchDir;
+        if (watchDir) {
+            const importer = createDocumentImporter(mm, {
+                watchDir,
+                chunkSize: docConfig.chunkSize,
+                chunkOverlap: docConfig.chunkOverlap,
+            });
+            importer.watcher?.start();
+            console.log(`[openclaw-memory] Document watcher started: ${watchDir}`);
+        }
         // Conversation buffer for summarization
         const conversationBuffers = new Map();
         const messageQueue = [];
@@ -389,6 +402,49 @@ const memoryPlugin = {
             };
             return [memorySearchTool];
         }, { names: ['memory_search'] });
+        // Register document_import tool
+        api.registerTool((ctx) => {
+            const documentImportTool = {
+                name: 'document_import',
+                description: 'Import document from URL or local path (PDF, Word, Markdown)',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        url: { type: 'string', description: 'URL to import' },
+                        path: { type: 'string', description: 'Local file path' },
+                    },
+                },
+                execute: async ({ url, path: filePath }) => {
+                    try {
+                        const { urlImporter } = createDocumentImporter(mm, {
+                            chunkSize: config.documentImport?.chunkSize,
+                            chunkOverlap: config.documentImport?.chunkOverlap,
+                        });
+                        if (url) {
+                            const count = await urlImporter.import(url);
+                            return { success: true, chunks: count, source: url };
+                        }
+                        if (filePath) {
+                            const { parser, splitter } = createDocumentImporter(mm, {
+                                chunkSize: config.documentImport?.chunkSize,
+                                chunkOverlap: config.documentImport?.chunkOverlap,
+                            });
+                            const parsed = await parser.parse(filePath);
+                            const chunks = splitter.split(parsed.content, filePath);
+                            for (const chunk of chunks) {
+                                await mm.storeSemantic(chunk.content, 0.7, `doc:${filePath}`);
+                            }
+                            return { success: true, chunks: chunks.length, source: filePath };
+                        }
+                        return { error: 'URL or path required' };
+                    }
+                    catch (error) {
+                        return { error: `Import failed: ${error.message}` };
+                    }
+                },
+            };
+            return [documentImportTool];
+        }, { names: ['document_import'] });
         console.log('[openclaw-memory] Plugin registered');
     },
 };

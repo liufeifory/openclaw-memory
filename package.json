@@ -20,13 +20,22 @@
     "test:entity-indexer": "node dist/test-entity-indexer.js",
     "test:hybrid-retriever": "node dist/test-hybrid-retriever.js",
     "test:graph-integration": "node dist/test-graph-integration.js",
+    "test:document-import": "node dist/test-document-import.js",
+    "test:semantic-splitter": "node dist/test-semantic-splitter.js",
+    "test:document-watcher": "node dist/test-document-watcher.js",
+    "test:url-importer": "node dist/test-url-importer.js",
     "clean": "rm -rf dist/"
   },
   "dependencies": {
+    "chokidar": "^3.6.0",
+    "mammoth": "^1.7.0",
+    "node-fetch": "^3.3.2",
+    "pdf-parse": "^1.1.1",
     "surrealdb": "^2.0.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/pdf-parse": "^1.1.5",
     "typescript": "^5.3.3"
   },
   "peerDependencies": {

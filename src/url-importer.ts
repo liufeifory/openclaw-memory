@@ -1,0 +1,45 @@
+/**
+ * URL Importer - imports content from URLs.
+ */
+
+import { DocumentParser } from './document-parser.js';
+import { DocumentSplitter } from './document-splitter.js';
+import type { MemoryManager } from './memory-manager-surreal.js';
+
+export class UrlImporter {
+  constructor(
+    private parser: DocumentParser,
+    private splitter: DocumentSplitter,
+    private memoryManager: MemoryManager,
+  ) {}
+
+  /**
+   * Import content from a URL.
+   * @param url - The URL to import
+   * @param sessionId - Optional session ID for grouping (defaults to url:${url})
+   * @returns Number of chunks imported
+   */
+  async import(url: string, sessionId?: string): Promise<number> {
+    console.log(`[UrlImporter] Importing ${url}`);
+
+    try {
+      // Parse URL
+      const parsed = await this.parser.parseUrl(url);
+
+      // Split into chunks
+      const chunks = this.splitter.split(parsed.content, url);
+
+      // Store each chunk
+      const effectiveSessionId = sessionId || `url:${url}`;
+      for (const chunk of chunks) {
+        await this.memoryManager.storeSemantic(chunk.content, 0.7, effectiveSessionId);
+      }
+
+      console.log(`[UrlImporter] Imported ${url}: ${chunks.length} chunks`);
+      return chunks.length;
+    } catch (error: any) {
+      console.error(`[UrlImporter] Failed to import ${url}:`, error.message);
+      throw error;
+    }
+  }
+}

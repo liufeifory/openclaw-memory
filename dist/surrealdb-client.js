@@ -5,9 +5,20 @@ import { Surreal, RecordId } from 'surrealdb';
 const MEMORY_TABLE = 'memory';
 const ENTITY_TABLE = 'entity';
 const MEMORY_ENTITY_TABLE = 'memory_entity';
+const ENTITY_RELATION_TABLE = 'entity_relation'; // Stage 2: Entity-Entity edges
 const RELATES_TABLE = 'relates';
 const VECTOR_DIMENSION = 1024;
 const SCHEMA_VERSION = 1;
+// Stage 2: Co-occurrence threshold - minimum memories to form entity-entity relationship
+const CO_OCCURRENCE_THRESHOLD = 3;
+// Stage 3: Topic Layer tables
+const TOPIC_TABLE = 'topic';
+const TOPIC_MEMORY_TABLE = 'topic_memory';
+const ENTITY_ALIAS_TABLE = 'entity_alias';
+// Stage 3: Super Node thresholds
+const TOPIC_SOFT_LIMIT = 400; // 80% threshold, trigger Topic creation
+const TOPIC_HARD_LIMIT = 500; // 100% threshold, force freeze
+export { TOPIC_TABLE, TOPIC_MEMORY_TABLE, ENTITY_ALIAS_TABLE, TOPIC_SOFT_LIMIT, TOPIC_HARD_LIMIT, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE };
 export const GRAPH_PROTECTION = {
     MIN_MENTION_COUNT: 3,
     MAX_MEMORY_LINKS: 500,
@@ -124,10 +135,13 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS mention_count ON TABLE ${ENTITY_TABLE} TYPE int DEFAULT 0;
       DEFINE FIELD IF NOT EXISTS relation_count ON TABLE ${ENTITY_TABLE} TYPE int DEFAULT 0;
       DEFINE FIELD IF NOT EXISTS last_accessed ON TABLE ${ENTITY_TABLE} TYPE option<string>;
-      DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${ENTITY_TABLE} TYPE string;
+      DEFINE FIELD IF NOT EXISTS last_mentioned_at ON TABLE ${ENTITY_TABLE} TYPE option<string>;
+      DEFINE FIELD IF NOT EXISTS first_seen_at ON TABLE ${ENTITY_TABLE} TYPE option<string>;
+      DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${ENTITY_TABLE} TYPE string DEFAULT time::now();
       DEFINE FIELD IF NOT EXISTS is_active ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT true;
       DEFINE FIELD IF NOT EXISTS is_frozen ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT false;
       DEFINE FIELD IF NOT EXISTS canonical_id ON TABLE ${ENTITY_TABLE} TYPE option<int>;
+      DEFINE FIELD IF NOT EXISTS is_merged ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT false;
     `);
         console.log('[SurrealDB] Entity table defined with graph protection fields');
         try {
@@ -145,6 +159,22 @@ export class SurrealDatabase {
         }
         catch (error) {
             console.warn('[SurrealDB] Entity normalized_name index creation failed:', error.message);
+        }
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS entity_last_mentioned_idx ON TABLE ${ENTITY_TABLE} FIELDS last_mentioned_at;`);
+            console.log('[SurrealDB] Entity last_mentioned_at index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] Entity last_mentioned_at index creation failed:', error.message);
+        }
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS entity_first_seen_idx ON TABLE ${ENTITY_TABLE} FIELDS first_seen_at;`);
+            console.log('[SurrealDB] Entity first_seen_at index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] Entity first_seen_at index creation failed:', error.message);
         }
         await this.query(`
       DEFINE TABLE IF NOT EXISTS ${MEMORY_ENTITY_TABLE} SCHEMAFULL;
@@ -177,6 +207,154 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS evidence ON TABLE ${RELATES_TABLE} TYPE array<record<${MEMORY_TABLE}>>;
     `);
         console.log('[SurrealDB] Relates table defined');
+        // Stage 2: Entity-Entity relationship table (using RELATE-style edges)
+        await this.query(`
+      DEFINE TABLE IF NOT EXISTS ${ENTITY_RELATION_TABLE} SCHEMAFULL;
+      DEFINE FIELD IF NOT EXISTS in ON TABLE ${ENTITY_RELATION_TABLE} TYPE record<${ENTITY_TABLE}>;
+      DEFINE FIELD IF NOT EXISTS out ON TABLE ${ENTITY_RELATION_TABLE} TYPE record<${ENTITY_TABLE}>;
+      DEFINE FIELD IF NOT EXISTS relation_type ON TABLE ${ENTITY_RELATION_TABLE} TYPE string DEFAULT 'co_occurs';
+      DEFINE FIELD IF NOT EXISTS weight ON TABLE ${ENTITY_RELATION_TABLE} TYPE float DEFAULT 1.0;
+      DEFINE FIELD IF NOT EXISTS evidence_memory_ids ON TABLE ${ENTITY_RELATION_TABLE} TYPE array<int>;
+      DEFINE FIELD IF NOT EXISTS evidence_count ON TABLE ${ENTITY_RELATION_TABLE} TYPE int DEFAULT 0;
+      DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${ENTITY_RELATION_TABLE} TYPE string;
+      DEFINE FIELD IF NOT EXISTS updated_at ON TABLE ${ENTITY_RELATION_TABLE} TYPE string DEFAULT time::now();
+      DEFINE FIELD IF NOT EXISTS is_manual_refined ON TABLE ${ENTITY_RELATION_TABLE} TYPE bool DEFAULT false;
+      DEFINE FIELD IF NOT EXISTS confidence ON TABLE ${ENTITY_RELATION_TABLE} TYPE float DEFAULT 0.0;
+      DEFINE FIELD IF NOT EXISTS reasoning ON TABLE ${ENTITY_RELATION_TABLE} TYPE option<string>;
+      DEFINE FIELD IF NOT EXISTS last_occurrence_at ON TABLE ${ENTITY_RELATION_TABLE} TYPE option<string>;
+    `);
+        console.log('[SurrealDB] Entity relation table defined for Stage 2 co-occurrence');
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS entity_relation_in_idx ON TABLE ${ENTITY_RELATION_TABLE} FIELDS in;`);
+            console.log('[SurrealDB] Entity relation "in" index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] Entity relation "in" index creation failed:', error.message);
+        }
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS entity_relation_out_idx ON TABLE ${ENTITY_RELATION_TABLE} FIELDS out;`);
+            console.log('[SurrealDB] Entity relation "out" index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] Entity relation "out" index creation failed:', error.message);
+        }
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS entity_relation_weight_idx ON TABLE ${ENTITY_RELATION_TABLE} FIELDS weight;`);
+            console.log('[SurrealDB] Entity relation weight index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] Entity relation weight index creation failed:', error.message);
+        }
+        // ==================== Stage 3: Topic Layer Schema ====================
+        console.log('\n=== Stage 3: Creating Topic Layer Schema ===');
+        // Topic table
+        await this.query(`
+      DEFINE TABLE IF NOT EXISTS ${TOPIC_TABLE} SCHEMAFULL;
+      DEFINE FIELD IF NOT EXISTS name ON TABLE ${TOPIC_TABLE} TYPE string;
+      DEFINE FIELD IF NOT EXISTS description ON TABLE ${TOPIC_TABLE} TYPE option<string>;
+      DEFINE FIELD IF NOT EXISTS parent_entity_id ON TABLE ${TOPIC_TABLE} TYPE option<int>;
+      DEFINE FIELD IF NOT EXISTS memory_count ON TABLE ${TOPIC_TABLE} TYPE int DEFAULT 0;
+      DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${TOPIC_TABLE} TYPE datetime DEFAULT time::now();
+      DEFINE FIELD IF NOT EXISTS updated_at ON TABLE ${TOPIC_TABLE} TYPE datetime;
+      DEFINE FIELD IF NOT EXISTS last_accessed_at ON TABLE ${TOPIC_TABLE} TYPE datetime;
+    `);
+        console.log('[SurrealDB] Topic table defined');
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS topic_name_idx ON TABLE ${TOPIC_TABLE} FIELDS name;`);
+            console.log('[SurrealDB] Topic name index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] Topic name index creation failed:', error.message);
+        }
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS topic_entity_idx ON TABLE ${TOPIC_TABLE} FIELDS parent_entity_id;`);
+            console.log('[SurrealDB] Topic parent_entity_id index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] Topic parent_entity_id index creation failed:', error.message);
+        }
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS topic_last_accessed_idx ON TABLE ${TOPIC_TABLE} FIELDS last_accessed_at;`);
+            console.log('[SurrealDB] Topic last_accessed_at index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] Topic last_accessed_at index creation failed:', error.message);
+        }
+        // topic_memory edge table
+        await this.query(`
+      DEFINE TABLE IF NOT EXISTS ${TOPIC_MEMORY_TABLE} SCHEMAFULL;
+      DEFINE FIELD IF NOT EXISTS in ON TABLE ${TOPIC_MEMORY_TABLE} TYPE record<${TOPIC_TABLE}>;
+      DEFINE FIELD IF NOT EXISTS out ON TABLE ${TOPIC_MEMORY_TABLE} TYPE record<${MEMORY_TABLE}>;
+      DEFINE FIELD IF NOT EXISTS relevance_score ON TABLE ${TOPIC_MEMORY_TABLE} TYPE float;
+      DEFINE FIELD IF NOT EXISTS weight ON TABLE ${TOPIC_MEMORY_TABLE} TYPE float;
+      DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${TOPIC_MEMORY_TABLE} TYPE datetime DEFAULT time::now();
+    `);
+        console.log('[SurrealDB] topic_memory edge table defined');
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS topic_memory_in_idx ON TABLE ${TOPIC_MEMORY_TABLE} FIELDS in;`);
+            console.log('[SurrealDB] topic_memory "in" index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] topic_memory "in" index creation failed:', error.message);
+        }
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS topic_memory_out_idx ON TABLE ${TOPIC_MEMORY_TABLE} FIELDS out;`);
+            console.log('[SurrealDB] topic_memory "out" index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] topic_memory "out" index creation failed:', error.message);
+        }
+        // entity_alias table
+        await this.query(`
+      DEFINE TABLE IF NOT EXISTS ${ENTITY_ALIAS_TABLE} SCHEMAFULL;
+      DEFINE FIELD IF NOT EXISTS alias ON TABLE ${ENTITY_ALIAS_TABLE} TYPE string;
+      DEFINE FIELD IF NOT EXISTS entity_id ON TABLE ${ENTITY_ALIAS_TABLE} TYPE int;
+      DEFINE FIELD IF NOT EXISTS verified ON TABLE ${ENTITY_ALIAS_TABLE} TYPE bool DEFAULT false;
+      DEFINE FIELD IF NOT EXISTS source ON TABLE ${ENTITY_ALIAS_TABLE} TYPE string DEFAULT 'manual';
+      DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${ENTITY_ALIAS_TABLE} TYPE datetime DEFAULT time::now();
+      DEFINE FIELD IF NOT EXISTS created_by ON TABLE ${ENTITY_ALIAS_TABLE} TYPE option<string>;
+    `);
+        console.log('[SurrealDB] entity_alias table defined');
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS alias_name_idx ON TABLE ${ENTITY_ALIAS_TABLE} FIELDS alias;`);
+            console.log('[SurrealDB] entity_alias name index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] entity_alias name index creation failed:', error.message);
+        }
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS alias_entity_idx ON TABLE ${ENTITY_ALIAS_TABLE} FIELDS entity_id;`);
+            console.log('[SurrealDB] entity_alias entity_id index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] entity_alias entity_id index creation failed:', error.message);
+        }
+        try {
+            await this.query(`DEFINE INDEX IF NOT EXISTS alias_unique_idx ON TABLE ${ENTITY_ALIAS_TABLE} FIELDS alias UNIQUE;`);
+            console.log('[SurrealDB] entity_alias unique index created');
+            migrated = true;
+        }
+        catch (error) {
+            console.warn('[SurrealDB] entity_alias unique index creation failed:', error.message);
+        }
+        // Add canonical_id field to entity table (if not exists)
+        await this.query(`
+      DEFINE FIELD IF NOT EXISTS canonical_id ON TABLE ${ENTITY_TABLE} TYPE option<int>;
+      DEFINE FIELD IF NOT EXISTS is_merged ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT false;
+      DEFINE FIELD IF NOT EXISTS merged_at ON TABLE ${ENTITY_TABLE} TYPE option<datetime>;
+    `);
+        console.log('[SurrealDB] Entity table extended with canonical_id and is_merged fields');
+        console.log('=== Stage 3: Topic Layer Schema Complete ===\n');
         await this.storeSchemaVersion();
         return migrated;
     }
@@ -571,6 +749,27 @@ export class SurrealDatabase {
         // Handle numeric id directly
         return record.id || 0;
     }
+    extractStringIdFromRecord(record) {
+        // Handle direct string
+        if (typeof record === 'string') {
+            const parts = record.split(':');
+            return parts[parts.length - 1];
+        }
+        // Handle RecordId object with tb and id
+        if (record && typeof record === 'object') {
+            if (record.tb && record.id !== undefined) {
+                return String(record.id);
+            }
+            if (record.id && typeof record.id === 'object' && record.id.id !== undefined) {
+                return String(record.id.id);
+            }
+            if (typeof record.id === 'string') {
+                const parts = record.id.split(':');
+                return parts[parts.length - 1];
+            }
+        }
+        return String(record?.id || 0);
+    }
     toPayload(record) {
         return {
             type: record.type || 'episodic',
@@ -612,7 +811,7 @@ export class SurrealDatabase {
         if (data && data.length > 0) {
             // Entity exists, update mention_count and return ID
             const existingId = this.extractIdFromRecord(data[0]);
-            await this.client.query(`UPDATE ${ENTITY_TABLE}:${existingId} SET mention_count = mention_count + 1, last_accessed = $created_at`, { created_at: now });
+            await this.client.query(`UPDATE ${ENTITY_TABLE}:${existingId} SET mention_count = mention_count + 1, last_accessed = $now, last_mentioned_at = $now`, { now });
             return existingId;
         }
         // Entity doesn't exist, create new one
@@ -622,7 +821,9 @@ export class SurrealDatabase {
         entity_type: $type,
         mention_count: 1,
         relation_count: 0,
-        created_at: $created_at,
+        created_at: $now,
+        first_seen_at: $now,
+        last_mentioned_at: $now,
         is_active: true,
         is_frozen: false
       }
@@ -631,7 +832,7 @@ export class SurrealDatabase {
             const result = await this.client.query(createSql, {
                 name,
                 type,
-                created_at: now,
+                now,
             });
             // Extract the entity ID from result
             let createData = [];
@@ -655,9 +856,10 @@ export class SurrealDatabase {
     }
     /**
      * 2. linkMemoryEntity - Create memory-entity edge
-     * Includes Super Node frozen check
+     * Includes Super Node frozen check and Topic creation trigger
      */
-    async linkMemoryEntity(memoryId, entityId, relevanceScore) {
+    async linkMemoryEntity(memoryId, entityId, relevanceScore, topicIndexer // Optional TopicIndexer for triggering topic creation
+    ) {
         if (!this.client) {
             throw new Error('[SurrealDB] Client not connected');
         }
@@ -704,7 +906,19 @@ export class SurrealDatabase {
                 created_at: now,
             });
             // Increment entity's relation_count
-            await this.client.query(`UPDATE ${ENTITY_TABLE}:${entityId} SET relation_count = relation_count + 1`, {});
+            await this.client.query(`UPDATE ${ENTITY_TABLE}:${entityId} SET relation_count += 1`, {});
+            // Check Super Node threshold after linking (User feedback)
+            const stats = await this.getEntityStats(entityId);
+            if (stats.memory_count >= TOPIC_SOFT_LIMIT) {
+                console.log(`[SurrealDB] Entity ${entityId} reached soft limit (${stats.memory_count} edges), triggering Topic creation`);
+                if (topicIndexer) {
+                    await topicIndexer.enqueueTopicCreation(String(entityId));
+                }
+            }
+            if (stats.memory_count >= TOPIC_HARD_LIMIT) {
+                console.warn(`[SurrealDB] Entity ${entityId} reached hard limit (${stats.memory_count} edges), freezing entity`);
+                await this.freezeEntity(String(entityId), 'Super Node hard limit exceeded');
+            }
         }
         catch (error) {
             console.error('[SurrealDB] linkMemoryEntity failed:', error.message);
@@ -809,10 +1023,81 @@ export class SurrealDatabase {
         }
     }
     /**
-     * 5. getEntityStats - Get entity statistics
+     * Extract result from SurrealDB query response
+     */
+    extractResult(result) {
+        if (!result)
+            return [];
+        if (Array.isArray(result)) {
+            if (result.length > 0) {
+                if (Array.isArray(result[0])) {
+                    return result[0] || [];
+                }
+                else if (result[0]?.result) {
+                    return result[0].result || [];
+                }
+            }
+        }
+        return result.result || [];
+    }
+    /**
+     * Extract string ID from various formats
+     */
+    extractStringId(id) {
+        if (typeof id === 'string') {
+            const parts = id.split(':');
+            return parts[parts.length - 1];
+        }
+        if (typeof id === 'number') {
+            return String(id);
+        }
+        if (id && typeof id === 'object' && id.id !== undefined) {
+            return this.extractStringId(id.id);
+        }
+        return String(id);
+    }
+    /**
+     * Extract numeric ID from various formats
+     */
+    extractId(id) {
+        if (typeof id === 'number')
+            return id;
+        if (typeof id === 'string') {
+            const parts = id.split(':');
+            return parseInt(parts[parts.length - 1], 10);
+        }
+        if (id && typeof id === 'object' && id.id !== undefined) {
+            return this.extractId(id.id);
+        }
+        return 0;
+    }
+    /**
+     * Get memories by entity
+     */
+    async getMemoriesByEntity(entityId, limit = 100) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            const result = await this.client.query(`SELECT * FROM memory_entity WHERE out = entity:${entityId} ORDER BY relevance DESC LIMIT ${limit}`, {});
+            const data = this.extractResult(result);
+            return data.map((r) => ({
+                id: this.extractIdFromRecord(r),
+                entityId: this.extractId(r.in),
+                relevance: r.relevance || 0,
+                created_at: r.created_at ? String(r.created_at) : undefined,
+            }));
+        }
+        catch (error) {
+            console.error('[SurrealDB] getMemoriesByEntity failed:', error.message);
+            return [];
+        }
+    }
+    /**
+     * 5. getGlobalEntityStats - Get global entity statistics
      * Returns total entities, count by type, and total links
      */
-    async getEntityStats() {
+    async getGlobalEntityStats() {
         if (!this.client) {
             return { total_entities: 0, by_type: {}, total_links: 0 };
         }
@@ -863,14 +1148,851 @@ export class SurrealDatabase {
             };
         }
         catch (error) {
-            console.error('[SurrealDB] getEntityStats failed:', error.message);
+            console.error('[SurrealDB] getGlobalEntityStats failed:', error.message);
             return { total_entities: 0, by_type: {}, total_links: 0 };
+        }
+    }
+    /**
+     * 6. loadKnownEntities - Load all entities from database for caching
+     * Used by EntityExtractor to populate the known entity cache
+     */
+    async loadKnownEntities(limit = 10000) {
+        if (!this.client) {
+            return [];
+        }
+        try {
+            // Load entities with high mention_count (frequently used)
+            // These are the most valuable to cache
+            const sql = `
+        SELECT name, mention_count, memory_count
+        FROM ${ENTITY_TABLE}
+        ORDER BY mention_count DESC
+        LIMIT $limit
+      `;
+            const result = await this.client.query(sql, { limit });
+            let data = [];
+            if (Array.isArray(result) && result.length > 0) {
+                if (Array.isArray(result[0])) {
+                    data = result[0] || [];
+                }
+                else if (result[0]?.result) {
+                    data = result[0].result || [];
+                }
+            }
+            return data.map((r) => ({
+                name: r.name,
+                // Confidence based on mention frequency
+                confidence: Math.min(0.95, 0.7 + (r.mention_count || 0) * 0.05),
+            }));
+        }
+        catch (error) {
+            console.error('[SurrealDB] loadKnownEntities failed:', error.message);
+            return [];
+        }
+    }
+    // ============================================================
+    // Stage 3: Topic Layer Methods
+    // ============================================================
+    /**
+     * Upsert a topic record
+     * @param name - Topic name
+     * @param description - Topic description (optional)
+     * @param parentEntityId - Parent entity ID (e.g., "entity:123" or 123)
+     * @returns Topic ID
+     */
+    async upsertTopic(name, description, parentEntityId) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            // Extract numeric ID if parentEntityId is a record string
+            let parentId = null;
+            if (parentEntityId) {
+                if (typeof parentEntityId === 'string') {
+                    const parts = parentEntityId.split(':');
+                    parentId = parseInt(parts[parts.length - 1], 10);
+                    if (isNaN(parentId))
+                        parentId = null;
+                }
+                else if (typeof parentEntityId === 'number') {
+                    parentId = parentEntityId;
+                }
+            }
+            const sql = `
+        UPSERT ${TOPIC_TABLE} SET
+          name = $name,
+          description = $description,
+          parent_entity_id = $parent_entity_id,
+          updated_at = time::now()
+      `;
+            await this.client.query(sql, {
+                name,
+                description,
+                parent_entity_id: parentId,
+            });
+            // Fetch the created topic to get ID
+            const result = await this.client.query(`SELECT id FROM ${TOPIC_TABLE} WHERE name = $name AND parent_entity_id = $parent_entity_id LIMIT 1`, { name, parent_entity_id: parentId });
+            const data = this.extractResult(result);
+            if (data && data.length > 0) {
+                return this.extractStringId(data[0].id);
+            }
+            throw new Error('[SurrealDB] Failed to get created topic ID');
+        }
+        catch (error) {
+            console.error('[SurrealDB] upsertTopic failed:', error.message);
+            throw error;
+        }
+    }
+    /**
+     * Get topic by ID
+     * @param topicId - Topic ID
+     * @returns Topic record or null
+     */
+    async getTopicById(topicId) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            const result = await this.client.query(`SELECT * FROM ${TOPIC_TABLE}:${topicId} LIMIT 1`, {});
+            const data = this.extractResult(result);
+            if (data && data.length > 0) {
+                return data[0];
+            }
+            return null;
+        }
+        catch (error) {
+            console.error('[SurrealDB] getTopicById failed:', error.message);
+            return null;
+        }
+    }
+    /**
+     * Get topics by parent entity ID
+     * @param entityId - Entity ID (e.g., "entity:123" or 123)
+     * @returns Array of topics
+     */
+    async getTopicsByEntity(entityId) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            let numericId;
+            if (typeof entityId === 'string') {
+                const parts = entityId.split(':');
+                numericId = parseInt(parts[parts.length - 1], 10);
+            }
+            else {
+                numericId = entityId;
+            }
+            const result = await this.client.query(`SELECT * FROM ${TOPIC_TABLE} WHERE parent_entity_id = $entityId ORDER BY created_at DESC`, { entity_id: numericId });
+            const data = this.extractResult(result);
+            return data || [];
+        }
+        catch (error) {
+            console.error('[SurrealDB] getTopicsByEntity failed:', error.message);
+            return [];
+        }
+    }
+    /**
+     * Delete a topic
+     * @param topicId - Topic ID
+     */
+    async deleteTopic(topicId) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            await this.client.query(`DELETE ${TOPIC_TABLE}:${topicId}`, {});
+            console.log(`[SurrealDB] Deleted topic ${topicId}`);
+        }
+        catch (error) {
+            console.error('[SurrealDB] deleteTopic failed:', error.message);
+            throw error;
+        }
+    }
+    /**
+     * Link topic to memory
+     * @param topicId - Topic ID
+     * @param memoryId - Memory ID
+     * @param relevanceScore - Relevance score (0-1)
+     */
+    async linkTopicMemory(topicId, memoryId, relevanceScore = 0.8) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            const sql = `
+        RELATE ${TOPIC_MEMORY_TABLE}:${topicId}->${TOPIC_TABLE}:${topicId}->${MEMORY_TABLE}:${memoryId}
+        SET
+          relevance_score = $relevance_score,
+          weight = $weight,
+          created_at = time::now()
+      `;
+            await this.client.query(sql, {
+                relevance_score: relevanceScore,
+                weight: relevanceScore,
+            });
+            console.log(`[SurrealDB] Linked topic ${topicId} to memory ${memoryId}`);
+        }
+        catch (error) {
+            console.error('[SurrealDB] linkTopicMemory failed:', error.message);
+            throw error;
+        }
+    }
+    /**
+     * Get memories linked to a topic
+     * @param topicId - Topic ID
+     * @param limit - Maximum number of memories to return
+     * @returns Array of linked memories
+     */
+    async getMemoriesByTopic(topicId, limit = 50) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            const sql = `
+        SELECT
+          m.id,
+          m.content,
+          m.type,
+          edge.weight,
+          edge.relevance_score,
+          m.created_at
+        FROM ${TOPIC_MEMORY_TABLE} edge
+        WHERE edge.in = ${TOPIC_TABLE}:${topicId}
+        JOIN edge.out AS m
+        ORDER BY edge.weight DESC
+        LIMIT ${limit}
+      `;
+            const result = await this.client.query(sql, {});
+            const data = this.extractResult(result);
+            return (data || []).map((r) => ({
+                id: this.extractId(r.id),
+                content: r.content,
+                type: r.type,
+                weight: r.weight,
+                similarity: r.relevance_score,
+                created_at: r.created_at,
+            }));
+        }
+        catch (error) {
+            console.error('[SurrealDB] getMemoriesByTopic failed:', error.message);
+            return [];
         }
     }
     async close() {
         if (this.client) {
             await this.client.close();
             this.client = null;
+        }
+    }
+    // ============================================================
+    // Stage 3: Alias Management Methods
+    // ============================================================
+    /**
+     * Add an alias for an entity
+     * @param alias - The alias name
+     * @param entityId - Entity ID (e.g., "entity:123" or 123)
+     * @param verified - Whether the alias is verified
+     * @param source - Source of the alias ('manual', 'llm', 'user', 'merged')
+     * @param createdBy - Creator identifier (optional)
+     */
+    async addAlias(alias, entityId, verified = false, source = 'manual', createdBy) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            // Extract numeric ID
+            let numericId;
+            if (typeof entityId === 'string') {
+                const parts = entityId.split(':');
+                numericId = parseInt(parts[parts.length - 1], 10);
+            }
+            else {
+                numericId = entityId;
+            }
+            const sql = `
+        UPSERT ${ENTITY_ALIAS_TABLE} SET
+          alias = $alias,
+          entity_id = $entity_id,
+          verified = $verified,
+          source = $source,
+          created_by = $created_by,
+          created_at = time::now()
+      `;
+            await this.client.query(sql, {
+                alias,
+                entity_id: numericId,
+                verified,
+                source,
+                created_by: createdBy,
+            });
+            console.log(`[SurrealDB] Added alias "${alias}" -> entity:${numericId}`);
+        }
+        catch (error) {
+            console.error('[SurrealDB] addAlias failed:', error.message);
+            throw error;
+        }
+    }
+    /**
+     * Resolve an alias to its canonical entity ID (with cycle detection and path flattening)
+     * User feedback: prevent infinite loops from circular aliases
+     * @param alias - The alias to resolve
+     * @param visited - Set of visited aliases for cycle detection (internal use)
+     * @returns Canonical entity ID or null
+     */
+    async resolveAlias(alias, visited = new Set()) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            // Cycle detection - prevent infinite loops
+            if (visited.has(alias)) {
+                console.warn(`[SurrealDB] Circular alias reference detected: ${alias}`);
+                return null;
+            }
+            visited.add(alias);
+            // Query alias
+            const result = await this.client.query(`SELECT VALUE entity_id FROM ${ENTITY_ALIAS_TABLE} WHERE alias = $alias LIMIT 1`, { alias });
+            const data = this.extractResult(result);
+            if (data && data.length > 0) {
+                const entityId = String(data[0]);
+                // Check if points to another alias (path flattening)
+                const canonicalResult = await this.client.query(`SELECT VALUE canonical_id FROM ${ENTITY_TABLE} WHERE id = $entityId LIMIT 1`, { entityId });
+                const canonicalData = this.extractResult(canonicalResult);
+                if (canonicalData && canonicalData.length > 0 && canonicalData[0]) {
+                    // Points to another alias, recursively resolve
+                    const finalId = await this.resolveAlias(String(canonicalData[0]), visited);
+                    return finalId;
+                }
+                return entityId;
+            }
+            return null;
+        }
+        catch (error) {
+            console.error('[SurrealDB] resolveAlias failed:', error.message);
+            return null;
+        }
+    }
+    /**
+     * Get all aliases for an entity
+     * @param entityId - Entity ID
+     * @returns Array of alias names
+     */
+    async getAliasesByEntity(entityId) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            let numericId;
+            if (typeof entityId === 'string') {
+                const parts = entityId.split(':');
+                numericId = parseInt(parts[parts.length - 1], 10);
+            }
+            else {
+                numericId = entityId;
+            }
+            const result = await this.client.query(`SELECT alias FROM ${ENTITY_ALIAS_TABLE} WHERE entity_id = $entityId`, { entity_id: numericId });
+            const data = this.extractResult(result);
+            return (data || []).map((row) => row.alias);
+        }
+        catch (error) {
+            console.error('[SurrealDB] getAliasesByEntity failed:', error.message);
+            return [];
+        }
+    }
+    /**
+     * Merge two entities (alias -> canonical)
+     * User feedback: check threshold after merge and trigger re-clustering if needed
+     * @param aliasEntityId - The entity to merge from
+     * @param canonicalEntityId - The canonical entity to merge into
+     * @param topicIndexer - Optional TopicIndexer for threshold checking
+     */
+    async mergeEntities(aliasEntityId, canonicalEntityId, topicIndexer) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            // Extract numeric IDs
+            const aliasId = typeof aliasEntityId === 'string' ? aliasEntityId.split(':').pop() : aliasEntityId;
+            const canonicalId = typeof canonicalEntityId === 'string' ? canonicalEntityId.split(':').pop() : canonicalEntityId;
+            if (!aliasId || !canonicalId) {
+                throw new Error('[SurrealDB] Invalid entity IDs for merge');
+            }
+            console.log(`[SurrealDB] Merging entity:${aliasId} -> entity:${canonicalId}`);
+            // Step 1: Get all memories linked to alias entity
+            const aliasMemoriesResult = await this.client.query(`SELECT * FROM memory_entity WHERE out = entity:${aliasId}`, {});
+            const aliasMemories = this.extractResult(aliasMemoriesResult);
+            // Step 2: Link each memory to canonical entity (skip duplicates)
+            for (const mem of aliasMemories) {
+                const memoryId = this.extractId(mem.in);
+                try {
+                    await this.linkMemoryEntity(memoryId, Number(canonicalId), 0.9);
+                }
+                catch (e) {
+                    // Ignore duplicate edge errors
+                    console.log(`[SurrealDB] Edge already exists for memory ${memoryId}`);
+                }
+            }
+            // Step 3: Delete old edges from alias entity
+            await this.client.query(`DELETE FROM memory_entity WHERE out = entity:${aliasId}`, {});
+            // Step 4: Mark alias entity as merged
+            await this.client.query(`UPDATE entity:${aliasId} SET canonical_id = ${canonicalId}, is_merged = true, merged_at = time::now()`, {});
+            // Step 5: Add alias record
+            const aliasNameResult = await this.client.query(`SELECT name FROM entity:${aliasId}`, {});
+            const aliasNameData = this.extractResult(aliasNameResult);
+            const aliasName = aliasNameData && aliasNameData.length > 0 ? aliasNameData[0].name : `entity_${aliasId}`;
+            await this.addAlias(aliasName, canonicalId, true, 'merged');
+            console.log(`[SurrealDB] Merged entity:${aliasId} -> entity:${canonicalId}`);
+            // Step 6: Check threshold after merge (User feedback)
+            const stats = await this.getEntityStats(String(canonicalId));
+            if (stats.memory_count >= TOPIC_SOFT_LIMIT) {
+                console.log(`[SurrealDB] Merge triggered Super Node threshold for ${canonicalId} (${stats.memory_count} edges)`);
+                if (topicIndexer) {
+                    await topicIndexer.enqueuePriorityTopicCreation(String(canonicalId));
+                }
+            }
+        }
+        catch (error) {
+            console.error('[SurrealDB] mergeEntities failed:', error.message);
+            throw error;
+        }
+    }
+    // ============================================================
+    // Stage 3: Super Node Management Methods
+    // ============================================================
+    /**
+     * Freeze an entity to prevent new edges (Super Node protection)
+     * @param entityId - Entity ID
+     * @param reason - Reason for freezing
+     */
+    async freezeEntity(entityId, reason) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            let numericId;
+            if (typeof entityId === 'string') {
+                const parts = entityId.split(':');
+                numericId = parseInt(parts[parts.length - 1], 10);
+            }
+            else {
+                numericId = entityId;
+            }
+            await this.client.query(`UPDATE entity:${numericId} SET is_frozen = true, freeze_reason = $reason, frozen_at = time::now()`, { reason: reason || 'Super Node threshold exceeded' });
+            console.log(`[SurrealDB] Froze entity:${numericId} - ${reason || 'Super Node threshold exceeded'}`);
+        }
+        catch (error) {
+            console.error('[SurrealDB] freezeEntity failed:', error.message);
+            throw error;
+        }
+    }
+    /**
+     * Check if an entity is frozen
+     * @param entityId - Entity ID
+     * @returns True if frozen
+     */
+    async isEntityFrozen(entityId) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            let numericId;
+            if (typeof entityId === 'string') {
+                const parts = entityId.split(':');
+                numericId = parseInt(parts[parts.length - 1], 10);
+            }
+            else {
+                numericId = entityId;
+            }
+            const result = await this.client.query(`SELECT VALUE is_frozen FROM entity:${numericId} LIMIT 1`, {});
+            const data = this.extractResult(result);
+            return data && data.length > 0 ? data[0] : false;
+        }
+        catch (error) {
+            console.error('[SurrealDB] isEntityFrozen failed:', error.message);
+            return false;
+        }
+    }
+    /**
+     * Get entity statistics
+     * @param entityId - Entity ID
+     * @returns Entity statistics
+     */
+    async getEntityStats(entityId) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            let numericId;
+            if (typeof entityId === 'string') {
+                const parts = entityId.split(':');
+                numericId = parseInt(parts[parts.length - 1], 10);
+            }
+            else {
+                numericId = entityId;
+            }
+            // Count memory_entity edges
+            const memoryResult = await this.client.query(`SELECT count() as count FROM memory_entity WHERE out = entity:${numericId} GROUP ALL`, {});
+            const memoryData = this.extractResult(memoryResult);
+            const memoryCount = memoryData && memoryData.length > 0 ? memoryData[0].count : 0;
+            // Count topics
+            const topicResult = await this.client.query(`SELECT count() as count FROM ${TOPIC_TABLE} WHERE parent_entity_id = ${numericId} GROUP ALL`, {});
+            const topicData = this.extractResult(topicResult);
+            const topicCount = topicData && topicData.length > 0 ? topicData[0].count : 0;
+            return {
+                memory_count: memoryCount,
+                topic_count: topicCount,
+            };
+        }
+        catch (error) {
+            console.error('[SurrealDB] getEntityStats failed:', error.message);
+            return { memory_count: 0, topic_count: 0 };
+        }
+    }
+    // ============================================================
+    // Stage 2: Entity Co-occurrence and Multi-Degree Retrieval
+    // ============================================================
+    /**
+     * 7. buildEntityCooccurrence - Build entity-entity co-occurrence relationships
+     *
+     * Algorithm:
+     * 1. Find all memories that have multiple entities
+     * 2. For each pair of entities in the same memory, increment co-occurrence count
+     * 3. Create entity_relation edges for pairs with count >= CO_OCCURRENCE_THRESHOLD
+     * 4. Weight = co_occurrence_count / sqrt(entity1_total * entity2_total)
+     *
+     * @param batchSize - Number of memories to process in one batch (default: 1000)
+     * @returns Number of entity relations created
+     */
+    async buildEntityCooccurrence(batchSize = 1000) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        console.log('[SurrealDB] Starting entity co-occurrence build...');
+        // Step 1: Find memories with multiple entities and count co-occurrences
+        const cooccurrenceSql = `
+      SELECT
+        memory,
+        array::group(entity) AS entities
+      FROM ${MEMORY_ENTITY_TABLE}
+      GROUP BY memory
+      LIMIT $batchSize
+    `;
+        const result = await this.client.query(cooccurrenceSql, { batchSize });
+        let data = [];
+        if (Array.isArray(result) && result.length > 0) {
+            if (Array.isArray(result[0])) {
+                data = result[0] || [];
+            }
+            else if (result[0]?.result) {
+                data = result[0].result || [];
+            }
+        }
+        if (data.length === 0) {
+            console.log('[SurrealDB] No memories with multiple entities found');
+            return 0;
+        }
+        // Step 2: Build co-occurrence counts for entity pairs
+        const cooccurrenceMap = new Map();
+        for (const row of data) {
+            const entities = row.entities || [];
+            // Skip memories with only one entity (no co-occurrence possible)
+            if (entities.length < 2) {
+                continue;
+            }
+            const memoryId = this.extractIdFromRecord(row.memory);
+            // Generate all pairs (order matters for consistent key)
+            for (let i = 0; i < entities.length; i++) {
+                for (let j = i + 1; j < entities.length; j++) {
+                    const entityA = this.extractStringIdFromRecord(entities[i]);
+                    const entityB = this.extractStringIdFromRecord(entities[j]);
+                    // Ensure consistent ordering (lexicographically smaller ID first)
+                    const pairKey = entityA < entityB ? `${entityA}-${entityB}` : `${entityB}-${entityA}`;
+                    if (!cooccurrenceMap.has(pairKey)) {
+                        cooccurrenceMap.set(pairKey, { count: 0, memoryIds: [] });
+                    }
+                    const pairData = cooccurrenceMap.get(pairKey);
+                    pairData.count++;
+                    if (!pairData.memoryIds.includes(memoryId)) {
+                        pairData.memoryIds.push(memoryId);
+                    }
+                }
+            }
+        }
+        console.log(`[SurrealDB] Found ${cooccurrenceMap.size} entity pairs with co-occurrence`);
+        // Step 3: Create or update entity_relation edges for pairs above threshold
+        const now = new Date().toISOString();
+        let relationsCreated = 0;
+        for (const [pairKey, pairData] of cooccurrenceMap.entries()) {
+            if (pairData.count < CO_OCCURRENCE_THRESHOLD) {
+                continue; // Skip pairs below threshold
+            }
+            const [entityA, entityB] = pairKey.split('-');
+            // Get entity mention counts for normalization
+            const entityARecord = await this.client.query(`SELECT mention_count FROM ${ENTITY_TABLE}:${entityA}`, {});
+            const entityBRecord = await this.client.query(`SELECT mention_count FROM ${ENTITY_TABLE}:${entityB}`, {});
+            let countA = 1;
+            let countB = 1;
+            if (Array.isArray(entityARecord) && entityARecord.length > 0) {
+                if (Array.isArray(entityARecord[0])) {
+                    countA = entityARecord[0][0]?.mention_count || 1;
+                }
+                else if (entityARecord[0]?.result) {
+                    countA = entityARecord[0].result?.[0]?.mention_count || 1;
+                }
+            }
+            if (Array.isArray(entityBRecord) && entityBRecord.length > 0) {
+                if (Array.isArray(entityBRecord[0])) {
+                    countB = entityBRecord[0][0]?.mention_count || 1;
+                }
+                else if (entityBRecord[0]?.result) {
+                    countB = entityBRecord[0].result?.[0]?.mention_count || 1;
+                }
+            }
+            // Weight = co_occurrence / sqrt(countA * countB)
+            const weight = pairData.count / Math.sqrt(countA * countB);
+            // Create or update entity_relation edge
+            // UPSERT logic: if is_manual_refined = true, preserve relation_type
+            const relationSql = `
+        INSERT INTO ${ENTITY_RELATION_TABLE} (
+          in,
+          out,
+          relation_type,
+          weight,
+          evidence_memory_ids,
+          evidence_count,
+          created_at,
+          updated_at,
+          is_manual_refined,
+          confidence,
+          reasoning,
+          last_occurrence_at
+        ) VALUES (
+          ${ENTITY_TABLE}:${entityA},
+          ${ENTITY_TABLE}:${entityB},
+          'co_occurs',
+          $weight,
+          $evidence_memory_ids,
+          $evidence_count,
+          $created_at,
+          $updated_at,
+          false,
+          0.0,
+          NULL,
+          NULL
+        )
+        ON DUPLICATE KEY UPDATE
+          weight = $weight,
+          evidence_memory_ids = array::concat(evidence_memory_ids, $evidence_memory_ids),
+          evidence_count = evidence_count + $evidence_count,
+          updated_at = $updated_at,
+          last_occurrence_at = $updated_at,
+          relation_type = IF is_manual_refined THEN relation_type ELSE 'co_occurs' END
+      `;
+            await this.client.query(relationSql, {
+                weight,
+                evidence_memory_ids: pairData.memoryIds,
+                evidence_count: pairData.count,
+                created_at: now,
+                updated_at: now,
+            });
+            relationsCreated++;
+        }
+        console.log(`[SurrealDB] Created/updated ${relationsCreated} entity relations (threshold: ${CO_OCCURRENCE_THRESHOLD})`);
+        return relationsCreated;
+    }
+    /**
+     * 8. searchByMultiDegree - Multi-degree association search
+     *
+     * Find memories through entity-entity graph traversal:
+     * Memory -> Entity -> Entity -> Memory
+     *
+     * @param seedMemoryId - The seed memory ID
+     * @param degree - How many hops to traverse (default: 2 for second-degree)
+     * @param maxWeight - Maximum weight threshold for pruning (default: 0.1)
+     * @param limit - Maximum number of results to return
+     * @returns Associated memories with traversal path info
+     */
+    async searchByMultiDegree(seedMemoryId, degree = 2, minWeight = 0.1, limit = 20) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        console.log(`[SurrealDB] Starting ${degree}-degree association search from memory ${seedMemoryId}...`);
+        const seedRecordId = `${MEMORY_TABLE}:${seedMemoryId}`;
+        // Build dynamic traversal query based on degree
+        // For degree=2: Memory -> Entity -> Entity -> Memory
+        // For degree=3: Memory -> Entity -> Entity -> Entity -> Memory
+        let traversalSql = '';
+        if (degree === 1) {
+            // First-degree: direct entity association
+            traversalSql = `
+        SELECT
+          memory.id AS id,
+          memory.content AS content,
+          memory.type AS type,
+          memory.created_at AS created_at,
+          math::max(weight) AS weight
+        FROM ${MEMORY_ENTITY_TABLE}
+        WHERE entity IN (
+          SELECT VALUE entity FROM ${MEMORY_ENTITY_TABLE} WHERE memory = ${seedRecordId}
+        )
+        AND memory != ${seedRecordId}
+        GROUP BY memory.id, memory.content, memory.type, memory.created_at
+        ORDER BY weight DESC
+        LIMIT $limit
+      `;
+        }
+        else {
+            // Multi-degree: traverse entity-entity relations
+            // First get target entity IDs, then fetch memories
+            traversalSql = `
+        SELECT
+          memory.id AS id,
+          memory.content AS content,
+          memory.type AS type,
+          memory.created_at AS created_at,
+          math::max(weight) AS weight
+        FROM ${MEMORY_ENTITY_TABLE}
+        WHERE entity IN (
+          SELECT VALUE out FROM ${ENTITY_RELATION_TABLE}
+          WHERE in IN (
+            SELECT VALUE entity FROM ${MEMORY_ENTITY_TABLE} WHERE memory = ${seedRecordId}
+          )
+          AND weight >= $minWeight
+        )
+        AND memory != ${seedRecordId}
+        GROUP BY memory.id, memory.content, memory.type, memory.created_at
+        ORDER BY weight DESC
+        LIMIT $limit
+      `;
+        }
+        try {
+            const result = await this.client.query(traversalSql, { limit, minWeight });
+            let data = [];
+            if (Array.isArray(result) && result.length > 0) {
+                if (Array.isArray(result[0])) {
+                    data = result[0] || [];
+                }
+                else if (result[0]?.result) {
+                    data = result[0].result || [];
+                }
+            }
+            console.log(`[SurrealDB] ${degree}-degree search found ${data.length} memories`);
+            return data.map((r) => ({
+                id: this.extractIdFromRecord(r),
+                content: r.content,
+                type: r.type,
+                weight: r.weight,
+                created_at: r.created_at,
+            }));
+        }
+        catch (error) {
+            console.error(`[SurrealDB] ${degree}-degree search failed:`, error.message);
+            return [];
+        }
+    }
+    /**
+     * 9. pruneLowWeightEdges - Remove low-weight entity-entity relations
+     *
+     * Pruning strategy:
+     * - Remove edges with weight < minWeight
+     * - Keep edges that are the only connection for an entity
+     *
+     * @param minWeight - Minimum weight threshold (default: 0.1)
+     * @returns Number of edges pruned
+     */
+    async pruneLowWeightEdges(minWeight = 0.1) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        console.log(`[SurrealDB] Starting edge pruning with minWeight=${minWeight}...`);
+        // First, count edges before pruning
+        const beforeResult = await this.client.query(`SELECT count() AS total FROM ${ENTITY_RELATION_TABLE} WHERE weight < $minWeight`, { minWeight });
+        let beforeCount = 0;
+        if (Array.isArray(beforeResult) && beforeResult.length > 0) {
+            if (Array.isArray(beforeResult[0])) {
+                beforeCount = beforeResult[0][0]?.total || 0;
+            }
+            else if (beforeResult[0]?.result) {
+                beforeCount = beforeResult[0].result?.[0]?.total || 0;
+            }
+        }
+        // Delete low-weight edges
+        const deleteSql = `
+      DELETE FROM ${ENTITY_RELATION_TABLE}
+      WHERE weight < $minWeight
+    `;
+        await this.client.query(deleteSql, { minWeight });
+        console.log(`[SurrealDB] Pruned ${beforeCount} low-weight entity relations`);
+        return beforeCount;
+    }
+    /**
+     * 10. getRelationStats - Get entity relation statistics
+     * @returns Statistics about entity-entity relations
+     */
+    async getRelationStats() {
+        if (!this.client) {
+            return { total_relations: 0, avg_weight: 0, max_weight: 0, min_weight: 0, by_type: {} };
+        }
+        try {
+            // Total relations
+            const totalResult = await this.client.query(`SELECT count() AS total FROM ${ENTITY_RELATION_TABLE}`, {});
+            let total = 0;
+            if (Array.isArray(totalResult) && totalResult.length > 0) {
+                if (Array.isArray(totalResult[0])) {
+                    total = totalResult[0][0]?.total || 0;
+                }
+                else if (totalResult[0]?.result) {
+                    total = totalResult[0].result?.[0]?.total || 0;
+                }
+            }
+            // Weight statistics - compute in JavaScript to avoid SurrealDB math function issues
+            const weightResult = await this.client.query(`SELECT weight FROM ${ENTITY_RELATION_TABLE}`, {});
+            let avgWeight = 0;
+            let maxWeight = 0;
+            let minWeight = 0;
+            let weights = [];
+            if (Array.isArray(weightResult) && weightResult.length > 0) {
+                if (Array.isArray(weightResult[0])) {
+                    weights = weightResult[0].map((r) => r.weight || 0);
+                }
+                else if (weightResult[0]?.result) {
+                    weights = (weightResult[0].result || []).map((r) => r.weight || 0);
+                }
+            }
+            if (weights.length > 0) {
+                avgWeight = weights.reduce((sum, w) => sum + w, 0) / weights.length;
+                maxWeight = Math.max(...weights);
+                minWeight = Math.min(...weights);
+            }
+            // By type
+            const typeResult = await this.client.query(`SELECT relation_type, count() AS count FROM ${ENTITY_RELATION_TABLE} GROUP BY relation_type`, {});
+            const byType = {};
+            if (Array.isArray(typeResult) && typeResult.length > 0) {
+                let typeData = [];
+                if (Array.isArray(typeResult[0])) {
+                    typeData = typeResult[0] || [];
+                }
+                else if (typeResult[0]?.result) {
+                    typeData = typeResult[0].result || [];
+                }
+                for (const row of typeData) {
+                    if (row.relation_type && row.count) {
+                        byType[row.relation_type] = row.count;
+                    }
+                }
+            }
+            return {
+                total_relations: total,
+                avg_weight: avgWeight,
+                max_weight: maxWeight,
+                min_weight: minWeight,
+                by_type: byType,
+            };
+        }
+        catch (error) {
+            console.error('[SurrealDB] getRelationStats failed:', error.message);
+            return { total_relations: 0, avg_weight: 0, max_weight: 0, min_weight: 0, by_type: {} };
         }
     }
 }

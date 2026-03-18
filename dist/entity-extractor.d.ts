@@ -8,7 +8,7 @@
  *   ↓
  * Layer 2: 1B Model Pre-Filter (very low cost, ~30% coverage)
  *   ↓
- * Layer 3: 8B Model Refine (high cost, ~10% coverage)
+ * Layer 3: 7B Model Refine (high cost, ~10% coverage)
  *
  * Features:
  * - Alias normalization (Postgres → PostgreSQL, TS → TypeScript)
@@ -47,15 +47,15 @@ export declare const ALIAS_RULES: Record<string, string>;
  */
 export declare class EntityExtractor {
     private endpoint1B;
-    private endpoint8B;
+    private endpoint7B;
     private limiter1B;
-    private limiter8B;
+    private limiter7B;
     private knownEntities;
     private buffer;
     private stats;
     private readonly bufferFlushInterval;
     private readonly minBatchSize;
-    constructor(endpoint1B?: string, endpoint8B?: string);
+    constructor(endpoint1B?: string, endpoint7B?: string);
     /**
      * Start periodic buffer flush
      */
@@ -114,10 +114,10 @@ export declare class EntityExtractor {
      */
     private parseBatchFilterResponse;
     /**
-     * Layer 3: 8B Model Refine
+     * Layer 3: 7B Model Refine
      * High-quality entity extraction with proper noun detection
      */
-    layer3_8BRefine(text: string): Promise<ExtractedEntity[]>;
+    layer3_7BRefine(text: string): Promise<ExtractedEntity[]>;
     /**
      * Build refine prompt for 8B model
      */
@@ -156,5 +156,14 @@ export declare class EntityExtractor {
         knownCacheSize: number;
         bufferSize: number;
     };
+    /**
+     * Public method to call 7B LLM endpoint directly
+     * Used by EntityIndexer for relation classification
+     *
+     * @param prompt - The prompt to send to the 7B model
+     * @param timeout - Timeout in milliseconds (default: 10000)
+     * @returns Parsed JSON response from the model
+     */
+    call7B(prompt: string, timeout?: number): Promise<any>;
 }
 //# sourceMappingURL=entity-extractor.d.ts.map
