@@ -136,6 +136,15 @@ tail -f ~/.openclaw/logs/gateway.log | grep memory
 | **Semantic** | 用户偏好、事实 | 0.7-0.9 | 每日 ×0.98 | - |
 | **Reflection** | 自动生成的洞察 | 0.9 (固定) | 无 | 每 50 条 episodic 生成 |
 
+### 🆕 Stage 2 新增功能 (v2.4.0)
+
+| 功能 | 说明 | 优势 |
+|------|------|------|
+| **文档导入** | 支持 PDF、Word、Markdown、HTML 格式 | 自动从本地文件或 URL 导入知识 |
+| **智能语义分段** | 关键词重叠检测、主题转变识别 | 保持语义连贯，不切断句子 |
+| **目录监控** | chokidar 监控目录变化 | 文件放入自动导入，无需手动操作 |
+| **document_import tool** | 支持 URL 和本地文件导入 | 灵活的 API 导入方式 |
+
 ### 🆕 Stage 1 新增功能 (v2.2.0)
 
 | 功能 | 说明 | 优势 |
@@ -181,7 +190,7 @@ importance = 0.5 × base_importance
 
 编辑 `~/.openclaw/config.json`：
 
-#### SurrealDB 配置（推荐）
+#### 文档导入配置（可选）
 
 ```json
 {
@@ -203,6 +212,11 @@ importance = 0.5 × base_importance
           },
           "embedding": {
             "endpoint": "http://localhost:8080"
+          },
+          "documentImport": {
+            "watchDir": "~/.openclaw/documents",
+            "chunkSize": 500,
+            "chunkOverlap": 50
           }
         }
       }
@@ -210,6 +224,12 @@ importance = 0.5 × base_importance
   }
 }
 ```
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `documentImport.watchDir` | 监控目录，文件放入自动导入 | 无 |
+| `documentImport.chunkSize` | 语义分段目标大小 | 500 |
+| `documentImport.chunkOverlap` | 段落重叠字符数 | 50 |
 
 #### Qdrant 配置（已弃用）
 
@@ -255,6 +275,43 @@ export MEMORY_EMBEDDING_ENDPOINT=http://localhost:8080
 2. **自动检索** - 每次对话自动注入相关记忆
 3. **偏好提取** - 每 10 条消息自动提取用户偏好
 4. **对话摘要** - 每 10 条消息自动生成摘要
+
+### 文档导入功能
+
+#### 方式一：目录监控（自动导入）
+
+将 PDF/Word/Markdown 文件放入配置的监控目录，系统会自动导入。
+
+```bash
+# 配置监控目录
+mkdir -p ~/.openclaw/documents
+
+# 放入文件后自动导入
+cp ~/Downloads/article.pdf ~/.openclaw/documents/
+```
+
+#### 方式二：使用 document_import 工具
+
+**从 URL 导入：**
+```
+@document_import {"url": "https://example.com/article"}
+```
+
+**从本地文件导入：**
+```
+@document_import {"path": "~/Documents/report.pdf"}
+```
+
+#### 支持的格式
+
+| 格式 | 扩展名 | 说明 |
+|------|--------|------|
+| PDF | `.pdf` | 使用 pdf-parse 解析 |
+| Word | `.docx` | 使用 mammoth 解析 |
+| Markdown | `.md`, `.markdown` | 直接读取文本 |
+| HTML | URL | 从网页提取文本内容 |
+
+详细文档请参阅 [docs/DOCUMENT_IMPORT.md](docs/DOCUMENT_IMPORT.md)
 
 ### 手动检索（可选）
 
@@ -414,6 +471,11 @@ openclaw-memory/
 │   ├── reranker.ts           # 重排序
 │   ├── clusterer.ts          # 聚类
 │   ├── conflict-detector.ts  # 冲突检测
+│   ├── document-parser.ts    # 文档解析器 (PDF/Word/Markdown)
+│   ├── document-splitter.ts  # 智能语义分段器
+│   ├── document-watcher.ts   # 目录监控器
+│   ├── url-importer.ts       # URL 导入器
+│   ├── document-importer.ts  # 统一导入入口
 │   └── ...
 ├── dist/                     # 编译输出
 ├── package.json              # Node.js 配置
@@ -447,6 +509,12 @@ npm run test:graph-integration   # 图集成测试
 npm run test:recall        # 召回率测试
 npm run test:conflict      # 冲突检测测试
 npm run test:features      # 功能测试
+
+# 文档导入功能测试
+npm run test:document-import      # 解析器集成测试
+npm run test:semantic-splitter    # 智能语义分段测试
+npm run test:document-watcher     # 目录监控器测试
+npm run test:url-importer         # URL 导入器测试
 ```
 
 ---
@@ -486,6 +554,14 @@ npm run test:features      # 功能测试
 ---
 
 ## 📝 更新日志
+
+### v2.4.0 (2026-03)
+
+- ✅ **文档导入功能** - 支持 PDF、Word、Markdown、HTML 格式导入
+- ✅ **智能语义分段** - 关键词重叠检测、主题转变识别，保持语义连贯
+- ✅ **目录监控器** - chokidar 监控目录，文件放入自动导入
+- ✅ **document_import tool** - 支持从 URL 或本地文件导入
+- ✅ **完整测试覆盖** - 4 个测试文件，所有测试通过
 
 ### v2.3.0 (2026-03)
 - ✅ **7B 模型支持** - Qwen2.5-Coder-7B 用于实体提取和三元组精炼
