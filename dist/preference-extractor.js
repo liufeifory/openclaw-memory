@@ -3,6 +3,7 @@
  *
  * Extracts structured user preferences from conversation.
  */
+import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 const EXTRACT_PROMPT = `Extract user preferences, facts, and profile information from the conversation.
 
@@ -55,7 +56,7 @@ export class PreferenceExtractor {
             return this.parseUserProfile(output);
         }
         catch (error) {
-            console.error('[PreferenceExtractor] LLM failed:', error.message);
+            logError(`[PreferenceExtractor] LLM failed: ${error.message}`);
             return {
                 likes: [],
                 dislikes: [],

@@ -52,10 +52,16 @@ export declare class SurrealDatabase {
     private config;
     private readonly maxRetries;
     private readonly baseDelayMs;
+    private readonly maxDelayMs;
     constructor(config: SurrealConfig);
     initialize(): Promise<MigrationResult>;
     private createSchema;
-    query(sql: string): Promise<any>;
+    query(sql: string, params?: Record<string, any>): Promise<any>;
+    /**
+     * Raw query execution with automatic re-authentication on permission errors.
+     * This is the low-level method that all query operations should use.
+     */
+    private executeQuery;
     private executeWithRetry;
     upsert(id: number, embedding: number[], payload: Record<string, any>, options?: {
         checkVersion?: boolean;

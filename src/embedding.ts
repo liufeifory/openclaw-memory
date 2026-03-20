@@ -3,6 +3,8 @@
  * Supports BGE-style task_type parameter for query/document distinction.
  */
 
+import { logWarn } from './maintenance-logger.js';
+
 export interface EmbeddingResponse {
   embedding: number[];
 }
@@ -66,7 +68,7 @@ export class EmbeddingService {
    */
   private normalize(vector: number[]): number[] {
     if (!vector || vector.length === 0) {
-      console.warn('[embedding] Empty or undefined vector received');
+      logWarn('[embedding] Empty or undefined vector received');
       return vector || [];
     }
     const magnitude = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));

@@ -50,11 +50,16 @@ export declare class MemoryManager {
      */
     initialize(): Promise<MigrationResult>;
     /**
+     * Dispose the memory manager - stop background workers and close DB connection.
+     */
+    dispose(): Promise<void>;
+    /**
      * Load known entities from database into EntityExtractor cache
      */
     private loadKnownEntitiesToCache;
     /**
      * Start idle clustering worker - runs semantic clustering during idle time.
+     * Uses unref() to not block process exit.
      */
     private startIdleClusteringWorker;
     /**

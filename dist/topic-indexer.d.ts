@@ -22,6 +22,9 @@ export declare class TopicIndexer {
      * Initialize with dependencies
      */
     init(db: SurrealDatabase, embedding: EmbeddingService): void;
+    private scanInterval?;
+    private processInterval?;
+    private idleCheckInterval?;
     /**
      * Start background scheduler for periodic scanning
      * User feedback: Idle Task scheduler for 16GB M4 resource efficiency
@@ -88,5 +91,9 @@ export declare class TopicIndexer {
         totalMemoriesClustered: number;
         totalNoiseArchived: number;
     };
+    /**
+     * Dispose - clear all background intervals
+     */
+    dispose(): void;
 }
 //# sourceMappingURL=topic-indexer.d.ts.map

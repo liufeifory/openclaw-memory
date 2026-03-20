@@ -32,7 +32,6 @@ export class MemoryMaintenance {
         const cutoff = new Date();
         cutoff.setDate(cutoff.getDate() - this.config.olderThanDays);
         const cutoffStr = cutoff.toISOString();
-        console.log(`[MemoryMaintenance] Running decay on memories older than ${this.config.olderThanDays} days`);
         let episodicDecayed = 0;
         let semanticDecayed = 0;
         // Scroll through all memories and apply decay
@@ -63,7 +62,6 @@ export class MemoryMaintenance {
                     break;
             }
         }
-        console.log(`[MemoryMaintenance] Decayed ${episodicDecayed} episodic, ${semanticDecayed} semantic memories`);
         return { episodicDecayed, semanticDecayed };
     }
     /**
@@ -71,7 +69,6 @@ export class MemoryMaintenance {
      * Returns the number of memories promoted.
      */
     async runPromotion() {
-        console.log(`[MemoryMaintenance] Checking for memories to promote (threshold: ${this.config.promotionThreshold} accesses)`);
         let promoted = 0;
         let offset = 0;
         while (true) {
@@ -91,14 +88,12 @@ export class MemoryMaintenance {
                         created_at: mem.payload.created_at,
                     });
                     promoted++;
-                    console.log(`[MemoryMaintenance] Promoted memory ${mem.id} (access_count: ${accessCount})`);
                 }
             }
             offset += memories.length;
             if (memories.length < 100)
                 break;
         }
-        console.log(`[MemoryMaintenance] Promoted ${promoted} memories`);
         return promoted;
     }
     /**
@@ -107,7 +102,6 @@ export class MemoryMaintenance {
      */
     async maybeGenerateReflection(generateFn) {
         const stats = await this.db.getStats();
-        console.log(`[MemoryMaintenance] Checking for reflection generation (interval: ${this.config.reflectionInterval})`);
         // In production:
         // 1. Count episodic memories
         // 2. If count % interval == 0, generate reflection
@@ -118,7 +112,6 @@ export class MemoryMaintenance {
      * Run all maintenance tasks.
      */
     async runMaintenance(generateReflectionFn) {
-        console.log('[MemoryMaintenance] Starting maintenance run');
         const [decayResult, promoted] = await Promise.all([
             this.runDecay(),
             this.runPromotion(),

@@ -14,6 +14,7 @@
 import { SurrealDatabase, GRAPH_PROTECTION, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE } from './surrealdb-client.js';
 import { EntityExtractor, ExtractedEntity } from './entity-extractor.js';
 import { extractContextWindow, diverseSample } from './context-window.js';
+import { logInfo, logWarn, logError } from './maintenance-logger.js';
 import * as os from 'os';
 
 /**
@@ -140,8 +141,6 @@ export class EntityIndexer {
 
     // Extract entities and track mentions for frequency filtering
     this.trackEntityMentions(memoryId, content);
-
-    console.log(`[EntityIndexer] Queued memory ${memoryId} for indexing (queue size: ${this.queue.length})`);
   }
 
   /**
@@ -229,7 +228,7 @@ export class EntityIndexer {
           await this.db.query(
             `UPDATE ${entityRecordId} SET is_frozen = true WHERE is_frozen = false`
           );
-          console.log(`[EntityIndexer] Frozen super node "${entityId}" (relation_count: ${relationCount})`);
+          logInfo(`Frozen super node "${entityId}" (relation_count: ${relationCount})`);
           return true;
         }
 
@@ -238,7 +237,6 @@ export class EntityIndexer {
 
       return false;
     } catch (error: any) {
-      console.error(`[EntityIndexer] checkSuperNode failed for ${entityId}:`, error.message);
       return false;
     }
   }
@@ -249,7 +247,6 @@ export class EntityIndexer {
    */
   async runTTLPruning(): Promise<number> {
     if (!this.db) {
-      console.log('[EntityIndexer] TTL Pruning skipped: no database connection');
       return 0;
     }
 
@@ -285,11 +282,11 @@ export class EntityIndexer {
       }
 
       this.totalPruned += deletedCount;
-      console.log(`[EntityIndexer] TTL Pruning: marked ${markedCount} inactive, deleted ${deletedCount} entities older than ${this.ttlDays} days`);
+      logInfo(`TTL Pruning: marked ${markedCount} inactive, deleted ${deletedCount} entities older than ${this.ttlDays} days`);
 
       return deletedCount;
     } catch (error: any) {
-      console.error('[EntityIndexer] TTL Pruning failed:', error.message);
+      logError(`TTL Pruning failed: ${error.message}`);
       return 0;
     }
   }
@@ -300,7 +297,7 @@ export class EntityIndexer {
    */
   async runAliasMerge(): Promise<number> {
     if (!this.db || this.aliasPairs.length === 0) {
-      console.log('[EntityIndexer] Alias Merge skipped: no database or alias pairs');
+      logWarn('Alias Merge skipped: no database or alias pairs');
       return 0;
     }
 
@@ -331,7 +328,6 @@ export class EntityIndexer {
 
         // Skip if alias already has canonical_id (already merged)
         if (aliasEntity.canonical_id) {
-          console.log(`[EntityIndexer] Alias "${alias}" already merged to canonical_id ${aliasEntity.canonical_id}, skipping`);
           continue;
         }
 
@@ -368,13 +364,10 @@ export class EntityIndexer {
 
         mergedCount++;
         this.totalMerged += mergedCount;
-
-        console.log(`[EntityIndexer] Merged alias "${alias}" -> "${canonical}" (canonical_id: ${canonicalId})`);
       }
 
       return mergedCount;
     } catch (error: any) {
-      console.error('[EntityIndexer] Alias Merge failed:', error.message);
       return 0;
     }
   }
@@ -390,7 +383,7 @@ export class EntityIndexer {
       const sql = `UPDATE memory_entity SET entity = '${toEntityId}' WHERE entity = '${fromEntityId}'`;
       await this.db.query(sql);
     } catch (error: any) {
-      console.error('[EntityIndexer] transferEntityLinks failed:', error.message);
+      // Silently ignore
     }
   }
 
@@ -485,8 +478,8 @@ export class EntityIndexer {
       this.currentIndexIntervalMs = this.minIntervalMs;
     }
 
-    console.log(
-      `[EntityIndexer] Backpressure adjusted interval to ${this.currentIndexIntervalMs}ms ` +
+    logInfo(
+      `Backpressure adjusted interval to ${this.currentIndexIntervalMs}ms ` +
       `(queue: ${queueSize}, memory: ${(memoryUsage * 100).toFixed(1)}%, CPU: ${(cpuLoad * 100).toFixed(1)}%)`
     );
   }
@@ -516,8 +509,6 @@ export class EntityIndexer {
           await this.processItem(item);
           this.totalIndexed++;
         } catch (error: any) {
-          console.error(`[EntityIndexer] Failed to process item ${item.memoryId}:`, error.message);
-
           // Retry logic
           if (item.retryCount < 3) {
             item.retryCount++;
@@ -554,7 +545,6 @@ export class EntityIndexer {
       const frequency = await this.checkEntityFrequency(entity.name);
 
       if (frequency < GRAPH_PROTECTION.MIN_MENTION_COUNT) {
-        console.log(`[EntityIndexer] Skipping "${entity.name}": frequency ${frequency} < ${GRAPH_PROTECTION.MIN_MENTION_COUNT}`);
         continue;
       }
 
@@ -562,7 +552,6 @@ export class EntityIndexer {
       const isSuperNode = await this.checkSuperNode(entity.name);
 
       if (isSuperNode) {
-        console.log(`[EntityIndexer] Skipping "${entity.name}": entity is frozen (super node)`);
         this.totalFrozen++;
         continue;
       }
@@ -575,8 +564,6 @@ export class EntityIndexer {
         entityId,
         entity.confidence
       );
-
-      console.log(`[EntityIndexer] Indexed entity "${entity.name}" (${entityId}) for memory ${item.memoryId}`);
     }
 
     // Mark memory as indexed
@@ -585,16 +572,21 @@ export class EntityIndexer {
     );
   }
 
+  private backgroundInterval?: NodeJS.Timeout;
+
   /**
    * Start background queue processor
    */
   private startBackgroundProcessor(): void {
-    setInterval(async () => {
+    this.backgroundInterval = setInterval(async () => {
       if (!this.processing && this.queue.length > 0) {
         this.processQueue().catch(console.error);
       }
     }, this.currentIndexIntervalMs);
+    this.backgroundInterval.unref();
   }
+
+  private ttlPruningInterval?: NodeJS.Timeout;
 
   /**
    * Start TTL pruning scheduler (runs every PRUNE_INTERVAL_DAYS)
@@ -602,12 +594,15 @@ export class EntityIndexer {
   private startTTLPruningScheduler(): void {
     const pruneIntervalMs = this.pruneIntervalDays * 24 * 60 * 60 * 1000;
 
-    setInterval(async () => {
+    this.ttlPruningInterval = setInterval(async () => {
       await this.runTTLPruning().catch(console.error);
     }, pruneIntervalMs);
+    this.ttlPruningInterval.unref();
 
-    console.log(`[EntityIndexer] TTL Pruning scheduled every ${this.pruneIntervalDays} days`);
+    logInfo(`TTL Pruning scheduled every ${this.pruneIntervalDays} days`);
   }
+
+  private cooccurrenceInterval?: NodeJS.Timeout;
 
   /**
    * Start co-occurrence builder scheduler (Stage 2)
@@ -616,11 +611,12 @@ export class EntityIndexer {
   private startCooccurrenceScheduler(): void {
     const cooccurrenceIntervalMs = 7 * 24 * 60 * 60 * 1000;  // 7 days
 
-    setInterval(async () => {
+    this.cooccurrenceInterval = setInterval(async () => {
       await this.buildEntityCooccurrence().catch(console.error);
     }, cooccurrenceIntervalMs);
+    this.cooccurrenceInterval.unref();
 
-    console.log(`[EntityIndexer] Co-occurrence builder scheduled every 7 days`);
+    logInfo(`Co-occurrence builder scheduled every 7 days`);
   }
 
   /**
@@ -629,17 +625,17 @@ export class EntityIndexer {
    */
   async buildEntityCooccurrence(): Promise<number> {
     if (!this.db) {
-      console.log('[EntityIndexer] Skip co-occurrence build: no database connection');
+      logWarn('Skip co-occurrence build: no database connection');
       return 0;
     }
 
     try {
       const relationsBuilt = await this.db.buildEntityCooccurrence(1000);
       this.totalRelationsBuilt += relationsBuilt;
-      console.log(`[EntityIndexer] Built ${relationsBuilt} entity relations`);
+      logInfo(`Built ${relationsBuilt} entity relations`);
       return relationsBuilt;
     } catch (error: any) {
-      console.error('[EntityIndexer] buildEntityCooccurrence failed:', error.message);
+      logError(`buildEntityCooccurrence failed: ${error.message}`);
       return 0;
     }
   }
@@ -650,16 +646,16 @@ export class EntityIndexer {
    */
   async pruneLowWeightEdges(minWeight: number = 0.1): Promise<number> {
     if (!this.db) {
-      console.log('[EntityIndexer] Skip edge pruning: no database connection');
+      logWarn('Skip edge pruning: no database connection');
       return 0;
     }
 
     try {
       const pruned = await this.db.pruneLowWeightEdges(minWeight);
-      console.log(`[EntityIndexer] Pruned ${pruned} low-weight entity relations`);
+      logInfo(`Pruned ${pruned} low-weight entity relations`);
       return pruned;
     } catch (error: any) {
-      console.error('[EntityIndexer] pruneLowWeightEdges failed:', error.message);
+      logError(`pruneLowWeightEdges failed: ${error.message}`);
       return 0;
     }
   }
@@ -675,14 +671,12 @@ export class EntityIndexer {
     limit: number = 20
   ): Promise<any[]> {
     if (!this.db) {
-      console.log('[EntityIndexer] Skip multi-degree search: no database connection');
       return [];
     }
 
     try {
       return await this.db.searchByMultiDegree(seedMemoryId, degree, minWeight, limit);
     } catch (error: any) {
-      console.error('[EntityIndexer] searchByMultiDegree failed:', error.message);
       return [];
     }
   }
@@ -698,7 +692,6 @@ export class EntityIndexer {
     try {
       return await this.db.getRelationStats();
     } catch (error: any) {
-      console.error('[EntityIndexer] getRelationStats failed:', error.message);
       return { total_relations: 0, avg_weight: 0, max_weight: 0, min_weight: 0, by_type: {} };
     }
   }
@@ -723,7 +716,6 @@ export class EntityIndexer {
    */
   clearQueue(): void {
     this.queue = [];
-    console.log('[EntityIndexer] Queue cleared');
   }
 
   /**
@@ -735,7 +727,6 @@ export class EntityIndexer {
     this.totalPruned = 0;
     this.totalMerged = 0;
     this.totalRelationsBuilt = 0;
-    console.log('[EntityIndexer] Stats reset');
   }
 
   /**
@@ -784,6 +775,7 @@ export class EntityIndexer {
   private readonly relationClassifierIntervalMs: number = 6 * 60 * 60 * 1000;  // 6 hours
   private readonly relationClassifierBatchSize: number = 100;  // Per batch
   private totalClassified = 0;  // Tracking total classified relations
+  private relationClassifierInterval?: NodeJS.Timeout;
 
   /**
    * Start relation classifier scheduler
@@ -797,16 +789,17 @@ export class EntityIndexer {
 
       // Skip if system is under heavy load
       if (loadAvg > this.cpuThreshold) {
-        console.log(`[EntityIndexer] Skip relation classification: high CPU load (${loadAvg.toFixed(2)})`);
+        logWarn(`Skip relation classification: high CPU load (${loadAvg.toFixed(2)})`);
         return;
       }
 
       await this.classifyEntityRelations().catch(console.error);
     };
 
-    setInterval(checkLoadAndRun, this.relationClassifierIntervalMs);
+    this.relationClassifierInterval = setInterval(checkLoadAndRun, this.relationClassifierIntervalMs);
+    this.relationClassifierInterval.unref();
 
-    console.log(`[EntityIndexer] Relation classifier scheduled every 6 hours (CPU threshold: ${this.cpuThreshold})`);
+    logInfo(`Relation classifier scheduled every 6 hours (CPU threshold: ${this.cpuThreshold})`);
   }
 
   /**
@@ -817,7 +810,7 @@ export class EntityIndexer {
    */
   async classifyEntityRelations(): Promise<number> {
     if (!this.db) {
-      console.log('[EntityIndexer] Skip relation classification: no database');
+      logWarn('Skip relation classification: no database');
       return 0;
     }
 
@@ -835,11 +828,11 @@ export class EntityIndexer {
       const relations = this.extractResultArray(unclassifiedResult);
 
       if (relations.length === 0) {
-        console.log('[EntityIndexer] No unclassified relations found');
+        logInfo('No unclassified relations found');
         return 0;
       }
 
-      console.log(`[EntityIndexer] Found ${relations.length} relations to classify`);
+      logInfo(`Found ${relations.length} relations to classify`);
 
       let classified = 0;
 
@@ -853,7 +846,7 @@ export class EntityIndexer {
           const entityB = await this.getEntityById(outEntityId);
 
           if (!entityA || !entityB) {
-            console.log(`[EntityIndexer] Skip relation ${relation.id}: entity not found (may be pruned)`);
+            logWarn(`Skip relation ${relation.id}: entity not found (may be pruned)`);
             continue;
           }
 
@@ -881,17 +874,17 @@ export class EntityIndexer {
           classified++;
 
         } catch (error: any) {
-          console.error(`[EntityIndexer] Failed to classify relation ${relation.id}:`, error.message);
+          logError(`Failed to classify relation ${relation.id}: ${error.message}`);
           // Continue to next relation
         }
       }
 
       this.totalClassified += classified;
-      console.log(`[EntityIndexer] Classified ${classified} relations (total: ${this.totalClassified})`);
+      logInfo(`Classified ${classified} relations (total: ${this.totalClassified})`);
       return classified;
 
     } catch (error: any) {
-      console.error('[EntityIndexer] Relation classification failed:', error.message);
+      logError(`Relation classification failed: ${error.message}`);
       return 0;
     }
   }
@@ -952,7 +945,6 @@ export class EntityIndexer {
       return snippets.slice(0, 3);
 
     } catch (error: any) {
-      console.error('[EntityIndexer] Failed to get memory snippets:', error.message);
       return [];
     }
   }
@@ -1049,7 +1041,6 @@ JSON:`;
 
       // Validate relation type
       if (!VALID_TYPES.includes(relationType)) {
-        console.log(`[EntityIndexer] Unknown relation type "${relationType}", using related_to`);
         relationType = 'related_to';
       }
 
@@ -1060,7 +1051,6 @@ JSON:`;
 
     } catch {
       // Default fallback
-      console.log('[EntityIndexer] Parse failed, using default values');
       return {
         relation_type: 'related_to',
         confidence: 0.5,
@@ -1086,7 +1076,6 @@ JSON:`;
     }
   ): Promise<void> {
     if (!this.db) {
-      console.log('[EntityIndexer] Skip relation update: no database');
       return;
     }
 
@@ -1103,15 +1092,9 @@ JSON:`;
       const outEntity = await this.getEntityById(this.extractId(relation.out));
 
       // If source matches "out" entity, the direction should be reversed
-      // Example: source="Facebook" means Facebook -> created_by -> React
-      // But current edge is React -> Facebook, so we need to reverse
       if (inEntity && outEntity) {
         if (source.toLowerCase() === outEntity.name.toLowerCase()) {
           needsDirectionCorrection = true;
-          console.log(`[EntityIndexer] Direction healing: source "${source}" matches out entity "${outEntity.name}", reversing direction`);
-        } else if (source.toLowerCase() === inEntity.name.toLowerCase()) {
-          // Source matches current "in", direction is correct
-          console.log(`[EntityIndexer] Direction healing: source "${source}" matches in entity "${inEntity.name}", keeping direction`);
         }
       }
     }
@@ -1136,8 +1119,6 @@ JSON:`;
       `;
 
       await this.db.query(createSql);
-
-      console.log(`[EntityIndexer] Reversed relation direction: ${relation_type} (source: ${source || 'reverse_direction flag'})`);
     } else {
       // Update existing relation
       const updateSql = `
@@ -1180,5 +1161,28 @@ JSON:`;
       return `${id.tb}:${id.id}`;
     }
     return `entity:${id}`;
+  }
+
+  /**
+   * Dispose - clear all background intervals
+   */
+  dispose(): void {
+    if (this.backgroundInterval) {
+      clearInterval(this.backgroundInterval);
+      this.backgroundInterval = undefined;
+    }
+    if (this.ttlPruningInterval) {
+      clearInterval(this.ttlPruningInterval);
+      this.ttlPruningInterval = undefined;
+    }
+    if (this.cooccurrenceInterval) {
+      clearInterval(this.cooccurrenceInterval);
+      this.cooccurrenceInterval = undefined;
+    }
+    if (this.relationClassifierInterval) {
+      clearInterval(this.relationClassifierInterval);
+      this.relationClassifierInterval = undefined;
+    }
+    logInfo('[EntityIndexer] Disposed');
   }
 }

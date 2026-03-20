@@ -34,6 +34,7 @@ Examples:
 Message: "{{message}}"
 
 JSON:`;
+import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 export class MemoryFilter {
     endpoint;
@@ -80,7 +81,7 @@ export class MemoryFilter {
         }
         catch (error) {
             // Fallback: simple keyword-based classification
-            console.error('[MemoryFilter] LLM failed, using fallback:', error.message);
+            logError(`[MemoryFilter] LLM failed, using fallback: ${error.message}`);
             return this.fallbackClassify(message);
         }
     }

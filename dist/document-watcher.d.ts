@@ -16,7 +16,8 @@ export declare class DocumentWatcher {
     /**
      * Start watching the directory.
      */
-    start(): void;
+    start(): Promise<void>;
+    private scanExistingFiles;
     /**
      * Stop watching.
      */

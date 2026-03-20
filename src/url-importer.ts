@@ -2,6 +2,7 @@
  * URL Importer - imports content from URLs.
  */
 
+import { logInfo, logError } from './maintenance-logger.js';
 import { DocumentParser } from './document-parser.js';
 import { DocumentSplitter } from './document-splitter.js';
 import type { MemoryManager } from './memory-manager-surreal.js';
@@ -20,7 +21,7 @@ export class UrlImporter {
    * @returns Number of chunks imported
    */
   async import(url: string, sessionId?: string): Promise<number> {
-    console.log(`[UrlImporter] Importing ${url}`);
+    logInfo(`[UrlImporter] Importing ${url}`);
 
     try {
       // Parse URL
@@ -35,10 +36,10 @@ export class UrlImporter {
         await this.memoryManager.storeSemantic(chunk.content, 0.7, effectiveSessionId);
       }
 
-      console.log(`[UrlImporter] Imported ${url}: ${chunks.length} chunks`);
+      logInfo(`[UrlImporter] Imported ${url}: ${chunks.length} chunks`);
       return chunks.length;
     } catch (error: any) {
-      console.error(`[UrlImporter] Failed to import ${url}:`, error.message);
+      logError(`[UrlImporter] Failed to import ${url}: ${error.message}`);
       throw error;
     }
   }

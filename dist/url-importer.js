@@ -1,6 +1,7 @@
 /**
  * URL Importer - imports content from URLs.
  */
+import { logInfo, logError } from './maintenance-logger.js';
 export class UrlImporter {
     parser;
     splitter;
@@ -17,7 +18,7 @@ export class UrlImporter {
      * @returns Number of chunks imported
      */
     async import(url, sessionId) {
-        console.log(`[UrlImporter] Importing ${url}`);
+        logInfo(`[UrlImporter] Importing ${url}`);
         try {
             // Parse URL
             const parsed = await this.parser.parseUrl(url);
@@ -28,11 +29,11 @@ export class UrlImporter {
             for (const chunk of chunks) {
                 await this.memoryManager.storeSemantic(chunk.content, 0.7, effectiveSessionId);
             }
-            console.log(`[UrlImporter] Imported ${url}: ${chunks.length} chunks`);
+            logInfo(`[UrlImporter] Imported ${url}: ${chunks.length} chunks`);
             return chunks.length;
         }
         catch (error) {
-            console.error(`[UrlImporter] Failed to import ${url}:`, error.message);
+            logError(`[UrlImporter] Failed to import ${url}: ${error.message}`);
             throw error;
         }
     }

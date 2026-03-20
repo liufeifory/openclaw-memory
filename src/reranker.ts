@@ -7,6 +7,7 @@
  * - Diversity Re-ranking: Penalizes highly similar top results
  */
 
+import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 
 const RERANK_PROMPT = `Rank these memory snippets by relevance to the query.
@@ -155,7 +156,7 @@ export class Reranker {
         .slice(0, opts.topK);
 
     } catch (error: any) {
-      console.error('[Reranker] LLM failed, using original scores:', error.message);
+      logError(`[Reranker] LLM failed, using original scores: ${error.message}`);
       // Return original results filtered by threshold
       return topResults
         .map(r => ({

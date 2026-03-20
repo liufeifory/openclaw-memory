@@ -36,6 +36,7 @@ Message: "{{message}}"
 
 JSON:`;
 
+import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 
 export interface FilterResult {
@@ -98,7 +99,7 @@ export class MemoryFilter {
       };
     } catch (error: any) {
       // Fallback: simple keyword-based classification
-      console.error('[MemoryFilter] LLM failed, using fallback:', error.message);
+      logError(`[MemoryFilter] LLM failed, using fallback: ${error.message}`);
       return this.fallbackClassify(message);
     }
   }

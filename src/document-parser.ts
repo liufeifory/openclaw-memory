@@ -6,6 +6,7 @@ import fs from 'fs/promises';
 import pdf from 'pdf-parse';
 import mammoth from 'mammoth';
 import fetch from 'node-fetch';
+import { logWarn } from './maintenance-logger.js';
 
 export interface ParsedDocument {
   content: string;
@@ -98,7 +99,7 @@ export class DocumentParser {
       const result = await mammoth.extractRawText({ path: filePath });
 
       if (result.messages.length > 0) {
-        console.warn(`[DocumentParser] Warnings while parsing ${filePath}:`, result.messages);
+        logWarn(`[DocumentParser] Warnings while parsing ${filePath}: ${JSON.stringify(result.messages)}`);
       }
 
       return {

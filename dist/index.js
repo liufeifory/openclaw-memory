@@ -17,6 +17,7 @@ import { Summarizer } from './summarizer.js';
 import { createDocumentImporter } from './document-importer.js';
 import { DocumentParser } from './document-parser.js';
 import { DocumentSplitter } from './document-splitter.js';
+import { logInfo, logWarn, logError } from './maintenance-logger.js';
 import * as fs from 'fs';
 import * as path from 'path';
 // Global instance for reuse across requests
@@ -26,6 +27,142 @@ let preferenceExtractor = null;
 let summarizer = null;
 let globalLimiter = null;
 let savedConfig = null;
+let initialized = false;
+/**
+ * Lazy initialization - only initialize when actually needed
+ * This prevents resource leaks when plugin is loaded but not used (e.g., status commands)
+ */
+async function ensureInitialized() {
+    if (initialized || !savedConfig)
+        return;
+    logInfo('Lazy initializing plugin...');
+    const mm = getMemoryManager(savedConfig);
+    // Initialize SurrealDB backend
+    if (mm instanceof SurrealMemoryManager) {
+        try {
+            const result = await mm.initialize();
+            if (result.migrated) {
+                logInfo(`SurrealDB schema migration: ${result.changes.join(', ')}`);
+            }
+            logInfo('SurrealDB connection established');
+        }
+        catch (error) {
+            logError(`Failed to initialize SurrealDB: ${error.message}`);
+            throw error;
+        }
+    }
+    // Initialize 1B model helpers
+    const llamaEndpoint = savedConfig.embedding?.endpoint?.replace('8080', '8081') ?? 'http://localhost:8081';
+    globalLimiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100, queueLimit: 50 });
+    // Initialize helpers
+    memoryFilter = getMemoryFilter(llamaEndpoint, globalLimiter);
+    preferenceExtractor = getPreferenceExtractor(llamaEndpoint, globalLimiter);
+    summarizer = getSummarizer(llamaEndpoint, globalLimiter);
+    initialized = true;
+    logInfo('Plugin lazy initialized');
+}
+const messageQueue = [];
+let queueProcessing = false;
+let queueShutDown = false;
+let storedMessages = new Set(); // For TUI duplicate prevention
+const conversationBuffers = new Map(); // Conversation buffer for summarization
+// Track if cleanup has been done to avoid double cleanup
+let cleanedUp = false;
+// Auto-cleanup timeout - runs after CLI commands complete
+let autoCleanupTimeout = null;
+let autoCleanupScheduled = false; // Track if we've already scheduled cleanup
+const AUTO_CLEANUP_DELAY = 3000; // Wait 3 seconds after last activity before cleanup
+// Document watcher reference for cleanup
+let documentWatcher = null;
+/**
+ * Schedule auto-cleanup after CLI command completes
+ * Only schedules once per initialization cycle
+ */
+function scheduleAutoCleanup() {
+    if (autoCleanupScheduled)
+        return; // Already scheduled
+    autoCleanupScheduled = true;
+    autoCleanupTimeout = setTimeout(async () => {
+        if (!cleanedUp && initialized && messageQueue.length === 0) {
+            logInfo('[Plugin] Auto-cleanup triggered');
+            await cleanup();
+            logInfo('[Plugin] Auto-cleanup completed');
+        }
+    }, AUTO_CLEANUP_DELAY);
+    // Don't call unref() - let this timeout fire and close the DB connection
+}
+/**
+ * Cleanup function called on process exit or plugin dispose
+ */
+async function cleanup() {
+    if (cleanedUp)
+        return;
+    cleanedUp = true;
+    logInfo('[Plugin] cleanup() called');
+    // Clear auto-cleanup timeout
+    if (autoCleanupTimeout) {
+        clearTimeout(autoCleanupTimeout);
+        autoCleanupTimeout = null;
+    }
+    autoCleanupScheduled = false; // Allow re-scheduling
+    // Stop document watcher
+    if (documentWatcher) {
+        documentWatcher.stop();
+        documentWatcher = null;
+    }
+    // Stop message queue
+    queueShutDown = true;
+    messageQueue.length = 0;
+    // Dispose memory manager (stops idle clustering worker and closes DB)
+    if (memoryManager) {
+        await memoryManager.dispose();
+        memoryManager = null;
+    }
+    // Reset other singletons
+    memoryFilter = null;
+    preferenceExtractor = null;
+    summarizer = null;
+    globalLimiter = null;
+    storedMessages.clear();
+    conversationBuffers.clear();
+    // Reset initialized flag to allow re-initialization
+    initialized = false;
+    logInfo('[Plugin] cleanup() completed');
+}
+// Register process exit handlers to ensure cleanup on unexpected exit
+process.on('exit', () => {
+    // Synchronous cleanup for exit event (no async operations possible here)
+    queueShutDown = true;
+    if (!cleanedUp) {
+        logInfo('[Plugin] exit handler triggered');
+    }
+});
+// beforeExit is called when event loop is empty and process would exit
+// This is async and can close connections
+process.on('beforeExit', async () => {
+    if (!cleanedUp) {
+        logInfo('[Plugin] beforeExit handler triggered - cleaning up');
+        await cleanup();
+    }
+});
+// Handle uncaught exceptions and rejections
+process.on('uncaughtException', async (err) => {
+    logError(`[Plugin] Uncaught exception: ${err.message}`);
+    await cleanup();
+});
+process.on('unhandledRejection', async (reason) => {
+    logError(`[Plugin] Unhandled rejection: ${reason}`);
+    await cleanup();
+});
+// Handle SIGINT/SIGTERM for graceful shutdown
+process.on('SIGINT', async () => {
+    await cleanup();
+    process.exit(130);
+});
+process.on('SIGTERM', async () => {
+    await cleanup();
+    process.exit(143);
+});
 /**
  * Append memory to local Markdown file for self-improving-agent compatibility.
  * This function is NOT affected by backend choice - always writes to file.
@@ -53,10 +190,10 @@ function appendToLocalMemory(content, sessionId) {
         }
         // Append entry
         fs.writeFileSync(memoryFile, fileContent + entry);
-        console.log(`[openclaw-memory] Appended to local memory: ${memoryFile}`);
+        logInfo(`[openclaw-memory] Appended to local memory: ${memoryFile}`);
     }
     catch (error) {
-        console.error('[openclaw-memory] Failed to write local memory:', error.message);
+        logError(`[openclaw-memory] Failed to write local memory: ${error.message}`);
     }
 }
 function getMemoryManager(config) {
@@ -105,83 +242,62 @@ const memoryPlugin = {
     description: 'Long-term memory with semantic search (SurrealDB backend)',
     kind: 'memory',
     async init(config) {
-        // Store config for later use in register
+        // Store config for later lazy initialization
         savedConfig = config;
-        // Initialize memory manager
-        const mm = getMemoryManager(config);
-        // Initialize SurrealDB backend
-        if (mm instanceof SurrealMemoryManager) {
-            const result = await mm.initialize();
-            if (result.migrated) {
-                console.log('[openclaw-memory] SurrealDB schema migration:', result.changes);
-            }
-        }
-        console.log('[openclaw-memory] Plugin initialized with SurrealDB backend');
+        logInfo('Plugin config stored (lazy initialization enabled)');
     },
     async register(api) {
         // Get plugin config from OpenClaw - use api.pluginConfig property (not getConfig method)
         const pluginConfig = api.pluginConfig;
-        // Debug: log what we received
-        console.log('[openclaw-memory] Plugin config from api.pluginConfig:', JSON.stringify(pluginConfig, null, 2));
         // Handle both formats: {enabled, config} or direct config
         const config = pluginConfig?.config || pluginConfig;
         if (!config) {
-            console.warn('[openclaw-memory] No config found, plugin disabled');
+            logInfo('No config found, plugin disabled');
             return;
         }
-        // Debug: log resolved config
-        console.log('[openclaw-memory] Resolved config:', JSON.stringify(config, null, 2));
         // Check for SurrealDB config
         if (!config.surrealdb) {
-            console.warn('[openclaw-memory] No SurrealDB config found, plugin disabled');
+            logInfo('No SurrealDB config found, plugin disabled');
             return;
         }
-        // Initialize memory manager and SurrealDB backend
-        console.log('[openclaw-memory] Creating MemoryManager...');
-        const mm = getMemoryManager(config);
-        console.log('[openclaw-memory] MemoryManager created, instance:', mm?.constructor?.name);
-        // Initialize SurrealDB connection if not already done by init()
-        // This ensures connection even if OpenClaw doesn't call init()
-        if (mm instanceof SurrealMemoryManager) {
-            try {
-                console.log('[openclaw-memory] Initializing SurrealDB connection...');
-                const result = await mm.initialize();
-                if (result.migrated) {
-                    console.log('[openclaw-memory] SurrealDB schema migration:', result.changes);
-                }
-                console.log('[openclaw-memory] SurrealDB connection established');
-            }
-            catch (error) {
-                console.error('[openclaw-memory] Failed to initialize SurrealDB:', error.message);
-                console.error('[openclaw-memory] Stack:', error.stack);
-            }
-        }
-        // Initialize 1B model helpers (Llama-3.2-1B-Instruct on port 8081)
-        const llamaEndpoint = config.embedding?.endpoint?.replace('8080', '8081') ?? 'http://localhost:8081';
-        // Create shared LLM limiter
-        globalLimiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100, queueLimit: 50 });
-        const limiter = globalLimiter;
-        // Initialize helpers
-        const filter = getMemoryFilter(llamaEndpoint, limiter);
-        const extractor = getPreferenceExtractor(llamaEndpoint, limiter);
-        const summarizer = getSummarizer(llamaEndpoint, limiter);
-        // Document Import Configuration
+        // Store config for lazy initialization
+        savedConfig = config;
+        // Document Import Configuration - start watcher only if configured
         const docConfig = config.documentImport || {};
-        const watchDir = docConfig.watchDir;
+        let watchDir = docConfig.watchDir;
         if (watchDir) {
+            // Expand ~ to home directory
+            if (watchDir.startsWith('~/')) {
+                watchDir = watchDir.replace('~/', process.env.HOME + '/');
+            }
+            // For document watcher, we need to initialize immediately
+            await ensureInitialized();
+            const mm = getMemoryManager(config);
             const importer = createDocumentImporter(mm, {
                 watchDir,
                 chunkSize: docConfig.chunkSize,
                 chunkOverlap: docConfig.chunkOverlap,
             });
-            importer.watcher?.start();
-            console.log(`[openclaw-memory] Document watcher started: ${watchDir}`);
+            documentWatcher = importer.watcher; // Store reference for cleanup
+            await documentWatcher?.start(); // Wait for initial scan to complete
+            logInfo(`Document watcher started: ${watchDir}`);
         }
-        // Conversation buffer for summarization
-        const conversationBuffers = new Map();
-        const messageQueue = [];
-        let queueProcessing = false;
-        let queueShutDown = false;
+        // Schedule auto-cleanup AFTER document watcher completes initial scan
+        // This ensures import operations finish before database connection closes
+        if (watchDir) {
+            // Give a few more seconds for any async store operations to complete
+            setTimeout(() => {
+                scheduleAutoCleanup();
+            }, 5000);
+        }
+        else {
+            // No document watcher, schedule cleanup immediately
+            scheduleAutoCleanup();
+        }
+        // ============================================================
+        // 消息队列 + 后台 Worker - 解耦记忆存储，确保故障不影响主流程
+        // ============================================================
+        // Note: messageQueue, queueProcessing, queueShutDown are now module-scoped
         /**
          * 后台 Worker - 持续处理消息队列
          * 错误完全隔离，只记录日志，不影响主流程
@@ -195,9 +311,11 @@ const memoryPlugin = {
                 if (!item)
                     continue;
                 try {
+                    // Ensure plugin is initialized before processing
+                    await ensureInitialized();
                     // 类型检查：确保 message 是字符串
                     if (typeof item.message !== 'string') {
-                        console.warn(`[openclaw-memory] Queue: received non-string message (type: ${typeof item.message})`);
+                        logWarn(`[openclaw-memory] Queue: received non-string message (type: ${typeof item.message})`);
                         item.message = String(item.message);
                     }
                     // 跳过空消息
@@ -205,14 +323,14 @@ const memoryPlugin = {
                         continue;
                     }
                     // 1. 分类消息
-                    const filterResult = await filter.classify(item.message);
+                    const filterResult = await memoryFilter.classify(item.message);
                     // 2. 存储记忆（同时写入数据库和本地文件）
                     if (filterResult.shouldStore && filterResult.memoryType) {
                         if (filterResult.memoryType === 'semantic') {
-                            await mm.storeSemanticWithConflictCheck(item.message, filterResult.importance, 0.85, item.sessionId);
+                            await memoryManager.storeSemanticWithConflictCheck(item.message, filterResult.importance, 0.85, item.sessionId);
                         }
                         else {
-                            await mm.storeMemory(item.sessionId, item.message, filterResult.importance);
+                            await memoryManager.storeMemory(item.sessionId, item.message, filterResult.importance);
                         }
                         // 同时写入本地 Markdown 文件（用于 self-improving-agent 读取）
                         const categoryLabel = filterResult.category ? `[${filterResult.category}] ` : '';
@@ -223,27 +341,27 @@ const memoryPlugin = {
                     buffer.push(item.message);
                     conversationBuffers.set(item.sessionId, buffer);
                     if (buffer.length >= 10) {
-                        const userProfile = await extractor.extract(buffer);
+                        const userProfile = await preferenceExtractor.extract(buffer);
                         for (const like of userProfile.likes) {
-                            await mm.storeSemantic(like, 0.8, item.sessionId);
+                            await memoryManager.storeSemantic(like, 0.8, item.sessionId);
                             appendToLocalMemory(`[PREFERENCE-LIKE] ${like}`);
                         }
                         for (const dislike of userProfile.dislikes) {
-                            await mm.storeSemantic(dislike, 0.8, item.sessionId);
+                            await memoryManager.storeSemantic(dislike, 0.8, item.sessionId);
                             appendToLocalMemory(`[PREFERENCE-DISLIKE] ${dislike}`);
                         }
                         const summaryResult = await summarizer.summarize(buffer);
                         if (summaryResult.summary) {
-                            await mm.storeReflection(summaryResult.summary, 0.9, item.sessionId);
+                            await memoryManager.storeReflection(summaryResult.summary, 0.9, item.sessionId);
                             appendToLocalMemory(`[REFLECTION] ${summaryResult.summary}`);
                         }
                         conversationBuffers.set(item.sessionId, []);
                     }
-                    console.log(`[openclaw-memory] Queue: processed message for session ${item.sessionId}`);
+                    logInfo(`Queue: processed message for session ${item.sessionId}`);
                 }
                 catch (error) {
                     // 错误完全隔离，只记录日志，不影响队列继续处理
-                    console.error(`[openclaw-memory] Queue: failed to process message for session ${item.sessionId}:`, error.message);
+                    logError(`Queue: failed to process message for session ${item.sessionId}: ${error.message}`);
                 }
             }
             queueProcessing = false;
@@ -264,25 +382,16 @@ const memoryPlugin = {
             if (!queueProcessing) {
                 processQueue();
             }
-            console.log(`[openclaw-memory] Message enqueued (queue size: ${messageQueue.length})`);
         }
-        // 已存储消息记录（用于避免 TUI 模式下重复存储）
-        const storedMessages = new Set();
         // ============================================================
         // ✅ 注册 message_received Hook - 复制消息到队列 (渠道模式)
         // Hook 立即返回，不等待存储完成
         // ============================================================
         api.on('message_received', (event, ctx) => {
-            console.log('[openclaw-memory] message_received hook triggered (channel mode):', {
-                from: event.from || 'anonymous',
-                content: event.content?.slice(0, 50),
-                conversationId: ctx.conversationId
-            });
             const sessionId = ctx.conversationId || 'default';
             const message = event.content;
             // 跳过空消息
             if (!message || message.trim().length === 0) {
-                console.log('[openclaw-memory] Skipping message: no content');
                 return;
             }
             // 渠道模式：复制消息到队列，立即返回
@@ -295,22 +404,15 @@ const memoryPlugin = {
         // 渠道模式下：只检索记忆（消息已由 message_received 复制）
         // ============================================================
         api.on('before_prompt_build', async (event, ctx) => {
-            console.log('[openclaw-memory] before_prompt_build hook triggered:', {
-                hasMessages: !!event.messages,
-                messagesCount: event.messages?.length || 0,
-                sessionId: ctx.sessionId
-            });
             const sessionId = ctx.sessionId || 'default';
             const messages = event.messages;
             // 检查 messages 是否存在
             if (!messages || messages.length === 0) {
-                console.log('[openclaw-memory] No messages in event, skipping context injection');
                 return;
             }
             // 获取最后一条用户消息
             const lastUserMessage = messages.filter(m => m.role === 'user').pop();
             if (!lastUserMessage) {
-                console.log('[openclaw-memory] No user message found, skipping context injection');
                 return;
             }
             // 提取消息内容（处理数组/对象/字符串三种格式）
@@ -335,7 +437,6 @@ const memoryPlugin = {
                 lastMessageContent = String(lastUserMessage.content ?? '');
             }
             if (!lastMessageContent) {
-                console.log('[openclaw-memory] Empty user message, skipping');
                 return;
             }
             // TUI 模式：复制消息到队列（异步执行，不阻塞）
@@ -349,9 +450,11 @@ const memoryPlugin = {
             // 超时控制：1000ms 内必须返回，避免阻塞 Agent 响应（Rerank 需要调用 LLM，约 800-900ms）
             const timeoutMs = 1000;
             try {
+                // Ensure plugin is initialized before accessing memory
+                await ensureInitialized();
                 // 1. 检索相关记忆 (带超时)
                 const memories = await Promise.race([
-                    mm.retrieveRelevant(lastUserMessage.content, sessionId, 3, 0.65), // top_k=3, threshold=0.65
+                    memoryManager.retrieveRelevant(lastUserMessage.content, sessionId, 3, 0.65), // top_k=3, threshold=0.65
                     new Promise((_, reject) => setTimeout(() => reject(new Error('Memory retrieval timeout')), timeoutMs))
                 ]);
                 if (!memories || memories.length === 0) {
@@ -366,11 +469,11 @@ const memoryPlugin = {
             }
             catch (error) {
                 if (error.message !== 'Memory retrieval timeout') {
-                    console.error('[openclaw-memory] before_prompt_build hook failed:', error.message);
-                    console.error('[openclaw-memory] Stack trace:', error.stack);
+                    logError(`before_prompt_build hook failed: ${error.message}`);
+                    logError(`Stack trace: ${error.stack}`);
                 }
                 else {
-                    console.warn('[openclaw-memory] before_prompt_build hook timeout (>', timeoutMs, 'ms)');
+                    logWarn(`before_prompt_build hook timeout >${timeoutMs}ms`);
                 }
                 return; // 超时或失败时不注入上下文
             }
@@ -391,7 +494,8 @@ const memoryPlugin = {
                 },
                 execute: async ({ query, top_k = 5, threshold = 0.6, session_id }) => {
                     try {
-                        const memories = await mm.retrieveRelevant(query, session_id, top_k, threshold);
+                        await ensureInitialized();
+                        const memories = await memoryManager.retrieveRelevant(query, session_id, top_k, threshold);
                         return {
                             memories,
                             count: memories.length,
@@ -418,22 +522,24 @@ const memoryPlugin = {
                 },
                 execute: async ({ url, path: filePath }) => {
                     try {
-                        const { urlImporter } = createDocumentImporter(mm, {
-                            chunkSize: config.documentImport?.chunkSize,
-                            chunkOverlap: config.documentImport?.chunkOverlap,
-                        });
                         if (url) {
+                            await ensureInitialized();
+                            const { urlImporter } = createDocumentImporter(memoryManager, {
+                                chunkSize: savedConfig?.documentImport?.chunkSize,
+                                chunkOverlap: savedConfig?.documentImport?.chunkOverlap,
+                            });
                             const count = await urlImporter.import(url);
                             return { success: true, chunks: count, source: url };
                         }
                         if (filePath) {
+                            await ensureInitialized();
                             // Create parser and splitter directly for local file import
                             const parser = new DocumentParser();
-                            const splitter = new DocumentSplitter(config.documentImport?.chunkSize || 500, config.documentImport?.chunkOverlap || 50);
+                            const splitter = new DocumentSplitter(savedConfig?.documentImport?.chunkSize || 500, savedConfig?.documentImport?.chunkOverlap || 50);
                             const parsed = await parser.parse(filePath);
                             const chunks = splitter.split(parsed.content, filePath);
                             for (const chunk of chunks) {
-                                await mm.storeSemantic(chunk.content, 0.7, `doc:${filePath}`);
+                                await memoryManager.storeSemantic(chunk.content, 0.7, `doc:${filePath}`);
                             }
                             return { success: true, chunks: chunks.length, source: filePath };
                         }
@@ -446,7 +552,18 @@ const memoryPlugin = {
             };
             return [documentImportTool];
         }, { names: ['document_import'] });
-        console.log('[openclaw-memory] Plugin registered');
+        logInfo('Plugin registered');
+        // Expose dispose function on api for cleanup - calls plugin's dispose()
+        api.dispose = async () => {
+            await memoryPlugin.dispose();
+        };
+    },
+    /**
+     * Dispose plugin - clean up background workers and close database connections.
+     * Called when OpenClaw shuts down or when commands complete.
+     */
+    async dispose() {
+        await cleanup();
     },
 };
 export default memoryPlugin;

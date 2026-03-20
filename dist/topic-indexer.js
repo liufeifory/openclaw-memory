@@ -7,6 +7,7 @@
  * - Idle task scheduler for resource efficiency
  * - Priority queue for urgent topic creation
  */
+import { logInfo, logError } from './maintenance-logger.js';
 const TOPIC_SOFT_LIMIT = 400;
 const IDLE_THRESHOLD_MS = 5000; // 5 seconds of no activity
 const NOISE_THRESHOLD = 0.5; // Cosine similarity threshold for noise
@@ -30,6 +31,9 @@ export class TopicIndexer {
         this.db = db;
         this.embedding = embedding;
     }
+    scanInterval;
+    processInterval;
+    idleCheckInterval;
     /**
      * Start background scheduler for periodic scanning
      * User feedback: Idle Task scheduler for 16GB M4 resource efficiency
@@ -37,9 +41,11 @@ export class TopicIndexer {
     startScheduler() {
         // Scan potential Super Nodes every 7 days
         const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
-        setInterval(() => this.scanPotentialSuperNodes(), SEVEN_DAYS);
+        this.scanInterval = setInterval(() => this.scanPotentialSuperNodes(), SEVEN_DAYS);
+        this.scanInterval.unref();
         // Process queue every 30 seconds
-        setInterval(() => this.processQueue(), 30000);
+        this.processInterval = setInterval(() => this.processQueue(), 30000);
+        this.processInterval.unref();
         // Idle Task: run heavy clustering when system is idle
         let idleStartTime = null;
         const checkIdle = () => {
@@ -57,24 +63,25 @@ export class TopicIndexer {
             }
         };
         // Check idle status every 2 seconds
-        setInterval(checkIdle, 2000);
-        console.log('[TopicIndexer] Scheduler started (with idle task support)');
+        this.idleCheckInterval = setInterval(checkIdle, 2000);
+        this.idleCheckInterval.unref();
+        logInfo('[TopicIndexer] Scheduler started (with idle task support)');
     }
     /**
      * Scan database for potential Super Nodes
      */
     async scanPotentialSuperNodes() {
         if (!this.db) {
-            console.error('[TopicIndexer] Database not initialized');
+            logError('[TopicIndexer] Database not initialized');
             return;
         }
         try {
             // This would need a raw SQL query to find entities with high memory_count
             // For now, we rely on the checkSuperNode trigger during linkMemoryEntity
-            console.log('[TopicIndexer] Super Node scan completed (passive mode)');
+            logInfo('[TopicIndexer] Super Node scan completed (passive mode)');
         }
         catch (error) {
-            console.error('[TopicIndexer] scanPotentialSuperNodes failed:', error.message);
+            logError(`[TopicIndexer] scanPotentialSuperNodes failed: ${error.message}`);
         }
     }
     /**
@@ -84,7 +91,7 @@ export class TopicIndexer {
         if (this.processing || this.queue.length === 0)
             return;
         this.processing = true;
-        console.log(`[TopicIndexer] Processing queue: ${this.queue.length} tasks pending`);
+        logInfo(`[TopicIndexer] Processing queue: ${this.queue.length} tasks pending`);
         while (this.queue.length > 0) {
             const task = this.queue.shift();
             try {
@@ -92,13 +99,13 @@ export class TopicIndexer {
                 this.totalTopicsCreated++;
             }
             catch (error) {
-                console.error(`[TopicIndexer] Failed for entity ${task.entityId}:`, error.message);
+                logError(`[TopicIndexer] Failed for entity ${task.entityId}: ${error.message}`);
                 task.retryCount++;
                 if (task.retryCount < 3) {
                     this.queue.push(task);
                 }
                 else {
-                    console.error(`[TopicIndexer] Abandoned task for entity ${task.entityId} after ${task.retryCount} retries`);
+                    logError(`[TopicIndexer] Abandoned task for entity ${task.entityId} after ${task.retryCount} retries`);
                 }
             }
         }
@@ -111,7 +118,7 @@ export class TopicIndexer {
     async processIdleTasks() {
         if (this.queue.length === 0)
             return;
-        console.log('[TopicIndexer] Processing idle tasks...');
+        logInfo('[TopicIndexer] Processing idle tasks...');
         // Process one task per idle period to avoid resource spike
         const task = this.queue.shift();
         if (task) {
@@ -120,7 +127,7 @@ export class TopicIndexer {
                 this.totalTopicsCreated++;
             }
             catch (error) {
-                console.error(`[TopicIndexer] Idle task failed for ${task.entityId}:`, error.message);
+                logError(`[TopicIndexer] Idle task failed for ${task.entityId}: ${error.message}`);
                 task.retryCount++;
                 if (task.retryCount < 3) {
                     this.queue.unshift(task); // Put back at front
@@ -138,7 +145,7 @@ export class TopicIndexer {
             retryCount: 0,
             priority: false,
         });
-        console.log(`[TopicIndexer] Enqueued topic creation for entity ${entityId}`);
+        logInfo(`[TopicIndexer] Enqueued topic creation for entity ${entityId}`);
     }
     /**
      * Enqueue topic creation with priority (jump to front of queue)
@@ -151,7 +158,7 @@ export class TopicIndexer {
             retryCount: 0,
             priority: true,
         });
-        console.log(`[TopicIndexer] Enqueued PRIORITY topic creation for entity ${entityId}`);
+        logInfo(`[TopicIndexer] Enqueued PRIORITY topic creation for entity ${entityId}`);
     }
     /**
      * Auto-create topics for a Super Node entity
@@ -161,21 +168,21 @@ export class TopicIndexer {
         if (!this.db || !this.embedding) {
             throw new Error('TopicIndexer not properly initialized');
         }
-        console.log(`[TopicIndexer] Creating topics for entity ${entityId} (shadow update)`);
+        logInfo(`[TopicIndexer] Creating topics for entity ${entityId} (shadow update)`);
         // 1. Get memories for this entity (limit 200 for clustering)
         const memories = await this.db.getMemoriesByEntity(entityId, 200);
         if (memories.length < 5) {
-            console.log(`[TopicIndexer] Not enough memories for clustering: ${memories.length}`);
+            logInfo(`[TopicIndexer] Not enough memories for clustering: ${memories.length}`);
             return;
         }
         // 2. Stage 1: Embedding clustering with noise filter
         const clusteringResult = await this.clusterMemoriesByEmbedding(memories.map((m) => m.id));
         const clusters = clusteringResult.clusters;
         const noiseIds = clusteringResult.outliers || [];
-        console.log(`[TopicIndexer] Created ${clusters.length} clusters, filtered ${noiseIds.length} noise memories`);
+        logInfo(`[TopicIndexer] Created ${clusters.length} clusters, filtered ${noiseIds.length} noise memories`);
         // 3. Stage 2: LLM naming (placeholder - would call actual LLM service)
         const topics = await this.nameTopics(clusters, memories);
-        console.log(`[TopicIndexer] Named ${topics.length} topics`);
+        logInfo(`[TopicIndexer] Named ${topics.length} topics`);
         // 4. Shadow update: atomically switch via transaction
         try {
             // Delete old topic_memory edges for these memories
@@ -196,17 +203,17 @@ export class TopicIndexer {
             }
             // 6. Handle noise memories - create Archive topic
             if (noiseIds.length > 0) {
-                console.log(`[TopicIndexer] Archiving ${noiseIds.length} noise memories to Archive topic`);
+                logInfo(`[TopicIndexer] Archiving ${noiseIds.length} noise memories to Archive topic`);
                 const archiveTopicId = await this.db.upsertTopic('Archive', '噪声记忆归档', entityId);
                 for (const memoryId of noiseIds) {
                     await this.db.linkTopicMemory(archiveTopicId, memoryId, 0.3);
                 }
                 this.totalNoiseArchived += noiseIds.length;
             }
-            console.log(`[TopicIndexer] Shadow update completed for entity ${entityId}`);
+            logInfo(`[TopicIndexer] Shadow update completed for entity ${entityId}`);
         }
         catch (error) {
-            console.error(`[TopicIndexer] Shadow update failed:`, error.message);
+            logError(`[TopicIndexer] Shadow update failed: ${error.message}`);
             throw error;
         }
     }
@@ -335,7 +342,7 @@ export class TopicIndexer {
         try {
             const topics = await this.db.getTopicsByEntity(entityId);
             if (topics.length === 0) {
-                console.log(`[TopicIndexer] No topics found, mounting memory ${memoryId} to entity`);
+                logInfo(`[TopicIndexer] No topics found, mounting memory ${memoryId} to entity`);
                 return null;
             }
             let bestTopic = null;
@@ -352,17 +359,17 @@ export class TopicIndexer {
             }
             if (bestTopic && bestSimilarity > 0.6) {
                 await this.db.linkTopicMemory(bestTopic, memoryId, bestSimilarity);
-                console.log(`[TopicIndexer] Incrementally mounted memory ${memoryId} to topic ${bestTopic}`);
+                logInfo(`[TopicIndexer] Incrementally mounted memory ${memoryId} to topic ${bestTopic}`);
                 return bestTopic;
             }
             else {
                 // No suitable topic, mount to entity (User feedback #6: write window handling)
-                console.log(`[TopicIndexer] No suitable topic found (best: ${bestSimilarity}), mounting to entity`);
+                logInfo(`[TopicIndexer] No suitable topic found (best: ${bestSimilarity}), mounting to entity`);
                 return null;
             }
         }
         catch (error) {
-            console.error('[TopicIndexer] incrementalMountMemory failed:', error.message);
+            logError(`[TopicIndexer] incrementalMountMemory failed: ${error.message}`);
             return null;
         }
     }
@@ -381,7 +388,7 @@ export class TopicIndexer {
             return new Array(1024).fill(0);
         }
         catch (error) {
-            console.error('[TopicIndexer] computeTopicCentroid failed:', error.message);
+            logError(`[TopicIndexer] computeTopicCentroid failed: ${error.message}`);
             return null;
         }
     }
@@ -396,6 +403,24 @@ export class TopicIndexer {
             totalMemoriesClustered: this.totalMemoriesClustered,
             totalNoiseArchived: this.totalNoiseArchived,
         };
+    }
+    /**
+     * Dispose - clear all background intervals
+     */
+    dispose() {
+        if (this.scanInterval) {
+            clearInterval(this.scanInterval);
+            this.scanInterval = undefined;
+        }
+        if (this.processInterval) {
+            clearInterval(this.processInterval);
+            this.processInterval = undefined;
+        }
+        if (this.idleCheckInterval) {
+            clearInterval(this.idleCheckInterval);
+            this.idleCheckInterval = undefined;
+        }
+        logInfo('[TopicIndexer] Disposed');
     }
 }
 //# sourceMappingURL=topic-indexer.js.map

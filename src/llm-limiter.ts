@@ -74,7 +74,8 @@ export class LLMLimiter {
     const now = Date.now();
     const timeSinceLastRequest = now - this.lastRequestTime;
     if (timeSinceLastRequest < this.minInterval) {
-      setTimeout(() => this.processQueue(), this.minInterval - timeSinceLastRequest);
+      const timer = setTimeout(() => this.processQueue(), this.minInterval - timeSinceLastRequest);
+      timer.unref();
       return;
     }
 
@@ -93,7 +94,8 @@ export class LLMLimiter {
     } finally {
       this.running--;
       // Process next request
-      setTimeout(() => this.processQueue(), this.minInterval);
+      const timer = setTimeout(() => this.processQueue(), this.minInterval);
+      timer.unref();
     }
   }
 

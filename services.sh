@@ -12,9 +12,9 @@ SCRIPT_NAME="$(basename "$0")"
 
 # Service configuration
 LLAMA_SERVER_LABEL="io.github.liufei.llama-server"
-QDRANT_LABEL="io.github.liufei.qdrant"
+SURREALDB_LABEL="io.github.liufei.surrealdb"
 LLAMA_SERVER_PORT=8080
-QDRANT_PORT=6333
+SURREALDB_PORT=8000
 
 # Detect OS
 OS="unknown"
@@ -60,7 +60,7 @@ OpenClaw Memory Services Manager
   stop           停止所有服务
   restart        重启所有服务
   status         查看服务状态
-  logs [target]  查看日志 (all|llama|qdrant)
+  logs [target]  查看日志 (all|llama|surrealdb)
   install        安装服务 (需要 sudo)
   uninstall      卸载服务
 
@@ -68,8 +68,7 @@ OpenClaw Memory Services Manager
   $SCRIPT_NAME start          # 启动所有服务
   $SCRIPT_NAME status         # 查看状态
   $SCRIPT_NAME logs llama     # 只看 llama-server 日志
-  $SCRIPT_NAME logs qdrant    # 只看 Qdrant 日志
-  $SCRIPT_NAME logs           # 同时看两个日志
+  $SCRIPT_NAME logs surrealdb # 只看 SurrealDB 日志
 
 EOF
     exit 1
@@ -126,7 +125,6 @@ show_health() {
     local name=$2
     local url="http://localhost:$port/"
 
-    # Qdrant doesn't have /health endpoint, use root endpoint
     if curl -s --connect-timeout 2 "$url" > /dev/null 2>&1; then
         echo -e "    ${GREEN}✓ 健康${NC}"
     else
@@ -148,21 +146,12 @@ show_status() {
     fi
     echo ""
 
-    echo "QDRANT (端口 $QDRANT_PORT):"
-    if check_service "$QDRANT_LABEL"; then
+    echo "SURREALDB (端口 $SURREALDB_PORT):"
+    if check_service "$SURREALDB_LABEL"; then
         echo -e "  ${GREEN}✓ 运行中${NC}"
-        show_health $QDRANT_PORT "qdrant"
+        show_health $SURREALDB_PORT "surrealdb"
     else
         echo -e "  ${RED}✗ 未运行${NC}"
-    fi
-    echo ""
-
-    # Quick memory test
-    if check_service "$LLAMA_SERVER_LABEL" && check_service "$QDRANT_LABEL"; then
-        if [ -d "$SCRIPT_DIR" ]; then
-            echo "快速测试:"
-            (cd "$SCRIPT_DIR" && node dist/test-qdrant.js 2>&1 | head -10) || true
-        fi
     fi
     echo ""
 }
@@ -170,11 +159,11 @@ show_status() {
 show_logs() {
     local target=${1:-all}
     local llama_log="$HOME/Library/Logs/llama-server.log"
-    local qdrant_log="$HOME/Library/Logs/qdrant.log"
+    local surrealdb_log="$HOME/Library/Logs/surrealdb.log"
 
     if [ "$OS" = "linux" ]; then
         llama_log="$HOME/.local/log/llama-server.log"
-        qdrant_log="$HOME/.local/log/qdrant.log"
+        surrealdb_log="$HOME/.local/log/surrealdb.log"
     fi
 
     case "$target" in
@@ -182,13 +171,13 @@ show_logs() {
             echo "=== llama-server 日志 ($llama_log) ==="
             tail -fn 100 "$llama_log"
             ;;
-        qdrant|qdrant-server)
-            echo "=== Qdrant 日志 ($qdrant_log) ==="
-            tail -fn 100 "$qdrant_log"
+        surrealdb|surrealdb-server)
+            echo "=== SurrealDB 日志 ($surrealdb_log) ==="
+            tail -fn 100 "$surrealdb_log"
             ;;
         *)
             echo "=== 实时日志流 ==="
-            tail -f "$llama_log" "$qdrant_log" 2>/dev/null
+            tail -f "$llama_log" "$surrealdb_log" 2>/dev/null
             ;;
     esac
 }
@@ -197,7 +186,7 @@ start_all() {
     log_info "启动 OpenClaw Memory 服务..."
     start_service "$LLAMA_SERVER_LABEL" "llama-server"
     sleep 2
-    start_service "$QDRANT_LABEL" "Qdrant"
+    start_service "$SURREALDB_LABEL" "SurrealDB"
     sleep 2
 
     echo ""
@@ -207,7 +196,7 @@ start_all() {
 
 stop_all() {
     log_info "停止 OpenClaw Memory 服务..."
-    stop_service "$QDRANT_LABEL" "Qdrant"
+    stop_service "$SURREALDB_LABEL" "SurrealDB"
     stop_service "$LLAMA_SERVER_LABEL" "llama-server"
     echo ""
     log_success "所有服务已停止"

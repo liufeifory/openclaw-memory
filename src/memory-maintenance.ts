@@ -9,6 +9,7 @@
 
 import { SurrealDatabase } from './surrealdb-client.js';
 import { ImportanceLearning } from './importance-learning.js';
+import { logInfo } from './maintenance-logger.js';
 
 export interface MemoryMaintenanceConfig {
   decayFactor?: number;
@@ -47,8 +48,6 @@ export class MemoryMaintenance {
     cutoff.setDate(cutoff.getDate() - this.config.olderThanDays);
     const cutoffStr = cutoff.toISOString();
 
-    console.log(`[MemoryMaintenance] Running decay on memories older than ${this.config.olderThanDays} days`);
-
     let episodicDecayed = 0;
     let semanticDecayed = 0;
 
@@ -80,7 +79,6 @@ export class MemoryMaintenance {
       }
     }
 
-    console.log(`[MemoryMaintenance] Decayed ${episodicDecayed} episodic, ${semanticDecayed} semantic memories`);
     return { episodicDecayed, semanticDecayed };
   }
 
@@ -89,8 +87,6 @@ export class MemoryMaintenance {
    * Returns the number of memories promoted.
    */
   async runPromotion(): Promise<number> {
-    console.log(`[MemoryMaintenance] Checking for memories to promote (threshold: ${this.config.promotionThreshold} accesses)`);
-
     let promoted = 0;
     let offset = 0;
 
@@ -112,7 +108,6 @@ export class MemoryMaintenance {
           });
 
           promoted++;
-          console.log(`[MemoryMaintenance] Promoted memory ${mem.id} (access_count: ${accessCount})`);
         }
       }
 
@@ -120,7 +115,6 @@ export class MemoryMaintenance {
       if (memories.length < 100) break;
     }
 
-    console.log(`[MemoryMaintenance] Promoted ${promoted} memories`);
     return promoted;
   }
 
@@ -132,7 +126,6 @@ export class MemoryMaintenance {
     generateFn: (summaries: string[]) => Promise<string>
   ): Promise<boolean> {
     const stats = await this.db.getStats();
-    console.log(`[MemoryMaintenance] Checking for reflection generation (interval: ${this.config.reflectionInterval})`);
 
     // In production:
     // 1. Count episodic memories
@@ -153,8 +146,6 @@ export class MemoryMaintenance {
     promoted: number;
     reflectionGenerated: boolean;
   }> {
-    console.log('[MemoryMaintenance] Starting maintenance run');
-
     const [decayResult, promoted] = await Promise.all([
       this.runDecay(),
       this.runPromotion(),

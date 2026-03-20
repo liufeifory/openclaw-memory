@@ -6,6 +6,7 @@
  * - Dynamic Top-K: Retrieves K=20, filters by score threshold
  * - Diversity Re-ranking: Penalizes highly similar top results
  */
+import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 const RERANK_PROMPT = `Rank these memory snippets by relevance to the query.
 Output ONLY the indices in order (0-based), most relevant first.
@@ -103,7 +104,7 @@ export class Reranker {
                 .slice(0, opts.topK);
         }
         catch (error) {
-            console.error('[Reranker] LLM failed, using original scores:', error.message);
+            logError(`[Reranker] LLM failed, using original scores: ${error.message}`);
             // Return original results filtered by threshold
             return topResults
                 .map(r => ({

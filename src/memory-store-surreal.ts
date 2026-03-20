@@ -2,6 +2,7 @@
  * Memory store using SurrealDB.
  */
 
+import { logInfo, logWarn, logError } from './maintenance-logger.js';
 import { SurrealDatabase, MemoryType } from './surrealdb-client.js';
 import { EmbeddingService } from './embedding.js';
 import { EntityIndexer } from './entity-indexer.js';
@@ -90,7 +91,7 @@ export class MemoryStore {
    */
   setEntityIndexer(indexer: EntityIndexer): void {
     this.entityIndexer = indexer;
-    console.log('[MemoryStore] EntityIndexer set');
+    logInfo('[MemoryStore] EntityIndexer set');
   }
 
   /**
@@ -101,7 +102,7 @@ export class MemoryStore {
     const dedupeResult = await this.checkDuplicateInSession(sessionId, content);
 
     if (dedupeResult.isDuplicate) {
-      console.log(`[MemoryStore] Skipping duplicate episodic memory in session ${sessionId} (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
+      logInfo(`[MemoryStore] Skipping duplicate episodic memory in session ${sessionId} (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
       return dedupeResult.similarMemoryId!;
     }
 
@@ -165,7 +166,7 @@ export class MemoryStore {
     const dedupeResult = await this.checkDuplicate(content);
 
     if (dedupeResult.isDuplicate) {
-      console.log(`[MemoryStore] Skipping duplicate semantic memory (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
+      logInfo(`[MemoryStore] Skipping duplicate semantic memory (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
       return dedupeResult.similarMemoryId!;
     }
 
@@ -236,7 +237,7 @@ export class MemoryStore {
     sessionId?: string
   ): Promise<MemoryWithSimilarity[]> {
     if (!embedding || embedding.length === 0) {
-      console.warn('[MemoryStore] search received empty embedding, returning empty results');
+      logWarn('[MemoryStore] search received empty embedding, returning empty results');
       return [];
     }
 
@@ -424,7 +425,7 @@ export class MemoryStore {
   enqueueStorage(operation: () => Promise<void>): void {
     // Fire and forget - errors handled within operation
     operation().catch(err => {
-      console.error('[MemoryStore] Async storage operation failed:', err.message);
+      logError(`[MemoryStore] Async storage operation failed: ${err.message}`);
     });
   }
 }

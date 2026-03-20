@@ -1,6 +1,7 @@
 /**
  * Memory store using SurrealDB.
  */
+import { logInfo, logWarn, logError } from './maintenance-logger.js';
 import { MemoryType } from './surrealdb-client.js';
 // Semantic deduplication threshold
 const DEDUPE_THRESHOLD = 0.95;
@@ -43,7 +44,7 @@ export class MemoryStore {
      */
     setEntityIndexer(indexer) {
         this.entityIndexer = indexer;
-        console.log('[MemoryStore] EntityIndexer set');
+        logInfo('[MemoryStore] EntityIndexer set');
     }
     /**
      * Store episodic memory with embedding.
@@ -52,7 +53,7 @@ export class MemoryStore {
     async storeEpisodic(sessionId, content, importance = 0.5) {
         const dedupeResult = await this.checkDuplicateInSession(sessionId, content);
         if (dedupeResult.isDuplicate) {
-            console.log(`[MemoryStore] Skipping duplicate episodic memory in session ${sessionId} (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
+            logInfo(`[MemoryStore] Skipping duplicate episodic memory in session ${sessionId} (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
             return dedupeResult.similarMemoryId;
         }
         const memoryId = ++this.idCounter;
@@ -105,7 +106,7 @@ export class MemoryStore {
     async storeSemantic(content, importance = 0.7, sessionId) {
         const dedupeResult = await this.checkDuplicate(content);
         if (dedupeResult.isDuplicate) {
-            console.log(`[MemoryStore] Skipping duplicate semantic memory (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
+            logInfo(`[MemoryStore] Skipping duplicate semantic memory (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
             return dedupeResult.similarMemoryId;
         }
         const memoryId = ++this.idCounter;
@@ -159,7 +160,7 @@ export class MemoryStore {
      */
     async search(embedding, topK = 10, threshold = 0.6, memoryType, includeSuperseded = false, sessionId) {
         if (!embedding || embedding.length === 0) {
-            console.warn('[MemoryStore] search received empty embedding, returning empty results');
+            logWarn('[MemoryStore] search received empty embedding, returning empty results');
             return [];
         }
         const filter = {};
@@ -329,7 +330,7 @@ export class MemoryStore {
     enqueueStorage(operation) {
         // Fire and forget - errors handled within operation
         operation().catch(err => {
-            console.error('[MemoryStore] Async storage operation failed:', err.message);
+            logError(`[MemoryStore] Async storage operation failed: ${err.message}`);
         });
     }
 }

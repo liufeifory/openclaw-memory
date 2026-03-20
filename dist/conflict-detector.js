@@ -3,6 +3,7 @@
  *
  * Detects contradictory memories and marks old ones with superseded_by tag.
  */
+import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 const CONFLICT_PROMPT = `Analyze if Statement B contradicts Statement A.
 
@@ -90,7 +91,7 @@ export class ConflictDetector {
             return llmResult;
         }
         catch (error) {
-            console.error('[ConflictDetector] LLM failed:', error.message);
+            logError(`[ConflictDetector] LLM failed: ${error.message}`);
             // Fallback: keyword-based detection
             return this.checkKeywordConflict(oldStatement, newStatement);
         }

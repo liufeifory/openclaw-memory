@@ -16,6 +16,7 @@
  * - Known entity cache (loaded from database periodically)
  * - Layer stats tracking for optimization
  */
+import { logInfo, logError } from './maintenance-logger.js';
 import { getGlobalLimiter } from './llm-limiter.js';
 /**
  * Alias normalization rules
@@ -225,15 +226,17 @@ export class EntityExtractor {
         // Start periodic buffer flush
         this.startPeriodicFlush();
     }
+    flushInterval;
     /**
      * Start periodic buffer flush
      */
     startPeriodicFlush() {
-        setInterval(() => {
+        this.flushInterval = setInterval(() => {
             if (this.buffer.length > 0) {
                 this.flushBuffer().catch(console.error);
             }
         }, this.bufferFlushInterval);
+        this.flushInterval.unref();
     }
     /**
      * Add known entities to the cache (loaded from database periodically)
@@ -243,7 +246,7 @@ export class EntityExtractor {
             const normalizedName = this.normalizeText(entity.name);
             this.knownEntities.set(normalizedName.toLowerCase(), entity.confidence);
         }
-        console.log(`[EntityExtractor] Added ${entities.length} known entities to cache`);
+        logInfo(`[EntityExtractor] Added ${entities.length} known entities to cache`);
     }
     /**
      * Get known entity cache size
@@ -340,10 +343,10 @@ export class EntityExtractor {
         try {
             const results = await this.layer2_1BFilter(texts);
             // Log results for monitoring
-            console.log(`[EntityExtractor] Flushed ${texts.length} items from buffer, ${results.filter(r => r).length} passed 1B filter`);
+            logInfo(`[EntityExtractor] Flushed ${texts.length} items from buffer, ${results.filter(r => r).length} passed 1B filter`);
         }
         catch (error) {
-            console.error('[EntityExtractor] Buffer flush failed:', error.message);
+            logError(`[EntityExtractor] Buffer flush failed: ${error.message}`);
         }
     }
     /**
@@ -379,7 +382,7 @@ export class EntityExtractor {
             return results;
         }
         catch (error) {
-            console.error('[EntityExtractor] Layer 2 1B filter failed:', error.message);
+            logError(`[EntityExtractor] Layer 2 1B filter failed: ${error.message}`);
             // Return all true on error (fail open)
             return texts.map(() => true);
         }
@@ -450,7 +453,7 @@ Answers:`;
             return entities;
         }
         catch (error) {
-            console.error('[EntityExtractor] Layer 3 7B refine failed:', error.message);
+            logError(`[EntityExtractor] Layer 3 7B refine failed: ${error.message}`);
             return [];
         }
     }
@@ -661,6 +664,16 @@ JSON:`;
             }
             throw error;
         }
+    }
+    /**
+     * Dispose - clear background intervals
+     */
+    dispose() {
+        if (this.flushInterval) {
+            clearInterval(this.flushInterval);
+            this.flushInterval = undefined;
+        }
+        logInfo('[EntityExtractor] Disposed');
     }
 }
 //# sourceMappingURL=entity-extractor.js.map

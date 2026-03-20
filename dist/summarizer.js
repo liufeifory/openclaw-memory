@@ -6,6 +6,7 @@
  * - Token compression ratio monitoring
  * - Alerts for over-compression (ratio < 0.1) and under-compression (ratio > 0.9)
  */
+import { logWarn, logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 const SUMMARIZE_PROMPT = `Summarize these conversation turns into ONE concise fact or observation.
 Focus on:
@@ -94,7 +95,7 @@ export class Summarizer {
             const output = (result.content || result.generated_text || '').trim();
             // Guard: empty output from LLM
             if (!output || output.length === 0) {
-                console.warn('[Summarizer] LLM returned empty output');
+                logWarn('[Summarizer] LLM returned empty output');
                 return { summary: '', isEmpty: true };
             }
             const isEmpty = output.toLowerCase().includes('no significant content');
@@ -107,11 +108,11 @@ export class Summarizer {
                     this.stats.totalSummaries;
             if (quality === 'over-compressed') {
                 this.stats.overCompressionCount++;
-                console.warn(`[Summarizer] Over-compression detected (ratio: ${ratio.toFixed(3)}): "${output.substring(0, 50)}..."`);
+                logWarn(`[Summarizer] Over-compression detected (ratio: ${ratio.toFixed(3)}): "${output.substring(0, 50)}..."`);
             }
             else if (quality === 'under-compressed') {
                 this.stats.underCompressionCount++;
-                console.warn(`[Summarizer] Under-compression detected (ratio: ${ratio.toFixed(3)}): "${output.substring(0, 50)}..."`);
+                logWarn(`[Summarizer] Under-compression detected (ratio: ${ratio.toFixed(3)}): "${output.substring(0, 50)}..."`);
             }
             return {
                 summary: isEmpty ? '' : output,
@@ -121,7 +122,7 @@ export class Summarizer {
             };
         }
         catch (error) {
-            console.error('[Summarizer] LLM failed:', error.message);
+            logError(`[Summarizer] LLM failed: ${error.message}`);
             return { summary: '', isEmpty: true };
         }
     }

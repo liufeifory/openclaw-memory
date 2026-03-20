@@ -3,6 +3,8 @@
  * User feedback: M4 cold start optimization - cache frequently used aliases
  */
 
+import { logInfo } from './maintenance-logger.js';
+
 const DEFAULT_CACHE_SIZE = 1000;
 
 interface CacheEntry {
@@ -94,7 +96,7 @@ export class AliasCache {
 
     if (oldestKey) {
       this.cache.delete(oldestKey);
-      console.log(`[AliasCache] Evicted LRU entry: ${oldestKey}`);
+      logInfo(`[AliasCache] Evicted LRU entry: ${oldestKey}`);
     }
   }
 
@@ -106,7 +108,7 @@ export class AliasCache {
     if (loadAll) {
       // M4 optimization: load entire alias table into memory at startup
       // Eliminates DB round-trips for high-frequency alias resolution
-      console.log('[AliasCache] Full warmup - loading all aliases into memory...');
+      logInfo('[AliasCache] Full warmup - loading all aliases into memory...');
 
       const { ENTITY_ALIAS_TABLE } = await import('./surrealdb-client.js');
       const result = await db.query(`
@@ -118,10 +120,10 @@ export class AliasCache {
         this.set(row.alias, this.extractStringId(row.entity_id));
       }
 
-      console.log(`[AliasCache] Full warmup complete: ${this.cache.size} entries loaded (M4 optimization)`);
+      logInfo(`[AliasCache] Full warmup complete: ${this.cache.size} entries loaded (M4 optimization)`);
     } else {
       // Original behavior: load only verified/manual aliases up to maxSize
-      console.log('[AliasCache] Partial warmup - loading verified/manual aliases...');
+      logInfo('[AliasCache] Partial warmup - loading verified/manual aliases...');
 
       const { ENTITY_ALIAS_TABLE } = await import('./surrealdb-client.js');
       const result = await db.query(`
@@ -135,7 +137,7 @@ export class AliasCache {
         this.set(row.alias, this.extractStringId(row.entity_id));
       }
 
-      console.log(`[AliasCache] Partial warmup complete: ${this.cache.size} entries loaded`);
+      logInfo(`[AliasCache] Partial warmup complete: ${this.cache.size} entries loaded`);
     }
   }
 

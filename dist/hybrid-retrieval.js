@@ -15,6 +15,7 @@
  * 8. Return topK
  */
 import { EntityExtractor } from './entity-extractor.js';
+import { logInfo, logWarn, logError } from './maintenance-logger.js';
 /**
  * HybridRetriever - combines vector and graph search
  */
@@ -77,10 +78,10 @@ export class HybridRetriever {
                 }
                 catch (timeoutError) {
                     if (timeoutError.message === 'Graph search timeout') {
-                        console.warn(`[HybridRetriever] Amnesia Mode: graph search timeout after ${GRAPH_TIMEOUT_MS}ms, using vector-only results`);
+                        logWarn(`[HybridRetriever] Amnesia Mode: graph search timeout after ${GRAPH_TIMEOUT_MS}ms, using vector-only results`);
                     }
                     else {
-                        console.error('[HybridRetriever] graphSearch failed:', timeoutError.message);
+                        logError(`[HybridRetriever] graphSearch failed: ${timeoutError.message}`);
                     }
                     // Continue with vector-only results
                     graphResults = [];
@@ -94,7 +95,7 @@ export class HybridRetriever {
                     stats.topicCount = topicResults.length;
                 }
                 catch (error) {
-                    console.error('[HybridRetriever] topicSearch failed:', error.message);
+                    logError(`[HybridRetriever] topicSearch failed: ${error.message}`);
                     topicResults = [];
                 }
             }
@@ -118,7 +119,7 @@ export class HybridRetriever {
             };
         }
         catch (error) {
-            console.error('[HybridRetriever] retrieve failed:', error.message);
+            logError(`[HybridRetriever] retrieve failed: ${error.message}`);
             // Return empty result on error
             return {
                 results: [],
@@ -158,7 +159,7 @@ export class HybridRetriever {
             }));
         }
         catch (error) {
-            console.error('[HybridRetriever] vectorSearch failed:', error.message);
+            logError(`[HybridRetriever] vectorSearch failed: ${error.message}`);
             return [];
         }
     }
@@ -170,11 +171,10 @@ export class HybridRetriever {
     async extractEntitiesFromQuery(query) {
         try {
             const entities = await this.entityExtractor.extract(query);
-            console.log(`[HybridRetriever] Extracted ${entities.length} entities from query: "${query.substring(0, 50)}..."`);
             return entities;
         }
         catch (error) {
-            console.error('[HybridRetriever] extractEntitiesFromQuery failed:', error.message);
+            logError(`[HybridRetriever] extractEntitiesFromQuery failed: ${error.message}`);
             return [];
         }
     }
@@ -213,11 +213,10 @@ export class HybridRetriever {
                 }
             }
             const results = Array.from(allMemories.values());
-            console.log(`[HybridRetriever] Graph search found ${results.length} unique memories from ${entityIds.length} entities`);
             return results;
         }
         catch (error) {
-            console.error('[HybridRetriever] graphSearch failed:', error.message);
+            logError(`[HybridRetriever] graphSearch failed: ${error.message}`);
             return [];
         }
     }
@@ -258,7 +257,6 @@ export class HybridRetriever {
             }
         }
         const merged = Array.from(mergedMap.values());
-        console.log(`[HybridRetriever] Merged ${vectorResults.length} vector + ${graphResults.length} graph -> ${merged.length} unique`);
         return merged;
     }
     /**
@@ -301,11 +299,10 @@ export class HybridRetriever {
                 }
             }
             const results = Array.from(allMemories.values());
-            console.log(`[HybridRetriever] Topic search found ${results.length} unique memories`);
             return results;
         }
         catch (error) {
-            console.error('[HybridRetriever] topicSearch failed:', error.message);
+            logError(`[HybridRetriever] topicSearch failed: ${error.message}`);
             return [];
         }
     }
@@ -364,7 +361,6 @@ export class HybridRetriever {
             }
         }
         const merged = Array.from(mergedMap.values());
-        console.log(`[HybridRetriever] Merged ${vectorResults.length} vector + ${graphResults.length} graph + ${topicResults.length} topic -> ${merged.length} unique`);
         return merged;
     }
     /**
@@ -399,7 +395,7 @@ export class HybridRetriever {
             }));
         }
         catch (error) {
-            console.error('[HybridRetriever] rerankResults failed:', error.message);
+            logError(`[HybridRetriever] rerankResults failed: ${error.message}`);
             // Return original results with their scores if rerank fails
             return results;
         }
@@ -442,7 +438,7 @@ export class HybridRetriever {
             return 0;
         }
         catch (error) {
-            console.error(`[HybridRetriever] getEntityIdByName failed for "${entityName}":`, error.message);
+            logError(`[HybridRetriever] getEntityIdByName failed for "${entityName}": ${error.message}`);
             return 0;
         }
     }
@@ -531,10 +527,10 @@ export class HybridRetriever {
                 }
                 catch (timeoutError) {
                     if (timeoutError.message === 'Graph search timeout') {
-                        console.warn(`[HybridRetriever] Amnesia Mode: graph search timeout after ${GRAPH_TIMEOUT_MS}ms, using vector-only results`);
+                        logWarn(`[HybridRetriever] Amnesia Mode: graph search timeout after ${GRAPH_TIMEOUT_MS}ms, using vector-only results`);
                     }
                     else {
-                        console.error('[HybridRetriever] graphSearch failed:', timeoutError.message);
+                        logError(`[HybridRetriever] graphSearch failed: ${timeoutError.message}`);
                     }
                     // Continue with vector-only results
                     graphResults = [];
@@ -566,10 +562,10 @@ export class HybridRetriever {
                             }
                         }
                     }
-                    console.log(`[HybridRetriever] Multi-degree (${degree}) expansion found ${multiDegreeResults.length} additional memories`);
+                    logInfo(`[HybridRetriever] Multi-degree (${degree}) expansion found ${multiDegreeResults.length} additional memories`);
                 }
                 catch (error) {
-                    console.error('[HybridRetriever] multi-degree expansion failed:', error.message);
+                    logError(`[HybridRetriever] multi-degree expansion failed: ${error.message}`);
                 }
             }
             // Step 5: Merge all results (deduplicate by ID)
@@ -592,7 +588,7 @@ export class HybridRetriever {
             };
         }
         catch (error) {
-            console.error('[HybridRetriever] retrieveWithMultiDegree failed:', error.message);
+            logError(`[HybridRetriever] retrieveWithMultiDegree failed: ${error.message}`);
             // Return empty result on error
             return {
                 results: [],

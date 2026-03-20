@@ -11,6 +11,7 @@
  * - Conflict detection via conflict-detector.ts
  */
 
+import { logInfo, logWarn, logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 import { ConflictDetector } from './conflict-detector.js';
 
@@ -169,7 +170,7 @@ export class SemanticClusterer {
         clusteredCount,
       };
     } catch (error: any) {
-      console.error('[SemanticClusterer] LLM failed:', error.message);
+      logError(`[SemanticClusterer] LLM failed: ${error.message}`);
       return { clusters: [], totalMemories: memories.length, clusteredCount: 0 };
     }
   }
@@ -224,7 +225,7 @@ export class SemanticClusterer {
       const output = (result.content || result.generated_text || '').trim();
       return this.parseMergeResult(output);
     } catch (error: any) {
-      console.error('[SemanticClusterer] Merge failed:', error.message);
+      logError(`[SemanticClusterer] Merge failed: ${error.message}`);
       return {
         mergedContent: null,
         entities: [],
@@ -331,12 +332,12 @@ export class SemanticClusterer {
       }
 
       if (allMemories.length > maxMemories) {
-        console.log(`[SemanticClusterer] Limited clustering to ${maxMemories}/${allMemories.length} memories`);
+        logInfo(`[SemanticClusterer] Limited clustering to ${maxMemories}/${allMemories.length} memories`);
       }
 
       // Cluster memories
       const clusterResult = await this.cluster(memories);
-      console.log(`[SemanticClusterer] Found ${clusterResult.clusters.length} clusters from ${clusterResult.totalMemories} memories`);
+      logInfo(`[SemanticClusterer] Found ${clusterResult.clusters.length} clusters from ${clusterResult.totalMemories} memories`);
 
       // Merge each cluster
       for (const cluster of clusterResult.clusters) {
@@ -349,13 +350,13 @@ export class SemanticClusterer {
             mergedContent: mergeResult.mergedContent,
             sourceIds: cluster.memoryIndices.map(i => memories[i]?.id).filter(id => id !== undefined),
           });
-          console.log(`[SemanticClusterer] Merged cluster "${cluster.theme}" (${cluster.memoryIndices.length} memories)`);
+          logInfo(`[SemanticClusterer] Merged cluster "${cluster.theme}" (${cluster.memoryIndices.length} memories)`);
         }
       }
 
       return { completed: true, reason: 'Success' };
     } catch (error: any) {
-      console.error('[SemanticClusterer] Idle clustering failed:', error.message);
+      logError(`[SemanticClusterer] Idle clustering failed: ${error.message}`);
       return { completed: false, reason: error.message };
     }
   }

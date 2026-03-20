@@ -14,6 +14,7 @@ import { SemanticClusterer } from './clusterer.js';
 import { Summarizer } from './summarizer.js';
 import { HybridRetriever } from './hybrid-retrieval.js';
 import { EntityIndexer } from './entity-indexer.js';
+import { logInfo, logWarn, logError } from './maintenance-logger.js';
 import type { MemoryWithSimilarity } from './memory-store-surreal.js';
 
 export interface RetrievalFunnelStats {
@@ -93,7 +94,7 @@ export class MemoryManager {
    */
   async initialize(): Promise<MigrationResult> {
     const result = await this.db.initialize();
-    console.log('[MemoryManager] Initialized with SurrealDB');
+    logInfo('[MemoryManager] Initialized with SurrealDB');
 
     // Load known entities into EntityExtractor cache
     await this.loadKnownEntitiesToCache();
@@ -105,6 +106,28 @@ export class MemoryManager {
   }
 
   /**
+   * Dispose the memory manager - stop background workers and close DB connection.
+   */
+  async dispose(): Promise<void> {
+    // Stop idle clustering worker
+    if (this.idleClusteringInterval) {
+      clearInterval(this.idleClusteringInterval);
+      this.idleClusteringInterval = undefined;
+    }
+
+    // Dispose EntityIndexer (stops all background schedulers)
+    this.entityIndexer.dispose();
+
+    // Dispose EntityExtractor (stops buffer flush)
+    this.entityIndexer.getExtractor().dispose();
+
+    // Close SurrealDB connection
+    await this.db.close();
+
+    logInfo('[MemoryManager] Disposed');
+  }
+
+  /**
    * Load known entities from database into EntityExtractor cache
    */
   private async loadKnownEntitiesToCache(): Promise<void> {
@@ -113,17 +136,18 @@ export class MemoryManager {
       if (knownEntities.length > 0) {
         // Load entities into EntityExtractor cache via EntityIndexer
         this.entityIndexer.getExtractor().addKnownEntities(knownEntities);
-        console.log(`[MemoryManager] Loaded ${knownEntities.length} known entities to EntityExtractor cache`);
+        logInfo(`[MemoryManager] Loaded ${knownEntities.length} known entities to EntityExtractor cache`);
       } else {
-        console.log('[MemoryManager] No known entities to load (fresh database)');
+        logInfo('[MemoryManager] No known entities to load (fresh database)');
       }
     } catch (error: any) {
-      console.error('[MemoryManager] Failed to load known entities:', error.message);
+      logError(`[MemoryManager] Failed to load known entities: ${error.message}`);
     }
   }
 
   /**
    * Start idle clustering worker - runs semantic clustering during idle time.
+   * Uses unref() to not block process exit.
    */
   private startIdleClusteringWorker(): void {
     this.idleClusteringInterval = setInterval(async () => {
@@ -135,7 +159,8 @@ export class MemoryManager {
           return;
         }
 
-        console.log('[MemoryManager] System idle, running maintenance...');
+        // Only log maintenance status every 10 minutes (not every 2 minutes)
+        const shouldLog = (now - this.maintenanceHistory.lastClustering) % 600000 < 120000;
 
         // Run clustering every 5 minutes
         if (now - this.maintenanceHistory.lastClustering > 300000) {
@@ -149,22 +174,27 @@ export class MemoryManager {
           this.maintenanceHistory.lastDecay = now;
         }
 
-        // Process entity indexing queue every 2 minutes (handled by EntityIndexer background processor)
-        // Log indexer stats for monitoring
+        // Log entity indexer stats every 10 minutes (not every 2 minutes) - file only
         const indexerStats = this.entityIndexer.getStats();
-        console.log(`[MemoryManager] EntityIndexer stats: queue=${indexerStats.queueSize}, indexed=${indexerStats.totalIndexed}, frozen=${indexerStats.totalFrozen}, pruned=${indexerStats.totalPruned}`);
+        if (shouldLog) {
+          logInfo(`Idle maintenance completed (queue=${indexerStats.queueSize}, indexed=${indexerStats.totalIndexed}, frozen=${indexerStats.totalFrozen}, pruned=${indexerStats.totalPruned})`);
+        }
 
         // Run TTL pruning every 7 days
         const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
         if (now - this.maintenanceHistory.lastTtlPruning > sevenDaysMs) {
           await this.runTtlPruning();
           this.maintenanceHistory.lastTtlPruning = now;
+          logInfo('TTL pruning completed');
         }
 
       } catch (error: any) {
-        console.error('[MemoryManager] Idle maintenance failed:', error.message);
+        logError(`Idle maintenance failed: ${error.message}`);
       }
     }, 120000);
+
+    // Don't block process exit - allows CLI commands to complete
+    this.idleClusteringInterval.unref();
   }
 
   /**
@@ -207,15 +237,15 @@ export class MemoryManager {
    * Generate reflection memory automatically from session conversation.
    */
   private async generateAutoReflection(sessionId: string, messages: string[]): Promise<void> {
-    console.log(`[MemoryManager] Generating auto-reflection for session ${sessionId} (${messages.length} messages)`);
+    logInfo(`[MemoryManager] Generating auto-reflection for session ${sessionId} (${messages.length} messages)`);
 
     const result = await this.summarizer.summarize(messages);
 
     if (!result.isEmpty && result.summary) {
       await this.storeReflection(result.summary, 0.85);
-      console.log(`[MemoryManager] Stored auto-reflection: "${result.summary.substring(0, 50)}..."`);
+      logInfo(`[MemoryManager] Stored auto-reflection: "${result.summary.substring(0, 50)}..."`);
     } else {
-      console.log(`[MemoryManager] No significant content for reflection in session ${sessionId}`);
+      logInfo(`[MemoryManager] No significant content for reflection in session ${sessionId}`);
     }
   }
 
@@ -223,12 +253,12 @@ export class MemoryManager {
    * Run idle clustering during maintenance window.
    */
   private async runIdleClustering(): Promise<void> {
-    console.log('[MemoryManager] Running idle clustering...');
+    logInfo('Running idle clustering...');
 
     const semanticMemories = await this.memoryStore.getSemantic(100);
 
     if (semanticMemories.length < 5) {
-      console.log('[MemoryManager] Not enough memories for clustering');
+      logInfo('Not enough memories for clustering');
       return;
     }
 
@@ -243,8 +273,8 @@ export class MemoryManager {
             `Merged fact: ${result.mergedContent}`,
             0.85
           );
-          console.log(
-            `[MemoryManager] Stored merged memory ${mergedId} from ${result.sourceIds.length} sources: ${result.theme}`
+          logInfo(
+            `Stored merged memory ${mergedId} from ${result.sourceIds.length} sources: ${result.theme}`
           );
         },
         { timeoutMs: 120000, maxMemories: 100 }
@@ -261,7 +291,7 @@ export class MemoryManager {
 
       clearTimeout(timeoutId);
     } catch (error: any) {
-      console.error('[MemoryManager] Idle clustering failed or timed out:', error.message);
+      logError(`Idle clustering failed or timed out: ${error.message}`);
     }
   }
 
@@ -269,7 +299,7 @@ export class MemoryManager {
    * Run importance decay during maintenance window.
    */
   private async runImportanceDecay(): Promise<void> {
-    console.log('[MemoryManager] Running importance decay...');
+    logInfo('Running importance decay...');
 
     const now = Date.now();
     const halfLifeDays = 30;
@@ -299,7 +329,7 @@ export class MemoryManager {
       }
     }
 
-    console.log(`[MemoryManager] Decay applied: ${updatedCount}/${allMemories.length} memories updated`);
+    logInfo(`Decay applied: ${updatedCount}/${allMemories.length} memories updated`);
   }
 
   /**
@@ -307,9 +337,9 @@ export class MemoryManager {
    * Called weekly during idle maintenance.
    */
   private async runTtlPruning(): Promise<void> {
-    console.log('[MemoryManager] Running TTL pruning...');
+    logInfo('Running TTL pruning...');
     const prunedCount = await this.entityIndexer.runTTLPruning();
-    console.log(`[MemoryManager] TTL pruning completed: ${prunedCount} entities pruned`);
+    logInfo(`TTL pruning completed: ${prunedCount} entities pruned`);
   }
 
   /**
@@ -363,8 +393,8 @@ export class MemoryManager {
     }
 
     if (enableFunnelStats && hybridResult.stats.mergedCount > 0) {
-      console.log(`[MemoryManager] Hybrid Funnel: ${funnel.initialCount} (vector:${hybridResult.stats.vectorCount} + graph:${hybridResult.stats.graphCount}) → ${funnel.afterRerank} merged → ${funnel.finalCount} final`);
-      console.log(`[MemoryManager] Avg similarity: ${funnel.avgSimilarity.toFixed(2)}`);
+      logInfo(`[MemoryManager] Hybrid Funnel: ${funnel.initialCount} (vector:${hybridResult.stats.vectorCount} + graph:${hybridResult.stats.graphCount}) → ${funnel.afterRerank} merged → ${funnel.finalCount} final`);
+      logInfo(`[MemoryManager] Avg similarity: ${funnel.avgSimilarity.toFixed(2)}`);
     }
 
     return results;
@@ -414,7 +444,7 @@ export class MemoryManager {
       );
 
       if (conflictResult.isConflict) {
-        console.log(
+        logInfo(
           `[Memory] Conflict detected: "${content.substring(0, 50)}..." supersedes memory ${conflictResult.oldMemoryId}`
         );
         this.memoryStore.enqueueStorage(async () => {

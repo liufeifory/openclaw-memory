@@ -2,6 +2,7 @@
  * Embedding service using llama.cpp HTTP endpoint.
  * Supports BGE-style task_type parameter for query/document distinction.
  */
+import { logWarn } from './maintenance-logger.js';
 export class EmbeddingService {
     endpoint;
     constructor(endpoint = 'http://localhost:8080') {
@@ -52,7 +53,7 @@ export class EmbeddingService {
      */
     normalize(vector) {
         if (!vector || vector.length === 0) {
-            console.warn('[embedding] Empty or undefined vector received');
+            logWarn('[embedding] Empty or undefined vector received');
             return vector || [];
         }
         const magnitude = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));

@@ -56,6 +56,7 @@ export declare class EntityExtractor {
     private readonly bufferFlushInterval;
     private readonly minBatchSize;
     constructor(endpoint1B?: string, endpoint7B?: string);
+    private flushInterval?;
     /**
      * Start periodic buffer flush
      */
@@ -165,5 +166,9 @@ export declare class EntityExtractor {
      * @returns Parsed JSON response from the model
      */
     call7B(prompt: string, timeout?: number): Promise<any>;
+    /**
+     * Dispose - clear background intervals
+     */
+    dispose(): void;
 }
 //# sourceMappingURL=entity-extractor.d.ts.map

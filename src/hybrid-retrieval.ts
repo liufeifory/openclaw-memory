@@ -20,6 +20,7 @@ import { EmbeddingService } from './embedding.js';
 import { EntityIndexer } from './entity-indexer.js';
 import { Reranker, RerankResult } from './reranker.js';
 import { EntityExtractor, ExtractedEntity } from './entity-extractor.js';
+import { logInfo, logWarn, logError } from './maintenance-logger.js';
 
 /**
  * Memory result with similarity score
@@ -144,9 +145,9 @@ export class HybridRetriever {
           stats.graphCount = graphResults.length;
         } catch (timeoutError: any) {
           if (timeoutError.message === 'Graph search timeout') {
-            console.warn(`[HybridRetriever] Amnesia Mode: graph search timeout after ${GRAPH_TIMEOUT_MS}ms, using vector-only results`);
+            logWarn(`[HybridRetriever] Amnesia Mode: graph search timeout after ${GRAPH_TIMEOUT_MS}ms, using vector-only results`);
           } else {
-            console.error('[HybridRetriever] graphSearch failed:', timeoutError.message);
+            logError(`[HybridRetriever] graphSearch failed: ${timeoutError.message}`);
           }
           // Continue with vector-only results
           graphResults = [];
@@ -160,7 +161,7 @@ export class HybridRetriever {
           topicResults = await this.topicSearch(validEntityIds, INITIAL_K);
           stats.topicCount = topicResults.length;
         } catch (error: any) {
-          console.error('[HybridRetriever] topicSearch failed:', error.message);
+          logError(`[HybridRetriever] topicSearch failed: ${error.message}`);
           topicResults = [];
         }
       }
@@ -192,7 +193,7 @@ export class HybridRetriever {
         stats,
       };
     } catch (error: any) {
-      console.error('[HybridRetriever] retrieve failed:', error.message);
+      logError(`[HybridRetriever] retrieve failed: ${error.message}`);
       // Return empty result on error
       return {
         results: [],
@@ -239,7 +240,7 @@ export class HybridRetriever {
         source: 'vector' as const,
       }));
     } catch (error: any) {
-      console.error('[HybridRetriever] vectorSearch failed:', error.message);
+      logError(`[HybridRetriever] vectorSearch failed: ${error.message}`);
       return [];
     }
   }
@@ -252,10 +253,9 @@ export class HybridRetriever {
   async extractEntitiesFromQuery(query: string): Promise<ExtractedEntity[]> {
     try {
       const entities = await this.entityExtractor.extract(query);
-      console.log(`[HybridRetriever] Extracted ${entities.length} entities from query: "${query.substring(0, 50)}..."`);
       return entities;
     } catch (error: any) {
-      console.error('[HybridRetriever] extractEntitiesFromQuery failed:', error.message);
+      logError(`[HybridRetriever] extractEntitiesFromQuery failed: ${error.message}`);
       return [];
     }
   }
@@ -300,10 +300,9 @@ export class HybridRetriever {
       }
 
       const results = Array.from(allMemories.values());
-      console.log(`[HybridRetriever] Graph search found ${results.length} unique memories from ${entityIds.length} entities`);
       return results;
     } catch (error: any) {
-      console.error('[HybridRetriever] graphSearch failed:', error.message);
+      logError(`[HybridRetriever] graphSearch failed: ${error.message}`);
       return [];
     }
   }
@@ -353,7 +352,6 @@ export class HybridRetriever {
     }
 
     const merged = Array.from(mergedMap.values());
-    console.log(`[HybridRetriever] Merged ${vectorResults.length} vector + ${graphResults.length} graph -> ${merged.length} unique`);
     return merged;
   }
 
@@ -405,10 +403,9 @@ export class HybridRetriever {
       }
 
       const results = Array.from(allMemories.values());
-      console.log(`[HybridRetriever] Topic search found ${results.length} unique memories`);
       return results;
     } catch (error: any) {
-      console.error('[HybridRetriever] topicSearch failed:', error.message);
+      logError(`[HybridRetriever] topicSearch failed: ${error.message}`);
       return [];
     }
   }
@@ -478,7 +475,6 @@ export class HybridRetriever {
     }
 
     const merged = Array.from(mergedMap.values());
-    console.log(`[HybridRetriever] Merged ${vectorResults.length} vector + ${graphResults.length} graph + ${topicResults.length} topic -> ${merged.length} unique`);
     return merged;
   }
 
@@ -518,7 +514,7 @@ export class HybridRetriever {
         source: 'reranked',
       }));
     } catch (error: any) {
-      console.error('[HybridRetriever] rerankResults failed:', error.message);
+      logError(`[HybridRetriever] rerankResults failed: ${error.message}`);
       // Return original results with their scores if rerank fails
       return results;
     }
@@ -564,7 +560,7 @@ export class HybridRetriever {
 
       return 0;
     } catch (error: any) {
-      console.error(`[HybridRetriever] getEntityIdByName failed for "${entityName}":`, error.message);
+      logError(`[HybridRetriever] getEntityIdByName failed for "${entityName}": ${error.message}`);
       return 0;
     }
   }
@@ -667,9 +663,9 @@ export class HybridRetriever {
           stats.graphCount = graphResults.length;
         } catch (timeoutError: any) {
           if (timeoutError.message === 'Graph search timeout') {
-            console.warn(`[HybridRetriever] Amnesia Mode: graph search timeout after ${GRAPH_TIMEOUT_MS}ms, using vector-only results`);
+            logWarn(`[HybridRetriever] Amnesia Mode: graph search timeout after ${GRAPH_TIMEOUT_MS}ms, using vector-only results`);
           } else {
-            console.error('[HybridRetriever] graphSearch failed:', timeoutError.message);
+            logError(`[HybridRetriever] graphSearch failed: ${timeoutError.message}`);
           }
           // Continue with vector-only results
           graphResults = [];
@@ -710,9 +706,9 @@ export class HybridRetriever {
             }
           }
 
-          console.log(`[HybridRetriever] Multi-degree (${degree}) expansion found ${multiDegreeResults.length} additional memories`);
+          logInfo(`[HybridRetriever] Multi-degree (${degree}) expansion found ${multiDegreeResults.length} additional memories`);
         } catch (error: any) {
-          console.error('[HybridRetriever] multi-degree expansion failed:', error.message);
+          logError(`[HybridRetriever] multi-degree expansion failed: ${error.message}`);
         }
       }
 
@@ -743,7 +739,7 @@ export class HybridRetriever {
         stats,
       };
     } catch (error: any) {
-      console.error('[HybridRetriever] retrieveWithMultiDegree failed:', error.message);
+      logError(`[HybridRetriever] retrieveWithMultiDegree failed: ${error.message}`);
       // Return empty result on error
       return {
         results: [],

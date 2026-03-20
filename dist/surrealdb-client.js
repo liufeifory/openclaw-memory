@@ -2,6 +2,7 @@
  * SurrealDB Client wrapper - SurrealDB 2.x compatible
  */
 import { Surreal, RecordId } from 'surrealdb';
+import { logInfo, logWarn, logError } from './maintenance-logger.js';
 const MEMORY_TABLE = 'memory';
 const ENTITY_TABLE = 'entity';
 const MEMORY_ENTITY_TABLE = 'memory_entity';
@@ -34,8 +35,10 @@ export class SurrealDatabase {
     client = null;
     initialized = false;
     config;
-    maxRetries = 3;
-    baseDelayMs = 1000;
+    // Retry configuration - increased for boot-time race conditions
+    maxRetries = 10;
+    baseDelayMs = 2000;
+    maxDelayMs = 10000;
     constructor(config) {
         this.config = config;
     }
@@ -69,7 +72,7 @@ export class SurrealDatabase {
         }
         catch (error) {
             result.success = false;
-            console.error('[SurrealDB] Initialization failed:', error.message);
+            logError(`SurrealDB initialization failed: ${error.message}`);
             throw error;
         }
         return result;
@@ -90,41 +93,41 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS updated_at ON TABLE ${MEMORY_TABLE} TYPE string;
       DEFINE FIELD IF NOT EXISTS is_indexed ON TABLE ${MEMORY_TABLE} TYPE bool DEFAULT false;
     `);
-        console.log('[SurrealDB] Memory table defined');
+        logInfo('Memory table defined');
         try {
             await this.query(`
         DEFINE INDEX IF NOT EXISTS vector_idx ON TABLE ${MEMORY_TABLE}
         FIELDS embedding HNSW DIMENSION ${VECTOR_DIMENSION} DISTANCE COSINE;
       `);
-            console.log('[SurrealDB] Vector index created');
+            logInfo('Vector index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Vector index creation failed:', error.message);
+            logWarn(`Vector index creation failed: ${error.message}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS type_idx ON TABLE ${MEMORY_TABLE} FIELDS type;`);
-            console.log('[SurrealDB] Type index created');
+            logInfo('Type index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Type index creation failed:', error.message);
+            logWarn(`Type index creation failed: ${error.message}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS session_idx ON TABLE ${MEMORY_TABLE} FIELDS session_id;`);
-            console.log('[SurrealDB] Session index created');
+            logInfo('Session index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Session index creation failed:', error.message);
+            logWarn(`Session index creation failed: ${error.message}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS is_indexed_idx ON TABLE ${MEMORY_TABLE} FIELDS is_indexed;`);
-            console.log('[SurrealDB] is_indexed index created');
+            logInfo('is_indexed index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] is_indexed index creation failed:', error.message);
+            logWarn(`is_indexed index creation failed: ${error.message}`);
         }
         await this.query(`
       DEFINE TABLE IF NOT EXISTS ${ENTITY_TABLE} SCHEMAFULL;
@@ -143,38 +146,38 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS canonical_id ON TABLE ${ENTITY_TABLE} TYPE option<string>;
       DEFINE FIELD IF NOT EXISTS is_merged ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT false;
     `);
-        console.log('[SurrealDB] Entity table defined with graph protection fields');
+        logInfo('Entity table defined');
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS entity_name_idx ON TABLE ${ENTITY_TABLE} FIELDS name;`);
-            console.log('[SurrealDB] Entity name index created');
+            logInfo('Entity name index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Entity name index creation failed:', error.message);
+            logWarn(`[SurrealDB] Entity name index creation failed: ${error.message}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS entity_normalized_idx ON TABLE ${ENTITY_TABLE} FIELDS normalized_name;`);
-            console.log('[SurrealDB] Entity normalized_name index created');
+            logInfo('Entity normalized_name index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Entity normalized_name index creation failed:', error.message);
+            logWarn(`[SurrealDB] Entity normalized_name index creation failed: ${error.message}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS entity_last_mentioned_idx ON TABLE ${ENTITY_TABLE} FIELDS last_mentioned_at;`);
-            console.log('[SurrealDB] Entity last_mentioned_at index created');
+            logInfo('Entity last_mentioned_at index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Entity last_mentioned_at index creation failed:', error.message);
+            logWarn(`[SurrealDB] Entity last_mentioned_at index creation failed: ${error.message}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS entity_first_seen_idx ON TABLE ${ENTITY_TABLE} FIELDS first_seen_at;`);
-            console.log('[SurrealDB] Entity first_seen_at index created');
+            logInfo('Entity first_seen_at index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Entity first_seen_at index creation failed:', error.message);
+            logWarn(`[SurrealDB] Entity first_seen_at index creation failed: ${error.message}`);
         }
         await this.query(`
       DEFINE TABLE IF NOT EXISTS ${MEMORY_ENTITY_TABLE} SCHEMAFULL;
@@ -184,29 +187,29 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS weight ON TABLE ${MEMORY_ENTITY_TABLE} TYPE float DEFAULT 1.0;
       DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${MEMORY_ENTITY_TABLE} TYPE string;
     `);
-        console.log('[SurrealDB] memory_entity edge table defined');
+        logInfo('memory_entity edge table defined');
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS memory_entity_memory_idx ON TABLE ${MEMORY_ENTITY_TABLE} FIELDS memory;`);
-            console.log('[SurrealDB] memory_entity memory index created');
+            logInfo('memory_entity memory index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] memory_entity memory index creation failed:', error.message);
+            logWarn(`[SurrealDB] memory_entity memory index creation failed: ${error.message}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS memory_entity_entity_idx ON TABLE ${MEMORY_ENTITY_TABLE} FIELDS entity;`);
-            console.log('[SurrealDB] memory_entity entity index created');
+            logInfo('memory_entity entity index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] memory_entity entity index creation failed:', error.message);
+            logWarn(`[SurrealDB] memory_entity entity index creation failed: ${error.message}`);
         }
         await this.query(`
       DEFINE TABLE IF NOT EXISTS ${RELATES_TABLE} SCHEMAFULL;
       DEFINE FIELD IF NOT EXISTS type ON TABLE ${RELATES_TABLE} TYPE string;
       DEFINE FIELD IF NOT EXISTS evidence ON TABLE ${RELATES_TABLE} TYPE array<record<${MEMORY_TABLE}>>;
     `);
-        console.log('[SurrealDB] Relates table defined');
+        logInfo('Relates table defined');
         // Stage 2: Entity-Entity relationship table (using RELATE-style edges)
         await this.query(`
       DEFINE TABLE IF NOT EXISTS ${ENTITY_RELATION_TABLE} SCHEMAFULL;
@@ -223,33 +226,32 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS reasoning ON TABLE ${ENTITY_RELATION_TABLE} TYPE option<string>;
       DEFINE FIELD IF NOT EXISTS last_occurrence_at ON TABLE ${ENTITY_RELATION_TABLE} TYPE option<string>;
     `);
-        console.log('[SurrealDB] Entity relation table defined for Stage 2 co-occurrence');
+        logInfo('Entity relation table defined');
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS entity_relation_in_idx ON TABLE ${ENTITY_RELATION_TABLE} FIELDS in;`);
-            console.log('[SurrealDB] Entity relation "in" index created');
+            logInfo('Entity relation in index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Entity relation "in" index creation failed:', error.message);
+            // Silently ignore
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS entity_relation_out_idx ON TABLE ${ENTITY_RELATION_TABLE} FIELDS out;`);
-            console.log('[SurrealDB] Entity relation "out" index created');
+            logInfo('Entity relation out index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Entity relation "out" index creation failed:', error.message);
+            // Silently ignore
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS entity_relation_weight_idx ON TABLE ${ENTITY_RELATION_TABLE} FIELDS weight;`);
-            console.log('[SurrealDB] Entity relation weight index created');
+            logInfo('Entity relation weight index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Entity relation weight index creation failed:', error.message);
+            logWarn(`[SurrealDB] Entity relation weight index creation failed: ${error.message}`);
         }
         // ==================== Stage 3: Topic Layer Schema ====================
-        console.log('\n=== Stage 3: Creating Topic Layer Schema ===');
         // Topic table
         await this.query(`
       DEFINE TABLE IF NOT EXISTS ${TOPIC_TABLE} SCHEMAFULL;
@@ -261,30 +263,30 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS updated_at ON TABLE ${TOPIC_TABLE} TYPE datetime;
       DEFINE FIELD IF NOT EXISTS last_accessed_at ON TABLE ${TOPIC_TABLE} TYPE datetime;
     `);
-        console.log('[SurrealDB] Topic table defined');
+        logInfo('Topic table defined');
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS topic_name_idx ON TABLE ${TOPIC_TABLE} FIELDS name;`);
-            console.log('[SurrealDB] Topic name index created');
+            logInfo('Topic name index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Topic name index creation failed:', error.message);
+            logWarn(`[SurrealDB] Topic name index creation failed: ${error.message}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS topic_entity_idx ON TABLE ${TOPIC_TABLE} FIELDS parent_entity_id;`);
-            console.log('[SurrealDB] Topic parent_entity_id index created');
+            logInfo('Topic parent_entity_id index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Topic parent_entity_id index creation failed:', error.message);
+            logWarn(`[SurrealDB] Topic parent_entity_id index creation failed: ${error.message}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS topic_last_accessed_idx ON TABLE ${TOPIC_TABLE} FIELDS last_accessed_at;`);
-            console.log('[SurrealDB] Topic last_accessed_at index created');
+            logInfo('Topic last_accessed_at index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] Topic last_accessed_at index creation failed:', error.message);
+            logWarn(`[SurrealDB] Topic last_accessed_at index creation failed: ${error.message}`);
         }
         // topic_memory edge table
         await this.query(`
@@ -295,22 +297,22 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS weight ON TABLE ${TOPIC_MEMORY_TABLE} TYPE float;
       DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${TOPIC_MEMORY_TABLE} TYPE datetime DEFAULT time::now();
     `);
-        console.log('[SurrealDB] topic_memory edge table defined');
+        logInfo('topic_memory edge table defined');
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS topic_memory_in_idx ON TABLE ${TOPIC_MEMORY_TABLE} FIELDS in;`);
-            console.log('[SurrealDB] topic_memory "in" index created');
+            logInfo('topic_memory in index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] topic_memory "in" index creation failed:', error.message);
+            // Silently ignore
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS topic_memory_out_idx ON TABLE ${TOPIC_MEMORY_TABLE} FIELDS out;`);
-            console.log('[SurrealDB] topic_memory "out" index created');
+            logInfo('topic_memory out index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] topic_memory "out" index creation failed:', error.message);
+            // Silently ignore
         }
         // entity_alias table
         await this.query(`
@@ -322,30 +324,30 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS created_at ON TABLE ${ENTITY_ALIAS_TABLE} TYPE datetime DEFAULT time::now();
       DEFINE FIELD IF NOT EXISTS created_by ON TABLE ${ENTITY_ALIAS_TABLE} TYPE option<string>;
     `);
-        console.log('[SurrealDB] entity_alias table defined');
+        logInfo('entity_alias table defined');
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS alias_name_idx ON TABLE ${ENTITY_ALIAS_TABLE} FIELDS alias;`);
-            console.log('[SurrealDB] entity_alias name index created');
+            logInfo('entity_alias name index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] entity_alias name index creation failed:', error.message);
+            logWarn(`[SurrealDB] entity_alias name index creation failed: ${error.message}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS alias_entity_idx ON TABLE ${ENTITY_ALIAS_TABLE} FIELDS entity_id;`);
-            console.log('[SurrealDB] entity_alias entity_id index created');
+            logInfo('entity_alias entity_id index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] entity_alias entity_id index creation failed:', error.message);
+            logWarn(`[SurrealDB] entity_alias entity_id index creation failed: ${error.message}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS alias_unique_idx ON TABLE ${ENTITY_ALIAS_TABLE} FIELDS alias UNIQUE;`);
-            console.log('[SurrealDB] entity_alias unique index created');
+            logInfo('entity_alias unique index created');
             migrated = true;
         }
         catch (error) {
-            console.warn('[SurrealDB] entity_alias unique index creation failed:', error.message);
+            logWarn(`[SurrealDB] entity_alias unique index creation failed: ${error.message}`);
         }
         // Add canonical_id field to entity table (if not exists)
         await this.query(`
@@ -353,17 +355,41 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS is_merged ON TABLE ${ENTITY_TABLE} TYPE bool DEFAULT false;
       DEFINE FIELD IF NOT EXISTS merged_at ON TABLE ${ENTITY_TABLE} TYPE option<datetime>;
     `);
-        console.log('[SurrealDB] Entity table extended with canonical_id and is_merged fields');
-        console.log('=== Stage 3: Topic Layer Schema Complete ===\n');
+        logInfo('Entity table extended');
         await this.storeSchemaVersion();
         return migrated;
     }
-    async query(sql) {
+    async query(sql, params) {
+        return this.executeQuery(sql, params);
+    }
+    /**
+     * Raw query execution with automatic re-authentication on permission errors.
+     * This is the low-level method that all query operations should use.
+     */
+    async executeQuery(sql, params) {
         if (!this.client) {
             throw new Error('[SurrealDB] Client not connected');
         }
-        const result = await this.client.query(sql, {});
-        return result;
+        try {
+            const result = await this.client.query(sql, params || {});
+            return result;
+        }
+        catch (error) {
+            // Re-authenticate on permission errors
+            if (error.message?.includes('Anonymous access not allowed') ||
+                error.message?.includes('Not enough permissions')) {
+                logInfo('[SurrealDB] Re-authenticating due to permission error...');
+                await this.executeWithRetry(async () => {
+                    await this.client.signin({
+                        username: this.config.username,
+                        password: this.config.password,
+                    });
+                }, 'signin');
+                // Retry the query
+                return this.client.query(sql, params || {});
+            }
+            throw error;
+        }
     }
     async executeWithRetry(operation, operationName) {
         let lastError = null;
@@ -373,9 +399,9 @@ export class SurrealDatabase {
             }
             catch (error) {
                 lastError = error;
-                console.error(`[SurrealDB] ${operationName} failed (attempt ${attempt}/${this.maxRetries}):`, error.message);
+                logError(`[SurrealDB] ${operationName} failed (attempt ${attempt}/${this.maxRetries}): ${error.message}`);
                 if (attempt < this.maxRetries) {
-                    const delay = Math.pow(2, attempt - 1) * this.baseDelayMs;
+                    const delay = Math.min(Math.pow(2, attempt - 1) * this.baseDelayMs, this.maxDelayMs);
                     await new Promise(resolve => setTimeout(resolve, delay));
                 }
             }
@@ -418,13 +444,11 @@ export class SurrealDatabase {
         fields.push(`updated_at = $updated_at`);
         params.updated_at = now;
         const sql = `UPSERT ${String(recordId)} SET ${fields.join(', ')}`;
-        console.log('[SurrealDB] Upsert SQL:', sql.substring(0, 200));
         try {
-            await this.client.query(sql, params);
+            await this.executeQuery(sql, params);
             return { success: true };
         }
         catch (error) {
-            console.error('[SurrealDB] Upsert failed:', error.message);
             return { success: false, reason: error.message };
         }
     }
@@ -432,7 +456,6 @@ export class SurrealDatabase {
         if (!this.client) {
             throw new Error('[SurrealDB] Client not connected');
         }
-        console.log(`[SurrealDB] Search: embedding=${embedding?.length}, filter=${JSON.stringify(filter)}`);
         const conditions = [];
         const params = { query_embedding: embedding, limit };
         if (filter?.type || filter?.memory_type) {
@@ -452,7 +475,7 @@ export class SurrealDatabase {
       ORDER BY similarity DESC
       LIMIT $limit
     `;
-        const result = await this.client.query(sql, params);
+        const result = await this.executeQuery(sql, params);
         // SurrealDB 3.x SDK returns [[records]] format (array of arrays)
         // Check if result[0] is an array (direct data) or an object with result property
         let data = [];
@@ -470,7 +493,6 @@ export class SurrealDatabase {
             // Fallback for object format
             data = result.result || [];
         }
-        console.log(`[SurrealDB] Search extracted ${data.length} items`);
         return data.map((r) => ({
             id: this.extractIdFromRecord(r),
             score: r.similarity || 0,
@@ -509,7 +531,7 @@ export class SurrealDatabase {
       ORDER BY combined_score DESC
       LIMIT $limit
     `;
-        const result = await this.client.query(sql, params);
+        const result = await this.executeQuery(sql, params);
         // SurrealDB 3.x returns [[records]] format
         let data = [];
         if (Array.isArray(result) && result.length > 0) {
@@ -532,7 +554,7 @@ export class SurrealDatabase {
         }
         try {
             const recordId = new RecordId(MEMORY_TABLE, id);
-            const result = await this.client.query(`SELECT * FROM ${String(recordId)}`, {});
+            const result = await this.executeQuery(`SELECT * FROM ${String(recordId)}`, {});
             // SurrealDB 3.x returns [[record]] format
             let records = [];
             if (Array.isArray(result) && result.length > 0) {
@@ -551,7 +573,7 @@ export class SurrealDatabase {
             }
         }
         catch (error) {
-            console.error('[SurrealDB] Get failed:', error.message);
+            logError(`[SurrealDB] Get failed: ${error.message}`);
         }
         return null;
     }
@@ -575,11 +597,11 @@ export class SurrealDatabase {
             fields.push(`updated_at = $updated_at`);
             params.updated_at = now;
             const sql = `UPDATE ${String(recordId)} SET ${fields.join(', ')}`;
-            await this.client.query(sql, params);
+            await this.executeQuery(sql, params);
             return { success: true };
         }
         catch (error) {
-            console.error('[SurrealDB] Update payload failed:', error.message);
+            logError(`[SurrealDB] Update payload failed: ${error.message}`);
             return { success: false, reason: error.message };
         }
     }
@@ -599,7 +621,7 @@ export class SurrealDatabase {
         }
         const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
         const sql = `SELECT * FROM ${MEMORY_TABLE} ${whereClause} LIMIT $limit`;
-        const result = await this.client.query(sql, params);
+        const result = await this.query(sql, params);
         // SurrealDB 3.x returns [[records]] format
         let data = [];
         if (Array.isArray(result) && result.length > 0) {
@@ -645,7 +667,7 @@ export class SurrealDatabase {
       ORDER BY similarity DESC
       LIMIT $limit
     `;
-        const result = await this.client.query(sql, typedParams);
+        const result = await this.executeQuery(sql, typedParams);
         // SurrealDB 3.x returns [[records]] format
         let data = [];
         if (Array.isArray(result) && result.length > 0) {
@@ -668,7 +690,7 @@ export class SurrealDatabase {
         }
         for (const id of ids) {
             const recordId = new RecordId(MEMORY_TABLE, id);
-            await this.client.query(`DELETE ${String(recordId)}`, {});
+            await this.executeQuery(`DELETE ${String(recordId)}`, {});
         }
     }
     async count() {
@@ -676,7 +698,7 @@ export class SurrealDatabase {
             return 0;
         }
         try {
-            const result = await this.client.query('SELECT count() AS count FROM memory');
+            const result = await this.executeQuery('SELECT count() AS count FROM memory');
             // SurrealDB 3.x returns [[{count: N}]] format
             if (Array.isArray(result) && result.length > 0) {
                 if (Array.isArray(result[0]) && result[0].length > 0) {
@@ -704,7 +726,7 @@ export class SurrealDatabase {
             return 0;
         }
         try {
-            const result = await this.client.query('SELECT schema_version FROM metadata LIMIT 1');
+            const result = await this.executeQuery('SELECT schema_version FROM metadata LIMIT 1');
             // SurrealDB 3.x returns [[{schema_version: N}]] format
             if (Array.isArray(result) && result.length > 0) {
                 if (Array.isArray(result[0]) && result[0].length > 0) {
@@ -733,7 +755,7 @@ export class SurrealDatabase {
             });
         }
         catch (error) {
-            console.warn('[SurrealDB] Failed to store schema version:', error.message);
+            logError(`[SurrealDB] Failed to store schema version: ${error.message}`);
         }
     }
     extractIdFromRecord(record) {
@@ -805,7 +827,7 @@ export class SurrealDatabase {
         }
         const now = new Date().toISOString();
         // First try to find existing entity by name
-        const findResult = await this.client.query(`SELECT * FROM ${ENTITY_TABLE} WHERE name = $name LIMIT 1`, { name });
+        const findResult = await this.executeQuery(`SELECT * FROM ${ENTITY_TABLE} WHERE name = $name LIMIT 1`, { name });
         let data = [];
         if (Array.isArray(findResult) && findResult.length > 0) {
             if (Array.isArray(findResult[0])) {
@@ -818,7 +840,7 @@ export class SurrealDatabase {
         if (data && data.length > 0) {
             // Entity exists, update mention_count and return ID
             const existingId = this.extractStringIdFromRecord(data[0]);
-            await this.client.query(`UPDATE ${ENTITY_TABLE}:${existingId} SET mention_count = mention_count + 1, last_accessed = $now, last_mentioned_at = $now`, { now });
+            await this.executeQuery(`UPDATE ${ENTITY_TABLE}:${existingId} SET mention_count = mention_count + 1, last_accessed = $now, last_mentioned_at = $now`, { now });
             return existingId;
         }
         // Entity doesn't exist, create new one
@@ -836,7 +858,7 @@ export class SurrealDatabase {
       }
     `;
         try {
-            const result = await this.client.query(createSql, {
+            const result = await this.executeQuery(createSql, {
                 name,
                 type,
                 now,
@@ -857,7 +879,7 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Failed to get entity ID after create');
         }
         catch (error) {
-            console.error('[SurrealDB] upsertEntity failed:', error.message);
+            logError(`[SurrealDB] upsertEntity failed: ${error.message}`);
             throw error;
         }
     }
@@ -881,7 +903,7 @@ export class SurrealDatabase {
             entityRecordId = `${ENTITY_TABLE}:${entityId}`;
         }
         // Check if entity is frozen (Super Node protection)
-        const entityCheck = await this.client.query(`SELECT is_frozen FROM ${ENTITY_TABLE}:${entityId}`, {});
+        const entityCheck = await this.executeQuery(`SELECT is_frozen FROM ${ENTITY_TABLE}:${entityId}`, {});
         let entityData = [];
         if (Array.isArray(entityCheck) && entityCheck.length > 0) {
             if (Array.isArray(entityCheck[0])) {
@@ -892,7 +914,7 @@ export class SurrealDatabase {
             }
         }
         if (entityData && entityData.length > 0 && entityData[0].is_frozen === true) {
-            console.warn(`[SurrealDB] Entity ${entityId} is frozen (Super Node), skipping link`);
+            logWarn(`[SurrealDB] Entity ${entityId} is frozen (Super Node), skipping link`);
             return;
         }
         const now = new Date().toISOString();
@@ -917,29 +939,29 @@ export class SurrealDatabase {
           weight = $weight,
           created_at = $created_at
       `;
-            await this.client.query(sql, {
+            await this.executeQuery(sql, {
                 weight: relevanceScore,
                 created_at: now,
             });
             // Extract numeric ID for entity's relation_count update
             const numericEntityId = this.extractIdFromRecordId(entityRecordId);
             // Increment entity's relation_count
-            await this.client.query(`UPDATE ${ENTITY_TABLE}:${numericEntityId} SET relation_count += 1`, {});
+            await this.executeQuery(`UPDATE ${ENTITY_TABLE}:${numericEntityId} SET relation_count += 1`, {});
             // Check Super Node threshold after linking (User feedback)
             const stats = await this.getEntityStats(entityId);
             if (stats.memory_count >= TOPIC_SOFT_LIMIT) {
-                console.log(`[SurrealDB] Entity ${entityId} reached soft limit (${stats.memory_count} edges), triggering Topic creation`);
+                logInfo(`[SurrealDB] Entity ${entityId} reached soft limit (${stats.memory_count} edges), triggering Topic creation`);
                 if (topicIndexer) {
                     await topicIndexer.enqueueTopicCreation(String(entityId));
                 }
             }
             if (stats.memory_count >= TOPIC_HARD_LIMIT) {
-                console.warn(`[SurrealDB] Entity ${entityId} reached hard limit (${stats.memory_count} edges), freezing entity`);
+                logWarn(`[SurrealDB] Entity ${entityId} reached hard limit (${stats.memory_count} edges), freezing entity`);
                 await this.freezeEntity(String(entityId), 'Super Node hard limit exceeded');
             }
         }
         catch (error) {
-            console.error('[SurrealDB] linkMemoryEntity failed:', error.message);
+            logError(`[SurrealDB] linkMemoryEntity failed: ${error.message}`);
             throw error;
         }
     }
@@ -969,7 +991,7 @@ export class SurrealDatabase {
       LIMIT $limit
     `;
         try {
-            const result = await this.client.query(sql, { limit });
+            const result = await this.executeQuery(sql, { limit });
             let data = [];
             if (Array.isArray(result) && result.length > 0) {
                 if (Array.isArray(result[0])) {
@@ -988,7 +1010,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            console.error('[SurrealDB] searchByEntity failed:', error.message);
+            logError(`[SurrealDB] searchByEntity failed: ${error.message}`);
             throw error;
         }
     }
@@ -1020,7 +1042,7 @@ export class SurrealDatabase {
       LIMIT $limit
     `;
         try {
-            const result = await this.client.query(sql, { limit });
+            const result = await this.executeQuery(sql, { limit });
             let data = [];
             if (Array.isArray(result) && result.length > 0) {
                 if (Array.isArray(result[0])) {
@@ -1039,7 +1061,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            console.error('[SurrealDB] searchByAssociation failed:', error.message);
+            logError(`[SurrealDB] searchByAssociation failed: ${error.message}`);
             throw error;
         }
     }
@@ -1116,7 +1138,7 @@ export class SurrealDatabase {
                 entityRecordId = `entity:${entityId}`;
             }
             // Query using 'entity' field (not 'out') since memory_entity uses named fields
-            const result = await this.client.query(`SELECT * FROM memory_entity WHERE entity = ${entityRecordId} ORDER BY weight DESC LIMIT ${limit}`, {});
+            const result = await this.executeQuery(`SELECT * FROM memory_entity WHERE entity = ${entityRecordId} ORDER BY weight DESC LIMIT ${limit}`, {});
             const data = this.extractResult(result);
             return data.map((r) => ({
                 id: this.extractIdFromRecord(r),
@@ -1126,7 +1148,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            console.error('[SurrealDB] getMemoriesByEntity failed:', error.message);
+            logError(`[SurrealDB] getMemoriesByEntity failed: ${error.message}`);
             return [];
         }
     }
@@ -1140,7 +1162,7 @@ export class SurrealDatabase {
         }
         try {
             // Get total entities by selecting all and counting the array length
-            const totalResult = await this.client.query(`SELECT * FROM ${ENTITY_TABLE}`, {});
+            const totalResult = await this.executeQuery(`SELECT * FROM ${ENTITY_TABLE}`, {});
             let totalEntities = 0;
             if (Array.isArray(totalResult) && totalResult.length > 0) {
                 if (Array.isArray(totalResult[0])) {
@@ -1151,7 +1173,7 @@ export class SurrealDatabase {
                 }
             }
             // Get entities by type
-            const byTypeResult = await this.client.query(`SELECT entity_type, count(true) AS count FROM ${ENTITY_TABLE} GROUP BY entity_type`, {});
+            const byTypeResult = await this.executeQuery(`SELECT entity_type, count(true) AS count FROM ${ENTITY_TABLE} GROUP BY entity_type`, {});
             const byType = {};
             if (Array.isArray(byTypeResult) && byTypeResult.length > 0) {
                 let typeData = [];
@@ -1168,7 +1190,7 @@ export class SurrealDatabase {
                 }
             }
             // Get total links (edges in memory_entity table)
-            const linksResult = await this.client.query(`SELECT * FROM ${MEMORY_ENTITY_TABLE}`, {});
+            const linksResult = await this.executeQuery(`SELECT * FROM ${MEMORY_ENTITY_TABLE}`, {});
             let totalLinks = 0;
             if (Array.isArray(linksResult) && linksResult.length > 0) {
                 if (Array.isArray(linksResult[0])) {
@@ -1185,7 +1207,7 @@ export class SurrealDatabase {
             };
         }
         catch (error) {
-            console.error('[SurrealDB] getGlobalEntityStats failed:', error.message);
+            logError(`[SurrealDB] getGlobalEntityStats failed: ${error.message}`);
             return { total_entities: 0, by_type: {}, total_links: 0 };
         }
     }
@@ -1206,7 +1228,7 @@ export class SurrealDatabase {
         ORDER BY mention_count DESC
         LIMIT $limit
       `;
-            const result = await this.client.query(sql, { limit });
+            const result = await this.executeQuery(sql, { limit });
             let data = [];
             if (Array.isArray(result) && result.length > 0) {
                 if (Array.isArray(result[0])) {
@@ -1223,7 +1245,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            console.error('[SurrealDB] loadKnownEntities failed:', error.message);
+            logError(`[SurrealDB] loadKnownEntities failed: ${error.message}`);
             return [];
         }
     }
@@ -1261,13 +1283,13 @@ export class SurrealDatabase {
           last_accessed_at = time::now(),
           updated_at = time::now()
       `;
-            await this.client.query(sql, {
+            await this.executeQuery(sql, {
                 name,
                 description,
                 parent_entity_id: parentId,
             });
             // Fetch the created topic to get ID
-            const result = await this.client.query(`SELECT id FROM ${TOPIC_TABLE} WHERE name = $name AND parent_entity_id = $parent_entity_id LIMIT 1`, { name, parent_entity_id: parentId });
+            const result = await this.executeQuery(`SELECT id FROM ${TOPIC_TABLE} WHERE name = $name AND parent_entity_id = $parent_entity_id LIMIT 1`, { name, parent_entity_id: parentId });
             const data = this.extractResult(result);
             if (data && data.length > 0) {
                 return this.extractStringId(data[0].id);
@@ -1275,7 +1297,7 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Failed to get created topic ID');
         }
         catch (error) {
-            console.error('[SurrealDB] upsertTopic failed:', error.message);
+            logError(`[SurrealDB] upsertTopic failed: ${error.message}`);
             throw error;
         }
     }
@@ -1289,7 +1311,7 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
-            const result = await this.client.query(`SELECT * FROM ${TOPIC_TABLE}:${topicId} LIMIT 1`, {});
+            const result = await this.executeQuery(`SELECT * FROM ${TOPIC_TABLE}:${topicId} LIMIT 1`, {});
             const data = this.extractResult(result);
             if (data && data.length > 0) {
                 return data[0];
@@ -1297,7 +1319,7 @@ export class SurrealDatabase {
             return null;
         }
         catch (error) {
-            console.error('[SurrealDB] getTopicById failed:', error.message);
+            logError(`[SurrealDB] getTopicById failed: ${error.message}`);
             return null;
         }
     }
@@ -1319,12 +1341,12 @@ export class SurrealDatabase {
             else {
                 bareEntityId = String(entityId);
             }
-            const result = await this.client.query(`SELECT id, name, description, parent_entity_id, created_at FROM ${TOPIC_TABLE} WHERE parent_entity_id = $parent_entity_id ORDER BY created_at DESC`, { parent_entity_id: bareEntityId });
+            const result = await this.executeQuery(`SELECT id, name, description, parent_entity_id, created_at FROM ${TOPIC_TABLE} WHERE parent_entity_id = $parent_entity_id ORDER BY created_at DESC`, { parent_entity_id: bareEntityId });
             const data = this.extractResult(result);
             return data || [];
         }
         catch (error) {
-            console.error('[SurrealDB] getTopicsByEntity failed:', error.message);
+            logError(`[SurrealDB] getTopicsByEntity failed: ${error.message}`);
             return [];
         }
     }
@@ -1341,11 +1363,11 @@ export class SurrealDatabase {
             const topicRecordId = typeof topicId === 'string' && topicId.includes(':')
                 ? topicId
                 : `${TOPIC_TABLE}:${topicId}`;
-            await this.client.query(`DELETE ${topicRecordId}`, {});
-            console.log(`[SurrealDB] Deleted topic ${topicId}`);
+            await this.executeQuery(`DELETE ${topicRecordId}`, {});
+            logInfo(`[SurrealDB] Deleted topic ${topicId}`);
         }
         catch (error) {
-            console.error('[SurrealDB] deleteTopic failed:', error.message);
+            logError(`[SurrealDB] deleteTopic failed: ${error.message}`);
             throw error;
         }
     }
@@ -1383,14 +1405,14 @@ export class SurrealDatabase {
           relevance_score = $relevance_score,
           weight = $weight
       `;
-            await this.client.query(sql, {
+            await this.executeQuery(sql, {
                 relevance_score: relevanceScore,
                 weight: relevanceScore,
             });
-            console.log(`[SurrealDB] Linked topic ${topicId} to memory ${memoryId}`);
+            logInfo(`[SurrealDB] Linked topic ${topicId} to memory ${memoryId}`);
         }
         catch (error) {
-            console.error('[SurrealDB] linkTopicMemory failed:', error.message);
+            logError(`[SurrealDB] linkTopicMemory failed: ${error.message}`);
             throw error;
         }
     }
@@ -1420,7 +1442,7 @@ export class SurrealDatabase {
         ORDER BY weight DESC
         LIMIT ${limit}
       `;
-            const result = await this.client.query(sql, {});
+            const result = await this.executeQuery(sql, {});
             const data = this.extractResult(result);
             return (data || []).map((r) => ({
                 id: this.extractId(r.id),
@@ -1432,7 +1454,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            console.error('[SurrealDB] getMemoriesByTopic failed:', error.message);
+            logError(`[SurrealDB] getMemoriesByTopic failed: ${error.message}`);
             return [];
         }
     }
@@ -1476,17 +1498,17 @@ export class SurrealDatabase {
           created_by = $created_by,
           created_at = time::now()
       `;
-            await this.client.query(sql, {
+            await this.executeQuery(sql, {
                 alias,
                 entity_id: recordId,
                 verified,
                 source,
                 created_by: createdBy,
             });
-            console.log(`[SurrealDB] Added alias "${alias}" -> ${recordId}`);
+            logInfo(`[SurrealDB] Added alias "${alias}" -> ${recordId}`);
         }
         catch (error) {
-            console.error('[SurrealDB] addAlias failed:', error.message);
+            logError(`[SurrealDB] addAlias failed: ${error.message}`);
             throw error;
         }
     }
@@ -1502,10 +1524,9 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         try {
-            console.log(`[SurrealDB] resolveAlias: resolving alias="${alias}"`);
             // Cycle detection - prevent infinite loops
             if (visited.has(alias)) {
-                console.warn(`[SurrealDB] Circular alias reference detected: ${alias}`);
+                logWarn(`[SurrealDB] Circular alias reference detected: ${alias}`);
                 return null;
             }
             visited.add(alias);
@@ -1518,25 +1539,21 @@ export class SurrealDatabase {
             else {
                 entityRecordId = `entity:${alias}`;
             }
-            console.log(`[SurrealDB] resolveAlias: checking entity with Record ID="${entityRecordId}"`);
             // Use direct string interpolation for Record ID (SurrealDB requires this for id comparisons)
-            const entityCheckResult = await this.client.query(`SELECT id, is_merged FROM ${ENTITY_TABLE} WHERE id = ${entityRecordId} LIMIT 1`, {});
+            const entityCheckResult = await this.executeQuery(`SELECT id, is_merged FROM ${ENTITY_TABLE} WHERE id = ${entityRecordId} LIMIT 1`, {});
             const entityCheck = this.extractResult(entityCheckResult);
-            console.log(`[SurrealDB] resolveAlias: entity check result=`, JSON.stringify(entityCheck));
             if (entityCheck && entityCheck.length > 0 && !entityCheck[0].is_merged) {
                 // This is a canonical entity, return it directly
                 const result = this.extractStringId(entityCheck[0].id);
-                console.log(`[SurrealDB] resolveAlias: returning canonical entity ID="${result}"`);
                 return result;
             }
             // Query alias table
-            const result = await this.client.query(`SELECT VALUE entity_id FROM ${ENTITY_ALIAS_TABLE} WHERE alias = $alias LIMIT 1`, { alias });
+            const result = await this.executeQuery(`SELECT VALUE entity_id FROM ${ENTITY_ALIAS_TABLE} WHERE alias = $alias LIMIT 1`, { alias });
             const data = this.extractResult(result);
-            console.log(`[SurrealDB] resolveAlias: alias query result=`, JSON.stringify(data));
             if (data && data.length > 0) {
                 const entityId = String(data[0]);
                 // Check if points to another alias (path flattening)
-                const canonicalResult = await this.client.query(`SELECT VALUE canonical_id FROM ${ENTITY_TABLE} WHERE id = ${entityId} LIMIT 1`, {});
+                const canonicalResult = await this.executeQuery(`SELECT VALUE canonical_id FROM ${ENTITY_TABLE} WHERE id = ${entityId} LIMIT 1`, {});
                 const canonicalData = this.extractResult(canonicalResult);
                 if (canonicalData && canonicalData.length > 0 && canonicalData[0]) {
                     // Points to another alias, recursively resolve
@@ -1545,11 +1562,10 @@ export class SurrealDatabase {
                 }
                 return entityId;
             }
-            console.log(`[SurrealDB] resolveAlias: no match found, returning null`);
             return null;
         }
         catch (error) {
-            console.error('[SurrealDB] resolveAlias failed:', error.message);
+            logError(`[SurrealDB] resolveAlias failed: ${error.message}`);
             return null;
         }
     }
@@ -1571,12 +1587,12 @@ export class SurrealDatabase {
             else {
                 numericId = entityId;
             }
-            const result = await this.client.query(`SELECT alias FROM ${ENTITY_ALIAS_TABLE} WHERE entity_id = $entityId`, { entity_id: numericId });
+            const result = await this.executeQuery(`SELECT alias FROM ${ENTITY_ALIAS_TABLE} WHERE entity_id = $entityId`, { entity_id: numericId });
             const data = this.extractResult(result);
             return (data || []).map((row) => row.alias);
         }
         catch (error) {
-            console.error('[SurrealDB] getAliasesByEntity failed:', error.message);
+            logError(`[SurrealDB] getAliasesByEntity failed: ${error.message}`);
             return [];
         }
     }
@@ -1598,9 +1614,9 @@ export class SurrealDatabase {
             if (!aliasId || !canonicalId) {
                 throw new Error('[SurrealDB] Invalid entity IDs for merge');
             }
-            console.log(`[SurrealDB] Merging entity:${aliasId} -> entity:${canonicalId}`);
+            logInfo(`[SurrealDB] Merging entity:${aliasId} -> entity:${canonicalId}`);
             // Step 1: Get all memories linked to alias entity
-            const aliasMemoriesResult = await this.client.query(`SELECT * FROM memory_entity WHERE out = entity:${aliasId}`, {});
+            const aliasMemoriesResult = await this.executeQuery(`SELECT * FROM memory_entity WHERE out = entity:${aliasId}`, {});
             const aliasMemories = this.extractResult(aliasMemoriesResult);
             // Step 2: Link each memory to canonical entity (skip duplicates)
             for (const mem of aliasMemories) {
@@ -1610,31 +1626,30 @@ export class SurrealDatabase {
                 }
                 catch (e) {
                     // Ignore duplicate edge errors
-                    console.log(`[SurrealDB] Edge already exists for memory ${memoryId}`);
                 }
             }
             // Step 3: Delete old edges from alias entity
-            await this.client.query(`DELETE FROM memory_entity WHERE out = entity:${aliasId}`, {});
+            await this.executeQuery(`DELETE FROM memory_entity WHERE out = entity:${aliasId}`, {});
             // Step 4: Mark alias entity as merged (use string Record ID for canonical_id)
             const canonicalRecordId = `entity:${canonicalId}`;
-            await this.client.query(`UPDATE entity:${aliasId} SET canonical_id = $canonical_id, is_merged = true, merged_at = time::now()`, { canonical_id: canonicalRecordId });
+            await this.executeQuery(`UPDATE entity:${aliasId} SET canonical_id = $canonical_id, is_merged = true, merged_at = time::now()`, { canonical_id: canonicalRecordId });
             // Step 5: Add alias record (use string Record ID)
-            const aliasNameResult = await this.client.query(`SELECT name FROM entity:${aliasId}`, {});
+            const aliasNameResult = await this.executeQuery(`SELECT name FROM entity:${aliasId}`, {});
             const aliasNameData = this.extractResult(aliasNameResult);
             const aliasName = aliasNameData && aliasNameData.length > 0 ? aliasNameData[0].name : `entity_${aliasId}`;
             await this.addAlias(aliasName, canonicalRecordId, true, 'merged');
-            console.log(`[SurrealDB] Merged entity:${aliasId} -> entity:${canonicalId}`);
+            logInfo(`[SurrealDB] Merged entity:${aliasId} -> entity:${canonicalId}`);
             // Step 6: Check threshold after merge (User feedback)
             const stats = await this.getEntityStats(String(canonicalId));
             if (stats.memory_count >= TOPIC_SOFT_LIMIT) {
-                console.log(`[SurrealDB] Merge triggered Super Node threshold for ${canonicalId} (${stats.memory_count} edges)`);
+                logInfo(`[SurrealDB] Merge triggered Super Node threshold for ${canonicalId} (${stats.memory_count} edges)`);
                 if (topicIndexer) {
                     await topicIndexer.enqueuePriorityTopicCreation(String(canonicalId));
                 }
             }
         }
         catch (error) {
-            console.error('[SurrealDB] mergeEntities failed:', error.message);
+            logError(`[SurrealDB] mergeEntities failed: ${error.message}`);
             throw error;
         }
     }
@@ -1659,11 +1674,11 @@ export class SurrealDatabase {
             else {
                 numericId = entityId;
             }
-            await this.client.query(`UPDATE entity:${numericId} SET is_frozen = true, freeze_reason = $reason, frozen_at = time::now()`, { reason: reason || 'Super Node threshold exceeded' });
-            console.log(`[SurrealDB] Froze entity:${numericId} - ${reason || 'Super Node threshold exceeded'}`);
+            await this.executeQuery(`UPDATE entity:${numericId} SET is_frozen = true, freeze_reason = $reason, frozen_at = time::now()`, { reason: reason || 'Super Node threshold exceeded' });
+            logInfo(`[SurrealDB] Froze entity:${numericId} - ${reason || 'Super Node threshold exceeded'}`);
         }
         catch (error) {
-            console.error('[SurrealDB] freezeEntity failed:', error.message);
+            logError(`[SurrealDB] freezeEntity failed: ${error.message}`);
             throw error;
         }
     }
@@ -1685,12 +1700,12 @@ export class SurrealDatabase {
             else {
                 numericId = entityId;
             }
-            const result = await this.client.query(`SELECT VALUE is_frozen FROM entity:${numericId} LIMIT 1`, {});
+            const result = await this.executeQuery(`SELECT VALUE is_frozen FROM entity:${numericId} LIMIT 1`, {});
             const data = this.extractResult(result);
             return data && data.length > 0 ? data[0] : false;
         }
         catch (error) {
-            console.error('[SurrealDB] isEntityFrozen failed:', error.message);
+            logError(`[SurrealDB] isEntityFrozen failed: ${error.message}`);
             return false;
         }
     }
@@ -1720,11 +1735,11 @@ export class SurrealDatabase {
                 entityRecordId = `entity:${entityId}`;
             }
             // Count memory_entity edges
-            const memoryResult = await this.client.query(`SELECT count() as count FROM memory_entity WHERE out = ${entityRecordId} GROUP ALL`, {});
+            const memoryResult = await this.executeQuery(`SELECT count() as count FROM memory_entity WHERE out = ${entityRecordId} GROUP ALL`, {});
             const memoryData = this.extractResult(memoryResult);
             const memoryCount = memoryData && memoryData.length > 0 ? memoryData[0].count : 0;
             // Count topics
-            const topicResult = await this.client.query(`SELECT count() as count FROM ${TOPIC_TABLE} WHERE parent_entity_id = ${entityRecordId} GROUP ALL`, {});
+            const topicResult = await this.executeQuery(`SELECT count() as count FROM ${TOPIC_TABLE} WHERE parent_entity_id = ${entityRecordId} GROUP ALL`, {});
             const topicData = this.extractResult(topicResult);
             const topicCount = topicData && topicData.length > 0 ? topicData[0].count : 0;
             return {
@@ -1733,7 +1748,7 @@ export class SurrealDatabase {
             };
         }
         catch (error) {
-            console.error('[SurrealDB] getEntityStats failed:', error.message);
+            logError(`[SurrealDB] getEntityStats failed: ${error.message}`);
             return { memory_count: 0, topic_count: 0 };
         }
     }
@@ -1756,7 +1771,7 @@ export class SurrealDatabase {
         if (!this.client) {
             throw new Error('[SurrealDB] Client not connected');
         }
-        console.log('[SurrealDB] Starting entity co-occurrence build...');
+        logInfo('[SurrealDB] Starting entity co-occurrence build...');
         // Step 1: Find memories with multiple entities and count co-occurrences
         const cooccurrenceSql = `
       SELECT
@@ -1766,7 +1781,7 @@ export class SurrealDatabase {
       GROUP BY memory
       LIMIT $batchSize
     `;
-        const result = await this.client.query(cooccurrenceSql, { batchSize });
+        const result = await this.executeQuery(cooccurrenceSql, { batchSize });
         let data = [];
         if (Array.isArray(result) && result.length > 0) {
             if (Array.isArray(result[0])) {
@@ -1777,7 +1792,7 @@ export class SurrealDatabase {
             }
         }
         if (data.length === 0) {
-            console.log('[SurrealDB] No memories with multiple entities found');
+            logInfo('[SurrealDB] No memories with multiple entities found');
             return 0;
         }
         // Step 2: Build co-occurrence counts for entity pairs
@@ -1807,7 +1822,7 @@ export class SurrealDatabase {
                 }
             }
         }
-        console.log(`[SurrealDB] Found ${cooccurrenceMap.size} entity pairs with co-occurrence`);
+        logInfo(`[SurrealDB] Found ${cooccurrenceMap.size} entity pairs with co-occurrence`);
         // Step 3: Create or update entity_relation edges for pairs above threshold
         const now = new Date().toISOString();
         let relationsCreated = 0;
@@ -1817,8 +1832,8 @@ export class SurrealDatabase {
             }
             const [entityA, entityB] = pairKey.split('-');
             // Get entity mention counts for normalization
-            const entityARecord = await this.client.query(`SELECT mention_count FROM ${ENTITY_TABLE}:${entityA}`, {});
-            const entityBRecord = await this.client.query(`SELECT mention_count FROM ${ENTITY_TABLE}:${entityB}`, {});
+            const entityARecord = await this.executeQuery(`SELECT mention_count FROM ${ENTITY_TABLE}:${entityA}`, {});
+            const entityBRecord = await this.executeQuery(`SELECT mention_count FROM ${ENTITY_TABLE}:${entityB}`, {});
             let countA = 1;
             let countB = 1;
             if (Array.isArray(entityARecord) && entityARecord.length > 0) {
@@ -1877,7 +1892,7 @@ export class SurrealDatabase {
           last_occurrence_at = $updated_at,
           relation_type = IF is_manual_refined THEN relation_type ELSE 'co_occurs' END
       `;
-            await this.client.query(relationSql, {
+            await this.executeQuery(relationSql, {
                 weight,
                 evidence_memory_ids: pairData.memoryIds,
                 evidence_count: pairData.count,
@@ -1886,7 +1901,7 @@ export class SurrealDatabase {
             });
             relationsCreated++;
         }
-        console.log(`[SurrealDB] Created/updated ${relationsCreated} entity relations (threshold: ${CO_OCCURRENCE_THRESHOLD})`);
+        logInfo(`[SurrealDB] Created/updated ${relationsCreated} entity relations (threshold: ${CO_OCCURRENCE_THRESHOLD})`);
         return relationsCreated;
     }
     /**
@@ -1905,7 +1920,7 @@ export class SurrealDatabase {
         if (!this.client) {
             throw new Error('[SurrealDB] Client not connected');
         }
-        console.log(`[SurrealDB] Starting ${degree}-degree association search from memory ${seedMemoryId}...`);
+        logInfo(`[SurrealDB] Starting ${degree}-degree association search from memory ${seedMemoryId}...`);
         const seedRecordId = `${MEMORY_TABLE}:${seedMemoryId}`;
         // Build dynamic traversal query based on degree
         // For degree=2: Memory -> Entity -> Entity -> Memory
@@ -1955,7 +1970,7 @@ export class SurrealDatabase {
       `;
         }
         try {
-            const result = await this.client.query(traversalSql, { limit, minWeight });
+            const result = await this.executeQuery(traversalSql, { limit, minWeight });
             let data = [];
             if (Array.isArray(result) && result.length > 0) {
                 if (Array.isArray(result[0])) {
@@ -1965,7 +1980,7 @@ export class SurrealDatabase {
                     data = result[0].result || [];
                 }
             }
-            console.log(`[SurrealDB] ${degree}-degree search found ${data.length} memories`);
+            logInfo(`[SurrealDB] ${degree}-degree search found ${data.length} memories`);
             return data.map((r) => ({
                 id: this.extractIdFromRecord(r),
                 content: r.content,
@@ -1975,7 +1990,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            console.error(`[SurrealDB] ${degree}-degree search failed:`, error.message);
+            logError(`[SurrealDB] ${degree}-degree search failed: ${error.message}`);
             return [];
         }
     }
@@ -1993,9 +2008,9 @@ export class SurrealDatabase {
         if (!this.client) {
             throw new Error('[SurrealDB] Client not connected');
         }
-        console.log(`[SurrealDB] Starting edge pruning with minWeight=${minWeight}...`);
+        logInfo(`[SurrealDB] Starting edge pruning with minWeight=${minWeight}...`);
         // First, count edges before pruning
-        const beforeResult = await this.client.query(`SELECT count() AS total FROM ${ENTITY_RELATION_TABLE} WHERE weight < $minWeight`, { minWeight });
+        const beforeResult = await this.executeQuery(`SELECT count() AS total FROM ${ENTITY_RELATION_TABLE} WHERE weight < $minWeight`, { minWeight });
         let beforeCount = 0;
         if (Array.isArray(beforeResult) && beforeResult.length > 0) {
             if (Array.isArray(beforeResult[0])) {
@@ -2010,8 +2025,8 @@ export class SurrealDatabase {
       DELETE FROM ${ENTITY_RELATION_TABLE}
       WHERE weight < $minWeight
     `;
-        await this.client.query(deleteSql, { minWeight });
-        console.log(`[SurrealDB] Pruned ${beforeCount} low-weight entity relations`);
+        await this.executeQuery(deleteSql, { minWeight });
+        logInfo(`[SurrealDB] Pruned ${beforeCount} low-weight entity relations`);
         return beforeCount;
     }
     /**
@@ -2024,7 +2039,7 @@ export class SurrealDatabase {
         }
         try {
             // Total relations
-            const totalResult = await this.client.query(`SELECT count() AS total FROM ${ENTITY_RELATION_TABLE}`, {});
+            const totalResult = await this.executeQuery(`SELECT count() AS total FROM ${ENTITY_RELATION_TABLE}`, {});
             let total = 0;
             if (Array.isArray(totalResult) && totalResult.length > 0) {
                 if (Array.isArray(totalResult[0])) {
@@ -2035,7 +2050,7 @@ export class SurrealDatabase {
                 }
             }
             // Weight statistics - compute in JavaScript to avoid SurrealDB math function issues
-            const weightResult = await this.client.query(`SELECT weight FROM ${ENTITY_RELATION_TABLE}`, {});
+            const weightResult = await this.executeQuery(`SELECT weight FROM ${ENTITY_RELATION_TABLE}`, {});
             let avgWeight = 0;
             let maxWeight = 0;
             let minWeight = 0;
@@ -2054,7 +2069,7 @@ export class SurrealDatabase {
                 minWeight = Math.min(...weights);
             }
             // By type
-            const typeResult = await this.client.query(`SELECT relation_type, count() AS count FROM ${ENTITY_RELATION_TABLE} GROUP BY relation_type`, {});
+            const typeResult = await this.executeQuery(`SELECT relation_type, count() AS count FROM ${ENTITY_RELATION_TABLE} GROUP BY relation_type`, {});
             const byType = {};
             if (Array.isArray(typeResult) && typeResult.length > 0) {
                 let typeData = [];
@@ -2079,7 +2094,7 @@ export class SurrealDatabase {
             };
         }
         catch (error) {
-            console.error('[SurrealDB] getRelationStats failed:', error.message);
+            logError(`[SurrealDB] getRelationStats failed: ${error.message}`);
             return { total_relations: 0, avg_weight: 0, max_weight: 0, min_weight: 0, by_type: {} };
         }
     }

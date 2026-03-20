@@ -21,6 +21,11 @@ interface SurrealConfig {
     embedding?: {
         endpoint: string;
     };
+    documentImport?: {
+        watchDir?: string;
+        chunkSize?: number;
+        chunkOverlap?: number;
+    };
 }
 type MemoryPluginConfig = SurrealConfig;
 declare const memoryPlugin: {
@@ -30,6 +35,11 @@ declare const memoryPlugin: {
     kind: string;
     init(config: MemoryPluginConfig): Promise<void>;
     register(api: any): Promise<void>;
+    /**
+     * Dispose plugin - clean up background workers and close database connections.
+     * Called when OpenClaw shuts down or when commands complete.
+     */
+    dispose(): Promise<void>;
 };
 export default memoryPlugin;
 //# sourceMappingURL=index.d.ts.map

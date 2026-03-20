@@ -134,14 +134,17 @@ export declare class EntityIndexer {
      * Process a single queue item
      */
     private processItem;
+    private backgroundInterval?;
     /**
      * Start background queue processor
      */
     private startBackgroundProcessor;
+    private ttlPruningInterval?;
     /**
      * Start TTL pruning scheduler (runs every PRUNE_INTERVAL_DAYS)
      */
     private startTTLPruningScheduler;
+    private cooccurrenceInterval?;
     /**
      * Start co-occurrence builder scheduler (Stage 2)
      * Runs every 7 days to build entity-entity relationships
@@ -193,6 +196,7 @@ export declare class EntityIndexer {
     private readonly relationClassifierIntervalMs;
     private readonly relationClassifierBatchSize;
     private totalClassified;
+    private relationClassifierInterval?;
     /**
      * Start relation classifier scheduler
      * Runs every 6 hours to classify co_occurs relations using LLM
@@ -235,5 +239,9 @@ export declare class EntityIndexer {
      * Helper: extract result ID
      */
     private extractResultId;
+    /**
+     * Dispose - clear all background intervals
+     */
+    dispose(): void;
 }
 //# sourceMappingURL=entity-indexer.d.ts.map
