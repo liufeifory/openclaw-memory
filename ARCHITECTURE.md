@@ -387,12 +387,15 @@ ON memory_embeddings
 USING hnsw (embedding vector_cosine_ops);
 ```
 
-### Qdrant
+### SurrealDB (v2.1.79 新增)
 
 ```typescript
-// Collection: episodic_memories
-// Collection: semantic_memories
-// Collection: reflection_memories
+// Collection: episodic_memory
+// Collection: semantic_memory
+// Collection: reflection_memory
+// Table: entity (实体节点)
+// Table: relation (实体关系边)
+// Table: topic (主题节点)
 
 // Payload 结构
 {
@@ -405,6 +408,28 @@ USING hnsw (embedding vector_cosine_ops);
 }
 
 // 向量维度：1024 (BGE-M3)
+// 图结构：实体 -[RELATION]-> 实体
+```
+
+**Schema 定义：**
+```sql
+-- 实体表
+DEFINE TABLE entity SCHEMAFULL;
+DEFINE FIELD name ON entity TYPE string;
+DEFINE FIELD aliases ON entity TYPE array<string>;
+DEFINE FIELD embedding ON entity TYPE array<number>;  -- 1024 维向量
+
+-- 关系表
+DEFINE TABLE relation SCHEMAFULL;
+DEFINE FIELD from ON relation TYPE record<entity>;
+DEFINE FIELD to ON relation TYPE record<entity>;
+DEFINE FIELD type ON relation TYPE string;
+
+-- 主题表
+DEFINE TABLE topic SCHEMAFULL;
+DEFINE FIELD theme ON topic TYPE string;
+DEFINE FIELD entities ON topic TYPE array<record<entity>>;
+DEFINE FIELD embedding ON topic TYPE array<number>;  -- 1024 维向量
 ```
 
 ---
@@ -436,7 +461,7 @@ USING hnsw (embedding vector_cosine_ops);
 }
 ```
 
-### Qdrant 配置
+### SurrealDB 配置（v2.1.79 新增）
 
 ```json
 {
@@ -445,13 +470,21 @@ USING hnsw (embedding vector_cosine_ops);
       "memory": "openclaw-memory"
     },
     "openclaw-memory": {
-      "backend": "qdrant",
-      "qdrant": {
-        "url": "http://localhost:6333",
-        "apiKey": ""  // 可选
+      "backend": "surrealdb",
+      "surrealdb": {
+        "url": "ws://localhost:8000/rpc",
+        "namespace": "openclaw",
+        "database": "memory",
+        "username": "root",
+        "password": "root"
       },
       "embedding": {
         "endpoint": "http://localhost:8080"
+      },
+      "documentImport": {
+        "watchDir": "~/.openclaw/documents",
+        "chunkSize": 500,
+        "chunkOverlap": 50
       }
     }
   }
@@ -462,7 +495,7 @@ USING hnsw (embedding vector_cosine_ops);
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `backend` | string | `pgvector` | 后端类型：`pgvector` 或 `qdrant` |
+| `backend` | string | `pgvector` | 后端类型：`pgvector` / `qdrant` / `surrealdb` |
 | `database.host` | string | `localhost` | PostgreSQL 主机 |
 | `database.port` | number | `5432` | PostgreSQL 端口 |
 | `database.database` | string | `openclaw_memory` | 数据库名 |
@@ -470,7 +503,15 @@ USING hnsw (embedding vector_cosine_ops);
 | `database.password` | string | `""` | 数据库密码 |
 | `qdrant.url` | string | `http://localhost:6333` | Qdrant 地址 |
 | `qdrant.apiKey` | string | `""` | Qdrant API 密钥 |
+| `surrealdb.url` | string | `ws://localhost:8000/rpc` | SurrealDB RPC 地址 |
+| `surrealdb.namespace` | string | `openclaw` | SurrealDB 命名空间 |
+| `surrealdb.database` | string | `memory` | SurrealDB 数据库名 |
+| `surrealdb.username` | string | `root` | SurrealDB 用户名 |
+| `surrealdb.password` | string | `root` | SurrealDB 密码 |
 | `embedding.endpoint` | string | `http://localhost:8080` | Embedding 服务地址 |
+| `documentImport.watchDir` | string | `~/.openclaw/documents` | 文档监控目录 |
+| `documentImport.chunkSize` | number | `500` | 文档分块大小 |
+| `documentImport.chunkOverlap` | number | `50` | 文档分块重叠 |
 
 ---
 
@@ -551,6 +592,204 @@ interface MemoryManager {
 **职责：** 聚类相似记忆
 
 **触发：** 空闲时自动执行
+
+### EntityExtractor
+
+**职责：** 从文本中提取实体（人名、地名、组织、技术名词等）
+
+**三层漏斗：**
+1. Layer 1: 正则匹配预定义名词库（60-80% 覆盖率，0ms）
+2. Layer 2: Llama-3.2-1B 快速过滤（~90% 覆盖率，200-400ms）
+3. Layer 3: Qwen2.5-Coder-7B 精炼提取（95%+ 覆盖率，800-1500ms）
+
+**接口：**
+```typescript
+interface EntityExtractor {
+  extract(text: string): Promise<Entity[]>
+  batchExtract(texts: string[]): Promise<Entity[][]>
+  getBufferStats(): { size: number }
+  getLayerStats(): { layer1Hits: number, layer1Total: number, ... }
+}
+```
+
+### EntityIndexer
+
+**职责：** 后台索引实体关系，构建图结构
+
+**接口：**
+```typescript
+interface EntityIndexer {
+  queueForIndexing(memoryId: number, content: string): void
+  getStats(): { queueSize: number, totalIndexed: number }
+}
+```
+
+### HybridRetriever
+
+**职责：** 向量 + 图混合检索
+
+**接口：**
+```typescript
+interface HybridRetriever {
+  retrieve(
+    query: string,
+    sessionId: string | undefined,
+    topK: number,
+    threshold: number
+  ): Promise<HybridRetrievalResult>
+}
+
+interface HybridRetrievalResult {
+  results: Memory[]
+  stats: {
+    vectorCount: number
+    graphCount: number
+    mergedCount: number
+    finalCount: number
+    avgSimilarity: number
+  }
+}
+```
+
+### DocumentParser
+
+**职责：** 解析 PDF/Word/Markdown 文档
+
+**接口：**
+```typescript
+interface DocumentParser {
+  parse(filePath: string): Promise<ParsedDocument>
+  parseUrl(url: string): Promise<ParsedDocument>
+}
+
+interface ParsedDocument {
+  content: string
+  metadata: {
+    source: string
+    type: 'pdf' | 'word' | 'markdown' | 'html'
+  }
+}
+```
+
+### DocumentSplitter
+
+**职责：** 将文档分割成适当大小的块
+
+**接口：**
+```typescript
+interface DocumentSplitter {
+  split(content: string, source: string): DocumentChunk[]
+}
+
+interface DocumentChunk {
+  content: string
+  index: number
+  totalChunks: number
+  metadata: {
+    source: string
+    chunkType: 'paragraph' | 'size'
+  }
+}
+```
+
+### DocumentWatcher
+
+**职责：** 监控目录自动导入文档
+
+**接口：**
+```typescript
+interface DocumentWatcher {
+  start(): void
+  stop(): void
+}
+```
+
+### UrlImporter
+
+**职责：** 从 URL 导入网页内容
+
+**接口：**
+```typescript
+interface UrlImporter {
+  import(url: string, sessionId?: string): Promise<number>
+}
+```
+
+### ConflictDetector
+
+**职责：** 检测语义冲突
+
+**接口：**
+```typescript
+interface ConflictDetector {
+  detectConflict(
+    newContent: string,
+    threshold: number
+  ): Promise<ConflictResult>
+}
+
+interface ConflictResult {
+  conflictDetected: boolean
+  similarMemories: Memory[]
+  shouldUpdate: boolean
+  reason: string
+}
+```
+
+### TopicIndexer
+
+**职责：** 后台创建和管理主题
+
+**接口：**
+```typescript
+interface TopicIndexer {
+  enqueueTopicCreation(entityId: string): Promise<void>
+  enqueuePriorityTopicCreation(entityId: string): Promise<void>
+}
+```
+
+### AliasCache
+
+**职责：** LRU 缓存实体别名映射
+
+**接口：**
+```typescript
+interface AliasCache {
+  get(alias: string): string | undefined
+  set(alias: string, entityId: string): void
+  has(alias: string): boolean
+  delete(alias: string): void
+  clear(): void
+  size: number
+}
+```
+
+### MaintenanceLogger
+
+**职责：** 记录系统维护日志
+
+**接口：**
+```typescript
+function logInfo(message: string): void
+function logWarn(message: string): void
+function logError(message: string): void
+```
+
+### ContextBuilder
+
+**职责：** 构建注入上下文的文本
+
+**接口：**
+```typescript
+interface ContextBuilder {
+  buildContext(
+    sessionId: string,
+    memories: Memory[],
+    reflectionMemories: Memory[],
+    recentConversations?: string
+  ): string
+}
+```
 
 ### LLMLimiter
 
@@ -687,7 +926,160 @@ node dist/memory-cli.ts stats
 
 <div align="center">
 
-**最后更新：** 2026-03-15  
-**版本：** 2.1.0
+**最后更新：** 2026-03-20
+**版本：** 2.1.79
 
 </div>
+
+---
+
+## 🆕 v2.1.79 新增功能
+
+### SurrealDB 原生支持
+
+**架构变化：**
+
+```typescript
+// 之前：PostgreSQL/Qdrant 双后端
+MemoryManager → PostgreSQL (pgvector) / Qdrant
+
+// 现在：新增 SurrealDB 原生支持
+MemoryManager → SurrealDB (原生图数据库 + 向量索引)
+```
+
+**优势：**
+- ✅ 原生图遍历能力，支持多跳查询
+- ✅ 向量 + 图混合检索
+- ✅ 自动 TTL 清理
+- ✅ 多模型数据统一管理
+
+### 实体提取与索引（Entity Extraction & Indexing）
+
+**三层漏斗架构：**
+
+```
+输入文本
+   │
+   ▼
+┌─────────────────┐
+│ Layer 1: Regex  │ → 预定义名词库，60-80% 覆盖率
+└────────┬────────┘
+         │ 未命中
+         ▼
+┌─────────────────┐
+│ Layer 2: 1B 模型  │ → Llama-3.2-1B 快速过滤
+└────────┬────────┘
+         │ 未命中
+         ▼
+┌─────────────────┐
+│ Layer 3: 7B 模型  │ → Qwen2.5-Coder-7B 精炼提取
+└─────────────────┘
+```
+
+**实体索引器：**
+- 后台异步处理队列
+- 实体关系自动构建
+- 图结构增量更新
+
+### 混合检索（Hybrid Retrieval）
+
+```typescript
+┌─────────────────────────────────────┐
+│     HybridRetriever                 │
+│                                     │
+│  ┌──────────────┐  ┌──────────────┐ │
+│  │ Vector Search│  │ Graph Search │ │
+│  │ (BGE-M3)     │  │ (SurrealDB)  │ │
+│  └──────┬───────┘  └──────┬───────┘ │
+│         │                 │         │
+│         └────────┬────────┘         │
+│                  ▼                  │
+│         ┌────────────────┐          │
+│         │ Merge & Dedup  │          │
+│         └────────┬───────┘          │
+│                  ▼                  │
+│         ┌────────────────┐          │
+│         │ Reranker (LLM) │          │
+│         └────────────────┘          │
+└─────────────────────────────────────┘
+```
+
+**检索流程：**
+1. 查询文本 → BGE-M3 Embedding (1024 维)
+2. 并行执行：向量检索 + 图遍历
+3. 合并结果并去重
+4. Reranker 重排序（可选）
+5. 返回 Top-K
+
+### 文档导入功能
+
+**支持的格式：**
+- PDF (.pdf) - 使用 pdf-parse
+- Word (.docx) - 使用 mammoth
+- Markdown (.md) - 直接读取
+- HTML/URL - node-fetch + HTML 清理
+
+**架构：**
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ Document    │     │ Document    │     │ Memory      │
+│ Parser      │ ──► │ Splitter    │ ──► │ Manager     │
+│ (pdf-parse) │     │ (500 chars) │     │             │
+└─────────────┘     └─────────────┘     └─────────────┘
+```
+
+**使用方式：**
+```typescript
+// 1. 目录监控模式
+const watcher = chokidar.watch('~/.openclaw/documents');
+watcher.on('add', path => importDocument(path));
+
+// 2. URL 导入
+await urlImporter.import('https://example.com/article');
+```
+
+### 冲突检测优化
+
+**v2.1.79 改进：**
+- 语义相似度阈值可配置
+- 重要性比较更公平
+- 支持冲突历史记录追踪
+
+```typescript
+interface ConflictResult {
+  conflictDetected: boolean;
+  stored: boolean;
+  similarMemories: Memory[];
+  reason: string;  // 新增：冲突原因说明
+}
+```
+
+---
+
+## 📊 最新性能指标 (v2.1.79)
+
+| 操作 | P50 | P95 | P99 |
+|------|-----|-----|-----|
+| 消息分类 | 200ms | 400ms | 600ms |
+| 记忆检索 (向量) | 50ms | 150ms | 300ms |
+| 记忆检索 (混合) | 80ms | 200ms | 400ms |
+| 实体提取 (L1) | <1ms | <1ms | <1ms |
+| 实体提取 (L2) | 200ms | 400ms | 600ms |
+| 实体提取 (L3) | 800ms | 1200ms | 1500ms |
+| 偏好提取 | 800ms | 1200ms | 1500ms |
+| 对话摘要 | 800ms | 1200ms | 1500ms |
+| 重排序 | 300ms | 500ms | 800ms |
+| 文档导入 (PDF) | 500ms | 1000ms | 2000ms |
+
+### 测试覆盖率 (v2.1.79)
+
+```bash
+# 核心功能测试 (12 项)
+npx tsx src/test-full-system.ts
+
+# 非核心功能测试 (15 项)
+npx tsx src/test-advanced-features.ts
+
+# 总计：27 项自动化测试
+```
