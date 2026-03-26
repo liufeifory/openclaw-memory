@@ -114,11 +114,32 @@ export class EntityIndexer {
      * Returns the current mention count for the entity
      */
     async checkEntityFrequency(entityId) {
+        // First check memory cache
         const mentions = this.entityMentions.get(entityId.toLowerCase());
-        if (!mentions) {
-            return 0;
+        const cacheCount = mentions ? mentions.length : 0;
+        // Also check database for persistent mention_count
+        if (this.db) {
+            try {
+                const result = await this.db.query(`SELECT mention_count FROM entity:${entityId}`);
+                let data = [];
+                if (Array.isArray(result) && result.length > 0) {
+                    if (Array.isArray(result[0])) {
+                        data = result[0] || [];
+                    }
+                    else if (result[0]?.result) {
+                        data = result[0].result || [];
+                    }
+                }
+                const dbCount = data.length > 0 ? (data[0]?.mention_count || 0) : 0;
+                // Return max of cache and DB (DB has persistent count, cache has recent activity)
+                return Math.max(cacheCount, dbCount);
+            }
+            catch (e) {
+                // Entity may not exist yet, use cache count
+                return cacheCount;
+            }
         }
-        return mentions.length;
+        return cacheCount;
     }
     /**
      * 3. checkSuperNode - Check if entity should be frozen (Super Node protection)
@@ -418,27 +439,37 @@ export class EntityIndexer {
         }
         // Extract entities from content
         const entities = await this.extractor.extract(item.content);
+        logInfo(`[EntityIndexer] Memory ${item.memoryId}: extracted ${entities.length} entities`);
         if (entities.length === 0) {
+            logWarn(`[EntityIndexer] Memory ${item.memoryId}: No entities extracted`);
             return; // No entities to index
         }
         for (const entity of entities) {
             // Check entity frequency
             const frequency = await this.checkEntityFrequency(entity.name);
-            if (frequency < GRAPH_PROTECTION.MIN_MENTION_COUNT) {
+            logInfo(`[EntityIndexer] Entity "${entity.name}": frequency=${frequency}, threshold=${GRAPH_PROTECTION.MIN_MENTION_COUNT}`);
+            // Allow new entities to be created (frequency=0 means first mention)
+            // Threshold check is for preventing graph explosion after entity exists
+            if (frequency > 0 && frequency < GRAPH_PROTECTION.MIN_MENTION_COUNT) {
+                logWarn(`[EntityIndexer] Skipping "${entity.name}": frequency ${frequency} < threshold (waiting for more mentions)`);
                 continue;
             }
             // Check if entity is a super node
             const isSuperNode = await this.checkSuperNode(entity.name);
             if (isSuperNode) {
+                logInfo(`[EntityIndexer] Skipping "${entity.name}": super node frozen`);
                 this.totalFrozen++;
                 continue;
             }
             // Upsert entity and create link
             const entityId = await this.db.upsertEntity(entity.name, entity.source || 'unknown');
+            logInfo(`[EntityIndexer] Created entity "${entity.name}" (ID: ${entityId})`);
             await this.db.linkMemoryEntity(item.memoryId, entityId, entity.confidence);
+            logInfo(`[EntityIndexer] Linked memory ${item.memoryId} -> entity ${entityId}`);
         }
         // Mark memory as indexed
         await this.db.query(`UPDATE memory:${item.memoryId} SET is_indexed = true`);
+        logInfo(`[EntityIndexer] Memory ${item.memoryId}: marked as indexed`);
     }
     backgroundInterval;
     /**
@@ -467,15 +498,15 @@ export class EntityIndexer {
     cooccurrenceInterval;
     /**
      * Start co-occurrence builder scheduler (Stage 2)
-     * Runs every 7 days to build entity-entity relationships
+     * Runs every 1 day to build entity-entity relationships
      */
     startCooccurrenceScheduler() {
-        const cooccurrenceIntervalMs = 7 * 24 * 60 * 60 * 1000; // 7 days
+        const cooccurrenceIntervalMs = 1 * 24 * 60 * 60 * 1000; // 1 day
         this.cooccurrenceInterval = setInterval(async () => {
             await this.buildEntityCooccurrence().catch(console.error);
         }, cooccurrenceIntervalMs);
         this.cooccurrenceInterval.unref();
-        logInfo(`Co-occurrence builder scheduled every 7 days`);
+        logInfo(`Co-occurrence builder scheduled every 1 day`);
     }
     /**
      * Build entity co-occurrence relationships (Stage 2)

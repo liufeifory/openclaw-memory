@@ -5,7 +5,7 @@
  * - Local llama.cpp server (OpenAI-compatible API)
  * - Cloud providers (Aliyun Bailian, etc.)
  */
-import { logError, logWarn } from './maintenance-logger.js';
+import { logError, logInfo, logWarn } from './maintenance-logger.js';
 export class LLMClient {
     config;
     defaultOptions;
@@ -107,14 +107,23 @@ export class LLMClient {
         const endpoint = this.getEndpoint(taskType);
         const isCloud = this.shouldUseCloud(taskType);
         const mergedOptions = { ...this.defaultOptions, ...options };
+        // CRITICAL DEBUG - will show in any log level
+        const criticalMsg = `[LLMClient_CRITICAL] endpoint=${endpoint} taskType=${taskType} isCloud=${isCloud}`;
+        logInfo(criticalMsg);
+        console.log(criticalMsg);
+        process.stderr.write(criticalMsg + '\n');
         try {
             const body = this.buildRequestBody(prompt, mergedOptions, taskType);
             const headers = this.buildHeaders(taskType);
+            logInfo(`[LLMClient] About to fetch ${endpoint}`);
+            console.log(`[LLMClient] About to fetch ${endpoint}`);
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify(body),
             });
+            logInfo(`[LLMClient] Response status: ${response.status}`);
+            console.log(`[LLMClient] Response status: ${response.status}`);
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }

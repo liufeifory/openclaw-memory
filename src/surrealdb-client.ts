@@ -51,7 +51,7 @@ export interface LinkedMemory {
 }
 
 export const GRAPH_PROTECTION = {
-  MIN_MENTION_COUNT: 3,
+  MIN_MENTION_COUNT: 1,  // 降低阈值，允许新实体快速创建
   MAX_MEMORY_LINKS: 500,
   TTL_DAYS: 90,
   PRUNE_INTERVAL_DAYS: 7,
@@ -83,30 +83,58 @@ export class SurrealDatabase {
     this.config = config;
   }
 
+  /**
+   * Ensure we have a valid connection to SurrealDB.
+   * Reconnects if connection is lost.
+   */
+  private async ensureConnected(): Promise<void> {
+    if (!this.client) {
+      // No client, need to initialize
+      await this.initialize();
+      return;
+    }
+
+    // Client exists, check if connection is still alive
+    try {
+      await this.client.query('SELECT 1 AS ok FROM NONE', {});
+    } catch {
+      // Connection dead, reconnect
+      logInfo('[SurrealDB] Connection lost, reconnecting...');
+      this.client = null;
+      this.initialized = false;
+      await this.initialize();
+    }
+  }
+
   async initialize(): Promise<MigrationResult> {
-    if (this.initialized) return { success: true, migrated: false, changes: [] };
+    // Check if we need to reconnect (connection may have been lost)
+    if (this.initialized && this.client) {
+      // Connection exists, check if it's still alive
+      try {
+        // Try a simple query to verify connection
+        await this.client.query('SELECT 1 AS ok FROM NONE', {});
+        return { success: true, migrated: false, changes: [] };
+      } catch {
+        // Connection dead, will reconnect below
+        logInfo('[SurrealDB] Connection lost, reconnecting...');
+      }
+    }
 
     const result: MigrationResult = { success: true, migrated: false, changes: [] };
 
     try {
+      // SurrealDB v2.x: Connect with namespace, database, and authentication in options
       await this.executeWithRetry(async () => {
         this.client = new Surreal();
-        await this.client.connect(this.config.url);
-      }, 'connect');
-
-      await this.executeWithRetry(async () => {
-        await this.client!.signin({
-          username: this.config.username,
-          password: this.config.password,
-        });
-      }, 'signin');
-
-      await this.executeWithRetry(async () => {
-        await this.client!.use({
+        await this.client.connect(this.config.url, {
           namespace: this.config.namespace,
           database: this.config.database,
+          authentication: {
+            username: this.config.username,
+            password: this.config.password,
+          },
         });
-      }, 'use');
+      }, 'connect');
 
       const schemaMigrated = await this.createSchema();
       if (schemaMigrated) {
@@ -426,11 +454,11 @@ export class SurrealDatabase {
    * This is the low-level method that all query operations should use.
    */
   private async executeQuery(sql: string, params?: Record<string, any>): Promise<any> {
-    if (!this.client) {
-      throw new Error('[SurrealDB] Client not connected');
-    }
+    // Ensure we have a valid connection
+    await this.ensureConnected();
+
     try {
-      const result = await this.client.query(sql, params || {});
+      const result = await this.client!.query(sql, params || {});
       return result;
     } catch (error: any) {
       // Re-authenticate on permission errors
@@ -444,7 +472,17 @@ export class SurrealDatabase {
           });
         }, 'signin');
         // Retry the query
-        return this.client.query(sql, params || {});
+        return this.client!.query(sql, params || {});
+      }
+      // On connection lost, try to reconnect
+      if (error.message?.includes('connection') || error.message?.includes('closed') ||
+          error.message?.includes('timeout') || error.message?.includes('ECONNRESET')) {
+        logInfo('[SurrealDB] Connection error detected, reconnecting...');
+        this.client = null;
+        this.initialized = false;
+        await this.ensureConnected();
+        // Retry the query once
+        return this.client!.query(sql, params || {});
       }
       throw error;
     }
@@ -479,9 +517,8 @@ export class SurrealDatabase {
     payload: Record<string, any>,
     options?: { checkVersion?: boolean }
   ): Promise<{ success: boolean; reason?: string }> {
-    if (!this.client) {
-      throw new Error('[SurrealDB] Client not connected');
-    }
+    // Ensure we have a valid connection
+    await this.ensureConnected();
 
     const recordId = new RecordId(MEMORY_TABLE, id);
 
@@ -542,9 +579,8 @@ export class SurrealDatabase {
     limit: number = 10,
     filter?: Record<string, any>
   ): Promise<Array<{ id: number; score: number; payload: Record<string, any> }>> {
-    if (!this.client) {
-      throw new Error('[SurrealDB] Client not connected');
-    }
+    // Ensure we have a valid connection
+    await this.ensureConnected();
 
     const conditions: string[] = [];
     const params: Record<string, any> = { query_embedding: embedding, limit };
@@ -659,9 +695,8 @@ export class SurrealDatabase {
   }
 
   async get(id: number): Promise<{ id: number; payload: Record<string, any> } | null> {
-    if (!this.client) {
-      throw new Error('[SurrealDB] Client not connected');
-    }
+    // Ensure we have a valid connection
+    await this.ensureConnected();
 
     try {
       const recordId = new RecordId(MEMORY_TABLE, id);
@@ -695,9 +730,8 @@ export class SurrealDatabase {
     payload: Record<string, any>,
     options?: { checkVersion?: boolean }
   ): Promise<{ success: boolean; reason?: string }> {
-    if (!this.client) {
-      throw new Error('[SurrealDB] Client not connected');
-    }
+    // Ensure we have a valid connection
+    await this.ensureConnected();
 
     try {
       const recordId = new RecordId(MEMORY_TABLE, id);
@@ -854,9 +888,8 @@ export class SurrealDatabase {
   }
 
   async count(): Promise<number> {
-    if (!this.client) {
-      return 0;
-    }
+    // Ensure we have a valid connection
+    await this.ensureConnected();
 
     try {
       const result = await this.executeQuery('SELECT count() AS count FROM memory');
@@ -1724,6 +1757,8 @@ export class SurrealDatabase {
       await this.client.close();
       this.client = null;
     }
+    // Reset initialized flag to allow re-initialization after close
+    this.initialized = false;
   }
 
   // ============================================================

@@ -54,6 +54,11 @@ export declare class SurrealDatabase {
     private readonly baseDelayMs;
     private readonly maxDelayMs;
     constructor(config: SurrealConfig);
+    /**
+     * Ensure we have a valid connection to SurrealDB.
+     * Reconnects if connection is lost.
+     */
+    private ensureConnected;
     initialize(): Promise<MigrationResult>;
     private createSchema;
     query(sql: string, params?: Record<string, any>): Promise<any>;

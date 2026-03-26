@@ -138,15 +138,27 @@ export class LLMClient {
     const isCloud = this.shouldUseCloud(taskType);
     const mergedOptions = { ...this.defaultOptions, ...options };
 
+    // CRITICAL DEBUG - will show in any log level
+    const criticalMsg = `[LLMClient_CRITICAL] endpoint=${endpoint} taskType=${taskType} isCloud=${isCloud}`;
+    logInfo(criticalMsg);
+    console.log(criticalMsg);
+    process.stderr.write(criticalMsg + '\n');
+
     try {
       const body = this.buildRequestBody(prompt, mergedOptions, taskType);
       const headers = this.buildHeaders(taskType);
+
+      logInfo(`[LLMClient] About to fetch ${endpoint}`);
+      console.log(`[LLMClient] About to fetch ${endpoint}`);
 
       const response = await fetch(endpoint, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
       });
+
+      logInfo(`[LLMClient] Response status: ${response.status}`);
+      console.log(`[LLMClient] Response status: ${response.status}`);
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);

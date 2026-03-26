@@ -21,7 +21,7 @@ const TOPIC_SOFT_LIMIT = 400; // 80% threshold, trigger Topic creation
 const TOPIC_HARD_LIMIT = 500; // 100% threshold, force freeze
 export { TOPIC_TABLE, TOPIC_MEMORY_TABLE, ENTITY_ALIAS_TABLE, TOPIC_SOFT_LIMIT, TOPIC_HARD_LIMIT, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE };
 export const GRAPH_PROTECTION = {
-    MIN_MENTION_COUNT: 3,
+    MIN_MENTION_COUNT: 1, // 降低阈值，允许新实体快速创建
     MAX_MEMORY_LINKS: 500,
     TTL_DAYS: 90,
     PRUNE_INTERVAL_DAYS: 7,
@@ -42,27 +42,56 @@ export class SurrealDatabase {
     constructor(config) {
         this.config = config;
     }
+    /**
+     * Ensure we have a valid connection to SurrealDB.
+     * Reconnects if connection is lost.
+     */
+    async ensureConnected() {
+        if (!this.client) {
+            // No client, need to initialize
+            await this.initialize();
+            return;
+        }
+        // Client exists, check if connection is still alive
+        try {
+            await this.client.query('SELECT 1 AS ok FROM NONE', {});
+        }
+        catch {
+            // Connection dead, reconnect
+            logInfo('[SurrealDB] Connection lost, reconnecting...');
+            this.client = null;
+            this.initialized = false;
+            await this.initialize();
+        }
+    }
     async initialize() {
-        if (this.initialized)
-            return { success: true, migrated: false, changes: [] };
+        // Check if we need to reconnect (connection may have been lost)
+        if (this.initialized && this.client) {
+            // Connection exists, check if it's still alive
+            try {
+                // Try a simple query to verify connection
+                await this.client.query('SELECT 1 AS ok FROM NONE', {});
+                return { success: true, migrated: false, changes: [] };
+            }
+            catch {
+                // Connection dead, will reconnect below
+                logInfo('[SurrealDB] Connection lost, reconnecting...');
+            }
+        }
         const result = { success: true, migrated: false, changes: [] };
         try {
+            // SurrealDB v2.x: Connect with namespace, database, and authentication in options
             await this.executeWithRetry(async () => {
                 this.client = new Surreal();
-                await this.client.connect(this.config.url);
-            }, 'connect');
-            await this.executeWithRetry(async () => {
-                await this.client.signin({
-                    username: this.config.username,
-                    password: this.config.password,
-                });
-            }, 'signin');
-            await this.executeWithRetry(async () => {
-                await this.client.use({
+                await this.client.connect(this.config.url, {
                     namespace: this.config.namespace,
                     database: this.config.database,
+                    authentication: {
+                        username: this.config.username,
+                        password: this.config.password,
+                    },
                 });
-            }, 'use');
+            }, 'connect');
             const schemaMigrated = await this.createSchema();
             if (schemaMigrated) {
                 result.changes.push('Created schema and indexes');
@@ -367,9 +396,8 @@ export class SurrealDatabase {
      * This is the low-level method that all query operations should use.
      */
     async executeQuery(sql, params) {
-        if (!this.client) {
-            throw new Error('[SurrealDB] Client not connected');
-        }
+        // Ensure we have a valid connection
+        await this.ensureConnected();
         try {
             const result = await this.client.query(sql, params || {});
             return result;
@@ -386,6 +414,16 @@ export class SurrealDatabase {
                     });
                 }, 'signin');
                 // Retry the query
+                return this.client.query(sql, params || {});
+            }
+            // On connection lost, try to reconnect
+            if (error.message?.includes('connection') || error.message?.includes('closed') ||
+                error.message?.includes('timeout') || error.message?.includes('ECONNRESET')) {
+                logInfo('[SurrealDB] Connection error detected, reconnecting...');
+                this.client = null;
+                this.initialized = false;
+                await this.ensureConnected();
+                // Retry the query once
                 return this.client.query(sql, params || {});
             }
             throw error;
@@ -409,9 +447,8 @@ export class SurrealDatabase {
         throw new Error(`[SurrealDB] ${operationName} failed after ${this.maxRetries} retries: ${lastError?.message}`);
     }
     async upsert(id, embedding, payload, options) {
-        if (!this.client) {
-            throw new Error('[SurrealDB] Client not connected');
-        }
+        // Ensure we have a valid connection
+        await this.ensureConnected();
         const recordId = new RecordId(MEMORY_TABLE, id);
         // Build SET clause for upsert
         const fields = [];
@@ -453,9 +490,8 @@ export class SurrealDatabase {
         }
     }
     async search(embedding, limit = 10, filter) {
-        if (!this.client) {
-            throw new Error('[SurrealDB] Client not connected');
-        }
+        // Ensure we have a valid connection
+        await this.ensureConnected();
         const conditions = [];
         const params = { query_embedding: embedding, limit };
         if (filter?.type || filter?.memory_type) {
@@ -549,9 +585,8 @@ export class SurrealDatabase {
         }));
     }
     async get(id) {
-        if (!this.client) {
-            throw new Error('[SurrealDB] Client not connected');
-        }
+        // Ensure we have a valid connection
+        await this.ensureConnected();
         try {
             const recordId = new RecordId(MEMORY_TABLE, id);
             const result = await this.executeQuery(`SELECT * FROM ${String(recordId)}`, {});
@@ -578,9 +613,8 @@ export class SurrealDatabase {
         return null;
     }
     async updatePayload(id, payload, options) {
-        if (!this.client) {
-            throw new Error('[SurrealDB] Client not connected');
-        }
+        // Ensure we have a valid connection
+        await this.ensureConnected();
         try {
             const recordId = new RecordId(MEMORY_TABLE, id);
             // Build SET clause for update
@@ -694,9 +728,8 @@ export class SurrealDatabase {
         }
     }
     async count() {
-        if (!this.client) {
-            return 0;
-        }
+        // Ensure we have a valid connection
+        await this.ensureConnected();
         try {
             const result = await this.executeQuery('SELECT count() AS count FROM memory');
             // SurrealDB 3.x returns [[{count: N}]] format
@@ -1463,6 +1496,8 @@ export class SurrealDatabase {
             await this.client.close();
             this.client = null;
         }
+        // Reset initialized flag to allow re-initialization after close
+        this.initialized = false;
     }
     // ============================================================
     // Stage 3: Alias Management Methods

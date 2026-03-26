@@ -32,3 +32,6 @@ llama.cpp/
 
 # Git worktrees
 .worktrees/
+
+# SurrealDB data
+surrealdb/data/

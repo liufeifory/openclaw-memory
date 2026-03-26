@@ -217,6 +217,7 @@ async function cleanup(): Promise<void> {
   preferenceExtractor = null;
   summarizer = null;
   globalLimiter = null;
+  llmClient = null;  // Reset LLM client to allow re-initialization
   storedMessages.clear();
   conversationBuffers.clear();
 
@@ -354,31 +355,53 @@ export default createPluginEntry({
   description: 'Long-term memory with semantic search (SurrealDB backend)',
 
   async init(config: MemoryPluginConfig) {
-    // Store config for later lazy initialization
+    // Store config for later use
     savedConfig = config;
-    logInfo('Plugin config stored (lazy initialization enabled)');
+    logInfo('Plugin init called, storing config...');
+
+    // Initialize immediately since gateway doesn't await register()
+    try {
+      await ensureInitialized();
+      logInfo('Plugin initialized via init()');
+    } catch (error: any) {
+      logError(`Plugin init failed: ${error.message}`);
+      throw error;
+    }
   },
 
-  register(api) {
-    // Get plugin config from OpenClaw
+  async register(api) {
+    // Get plugin config from OpenClaw - sync extraction before any async operations
     const pluginConfig = api.pluginConfig as any;
-
-    // Handle both formats: {enabled, config} or direct config
     const config = pluginConfig?.config || pluginConfig;
 
+    // Store config synchronously - gateway ignores async register()
+    if (config?.surrealdb) {
+      savedConfig = config;
+      logInfo(`[register] Config stored synchronously`);
+
+      // Schedule initialization for after register() returns
+      // This is needed because gateway doesn't await async register()
+      setImmediate(async () => {
+        logInfo('[register] Scheduled initialization starting...');
+        try {
+          await ensureInitialized();
+          logInfo('[register] Initialization complete');
+        } catch (error: any) {
+          logError(`[register] Initialization failed: ${error.message}`);
+        }
+      });
+    }
+
+    // Rest of register function continues...
     if (!config) {
       logInfo('No config found, plugin disabled');
       return;
     }
 
-    // Check for SurrealDB config
     if (!config.surrealdb) {
       logInfo('No SurrealDB config found, plugin disabled');
       return;
     }
-
-    // Store config for lazy initialization
-    savedConfig = config;
 
     // Document Import Configuration - start watcher only if configured
     const docConfig = config.documentImport || {};
@@ -391,7 +414,7 @@ export default createPluginEntry({
       }
 
       // For document watcher, we need to initialize immediately
-      ensureInitialized();
+      await ensureInitialized();
       const mm = getMemoryManager(config);
       const importer = createDocumentImporter(mm, {
         watchDir,
@@ -399,9 +422,10 @@ export default createPluginEntry({
         chunkOverlap: docConfig.chunkOverlap,
       });
       documentWatcher = importer.watcher;  // Store reference for cleanup
-      documentWatcher?.start();  // Start watcher (don't await)
+      await documentWatcher?.start();  // Start watcher and wait for initial scan
       logInfo(`Document watcher started: ${watchDir}`);
     }
+    // Note: setImmediate above handles initialization for non-document-watcher mode
 
     // Schedule auto-cleanup AFTER document watcher completes initial scan
     if (watchDir) {

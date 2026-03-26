@@ -147,7 +147,7 @@ export declare class EntityIndexer {
     private cooccurrenceInterval?;
     /**
      * Start co-occurrence builder scheduler (Stage 2)
-     * Runs every 7 days to build entity-entity relationships
+     * Runs every 1 day to build entity-entity relationships
      */
     private startCooccurrenceScheduler;
     /**
