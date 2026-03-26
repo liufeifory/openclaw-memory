@@ -59,7 +59,9 @@ export class LLMClient {
     if (this.shouldUseCloud(taskType)) {
       return this.config.cloudBaseUrl ?? 'https://dashscope.aliyuncs.com/v1';
     }
-    return this.config.localEndpoint ?? 'http://localhost:8082';
+    const localEndpoint = this.config.localEndpoint ?? 'http://localhost:8082';
+    // Append /completion for local llama.cpp server
+    return localEndpoint.replace(/\/$/, '') + '/completion';
   }
 
   /**
