@@ -258,8 +258,8 @@ importance = base_importance × 0.5
           "晚安"
         ],
         "min_message_length": 3,
-        "llm_endpoint": "http://localhost:8081",
-        "llm_timeout_ms": 500
+        "llm_endpoint": "http://localhost:8082",
+        "llm_timeout_ms": 1500
       }
     }
   }
@@ -272,15 +272,17 @@ importance = base_importance × 0.5
 |------|------|--------|------|
 | `trivial_patterns` | string[] | 见上 | 忽略的关键词列表 |
 | `min_message_length` | number | `3` | 最小消息长度（短于此长度忽略） |
-| `llm_endpoint` | string | `http://localhost:8081` | LLM 服务地址 |
-| `llm_timeout_ms` | number | `500` | LLM 分类超时（毫秒） |
+| `llm_endpoint` | string | `http://localhost:8082` | LLM 服务地址（7B 模型） |
+| `llm_timeout_ms` | number | `1500` | LLM 分类超时（毫秒） |
 
 **LLM 端点说明：**
 
 | 端口 | 模型 | 用途 |
 |------|------|------|
-| 8081 | Llama-3.2-1B | 消息分类、偏好提取、对话摘要、Reranker |
-| 8082 | Qwen2.5-Coder-7B | 实体提取、三元组精炼（Layer 3） |
+| 8080 | BGE-M3 | Embedding（1024 维向量） |
+| 8082 | Qwen2.5-Coder-7B | 消息分类、实体提取、冲突检测、聚类合并、Reranker |
+
+**注：** 原 1B 模型承担的任务已迁移到 7B 模型或云端 LLM
 
 ---
 
@@ -579,8 +581,8 @@ export MEMORY_PASSWORD=your_secure_password
 export MEMORY_EMBEDDING_ENDPOINT=http://localhost:8080
 
 # LLM 配置
-export MEMORY_LLM_ENDPOINT=http://localhost:8081        # 1B 模型
-export MEMORY_ENTITY_LLM_ENDPOINT=http://localhost:8082 # 7B 模型（实体提取）
+export MEMORY_LLM_ENDPOINT=http://localhost:8082        # 7B 模型
+export MEMORY_EMBEDDING_ENDPOINT=http://localhost:8080  # Embedding
 
 # 检索配置
 export MEMORY_TOP_K=5

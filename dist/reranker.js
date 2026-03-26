@@ -1,5 +1,5 @@
 /**
- * Reranker using Llama-3.2-1B-Instruct
+ * Reranker using Qwen2.5-7B-Instruct
  *
  * Reranks vector search results based on query relevance.
  * Features:
@@ -23,11 +23,11 @@ const SCORE_THRESHOLD = 0.7; // Minimum score to keep result
 const INITIAL_K = 30; // Initial retrieval count (high recall, increased from 20 for better coverage)
 export { INITIAL_K, SCORE_THRESHOLD, DIVERSITY_PENALTY, CLUSTER_DIVERSITY_PENALTY };
 export class Reranker {
-    endpoint;
+    client;
     limiter;
     defaultOptions;
-    constructor(endpoint = 'http://localhost:8081', limiter) {
-        this.endpoint = endpoint;
+    constructor(client, limiter) {
+        this.client = client;
         this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
         this.defaultOptions = {
             topK: 5,
@@ -65,20 +65,9 @@ export class Reranker {
             .replace('{{query}}', query)
             .replace('{{memories}}', memoriesText);
         try {
-            const result = await this.limiter.execute(async () => {
-                const response = await fetch(`${this.endpoint}/completion`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        prompt: prompt,
-                        n_predict: 50,
-                        temperature: 0.1,
-                        top_p: 0.9,
-                    }),
-                });
-                return await response.json();
+            const output = await this.limiter.execute(async () => {
+                return await this.client.complete(prompt, 'reranker', { temperature: 0.1, maxTokens: 50 });
             });
-            const output = (result.content || result.generated_text || '').toString().trim();
             const rankedIndices = this.parseRanking(output, topResults.length);
             // Assign initial scores based on rank
             let ranked = rankedIndices.map((originalIndex, rank) => {

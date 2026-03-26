@@ -1,11 +1,13 @@
 /**
- * Conflict Detector using Llama-3.2-1B-Instruct
+ * Conflict Detector using LLM
  *
  * Detects contradictory memories and marks old ones with superseded_by tag.
+ * Uses local 7B model by default (high-frequency task).
  */
 
 import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
+import { LLMClient } from './llm-client.js';
 
 const CONFLICT_PROMPT = `Analyze if Statement B contradicts Statement A.
 
@@ -34,11 +36,11 @@ export interface ConflictResult {
 }
 
 export class ConflictDetector {
-  private endpoint: string;
+  private client: LLMClient;
   private limiter: LLMLimiter;
 
-  constructor(endpoint: string = 'http://localhost:8081', limiter?: LLMLimiter) {
-    this.endpoint = endpoint;
+  constructor(client: LLMClient, limiter?: LLMLimiter) {
+    this.client = client;
     this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
   }
 
@@ -90,22 +92,15 @@ export class ConflictDetector {
       .replace('{{new}}', newStatement);
 
     try {
-      const result = await this.limiter.execute(async () => {
-        const response = await fetch(`${this.endpoint}/completion`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt: prompt,
-            n_predict: 10,
-            temperature: 0.3,  // Slightly higher for better reasoning
-            top_p: 0.9,
-          }),
-        });
-        return await response.json();
-      }) as any;
+      const output = await this.limiter.execute(async () => {
+        return await this.client.complete(
+          prompt,
+          'conflict-detector',
+          { temperature: 0.3, maxTokens: 10 }
+        );
+      }) as string;
 
-      const output = (result.content || result.generated_text || '').toString().trim().toUpperCase();
-      const llmResult = output.includes('YES');
+      const llmResult = output.toUpperCase().includes('YES');
 
       // Fallback: keyword-based conflict detection for common patterns
       if (!llmResult) {

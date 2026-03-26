@@ -1,14 +1,16 @@
 /**
- * Conversation Summarizer using Llama-3.2-1B-Instruct
+ * Conversation Summarizer using LLM
  *
  * Compresses multiple conversation turns into concise summaries.
+ * Uses cloud model when configured (high-quality task).
  * Features:
  * - Token compression ratio monitoring
  * - Alerts for over-compression (ratio < 0.1) and under-compression (ratio > 0.9)
  */
 
-import { logWarn, logError } from './maintenance-logger.js';
+import { logWarn, logError, logInfo } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
+import { LLMClient } from './llm-client.js';
 
 const SUMMARIZE_PROMPT = `Summarize these conversation turns into ONE concise fact or observation.
 Focus on:
@@ -35,7 +37,7 @@ export interface SummaryResult {
 }
 
 export class Summarizer {
-  private endpoint: string;
+  private client: LLMClient;
   private limiter: LLMLimiter;
   private stats = {
     totalSummaries: 0,
@@ -44,8 +46,8 @@ export class Summarizer {
     underCompressionCount: 0,
   };
 
-  constructor(endpoint: string = 'http://localhost:8081', limiter?: LLMLimiter) {
-    this.endpoint = endpoint;
+  constructor(client: LLMClient, limiter?: LLMLimiter) {
+    this.client = client;
     this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
   }
 
@@ -100,21 +102,13 @@ export class Summarizer {
     const prompt = SUMMARIZE_PROMPT.replace('{{messages}}', messagesText);
 
     try {
-      const result = await this.limiter.execute(async () => {
-        const response = await fetch(`${this.endpoint}/completion`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt: prompt,
-            n_predict: 100,
-            temperature: 0.3,
-            top_p: 0.9,
-          }),
-        });
-        return await response.json();
-      }) as any;
-
-      const output = (result.content || result.generated_text || '').trim();
+      const output = await this.limiter.execute(async () => {
+        return await this.client.complete(
+          prompt,
+          'summarizer',
+          { temperature: 0.3, maxTokens: 100 }
+        );
+      }) as string;
 
       // Guard: empty output from LLM
       if (!output || output.length === 0) {

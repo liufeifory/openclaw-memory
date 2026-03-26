@@ -1,9 +1,11 @@
 /**
- * Preference Extractor using Llama-3.2-1B-Instruct
+ * Preference Extractor using LLM
  *
  * Extracts structured user preferences from conversation.
+ * Uses cloud model when configured (high-quality task).
  */
 import { LLMLimiter } from './llm-limiter.js';
+import { LLMClient } from './llm-client.js';
 export interface UserProfile {
     likes: string[];
     dislikes: string[];
@@ -16,16 +18,12 @@ export interface UserProfile {
     habits: string[];
 }
 export declare class PreferenceExtractor {
-    private endpoint;
+    private client;
     private limiter;
-    constructor(endpoint?: string, limiter?: LLMLimiter);
+    constructor(client: LLMClient, limiter?: LLMLimiter);
     /**
      * Extract user profile from conversation.
      */
     extract(conversation: string[]): Promise<UserProfile>;
-    /**
-     * Parse JSON user profile from LLM output.
-     */
-    private parseUserProfile;
 }
 //# sourceMappingURL=preference-extractor.d.ts.map

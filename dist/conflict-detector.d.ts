@@ -1,9 +1,11 @@
 /**
- * Conflict Detector using Llama-3.2-1B-Instruct
+ * Conflict Detector using LLM
  *
  * Detects contradictory memories and marks old ones with superseded_by tag.
+ * Uses local 7B model by default (high-frequency task).
  */
 import { LLMLimiter } from './llm-limiter.js';
+import { LLMClient } from './llm-client.js';
 export interface ConflictResult {
     isConflict: boolean;
     oldMemoryId?: number;
@@ -11,9 +13,9 @@ export interface ConflictResult {
     supersededBy?: number;
 }
 export declare class ConflictDetector {
-    private endpoint;
+    private client;
     private limiter;
-    constructor(endpoint?: string, limiter?: LLMLimiter);
+    constructor(client: LLMClient, limiter?: LLMLimiter);
     /**
      * Check if new content conflicts with existing memories.
      * @param newContent - The new memory content

@@ -84,6 +84,24 @@
 }
 ```
 
+### 3. 批量导入脚本
+
+使用 `import-documents.js` 脚本批量导入当前文档目录中的所有文件：
+
+```bash
+cd ~/.openclaw/plugins/openclaw-memory
+npm run import:docs
+# 或者
+node scripts/import-documents.js
+```
+
+脚本会：
+1. 扫描 `~/.openclaw/documents` 目录
+2. 自动解析所有支持的文档格式
+3. 使用配置的 `chunkSize` 和 `chunkOverlap` 进行分段
+4. 将每个片段存储到记忆系统
+5. 显示导入统计信息
+
 ## 支持的格式
 
 | 格式 | 扩展名 | 说明 |
@@ -136,8 +154,24 @@
 2. 文件扩展名是否支持
 3. 查看日志是否有解析错误
 
+```bash
+# 查看记忆插件日志
+tail -f ~/.openclaw/logs/gateway.log | grep -i document
+```
+
 ### 解析失败
 
 查看控制台日志，常见错误：
 - `Failed to parse PDF`: PDF 损坏或加密
 - `Unsupported file type`: 文件格式不支持
+
+### 批量导入失败
+
+```bash
+# 手动运行导入脚本
+cd ~/.openclaw/plugins/openclaw-memory
+node scripts/import-documents.js
+
+# 检查 openclaw.json 配置
+cat ~/.openclaw/openclaw.json | python3 -m json.tool
+```

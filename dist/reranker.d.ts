@@ -1,5 +1,5 @@
 /**
- * Reranker using Llama-3.2-1B-Instruct
+ * Reranker using Qwen2.5-7B-Instruct
  *
  * Reranks vector search results based on query relevance.
  * Features:
@@ -7,6 +7,7 @@
  * - Diversity Re-ranking: Penalizes highly similar top results
  */
 import { LLMLimiter } from './llm-limiter.js';
+import { LLMClient } from './llm-client.js';
 declare const DIVERSITY_PENALTY = 0.15;
 declare const CLUSTER_DIVERSITY_PENALTY = 0.2;
 declare const SCORE_THRESHOLD = 0.7;
@@ -40,10 +41,10 @@ export interface RerankConfig {
     enableDiversity?: boolean;
 }
 export declare class Reranker {
-    private endpoint;
+    private client;
     private limiter;
     private defaultOptions;
-    constructor(endpoint?: string, limiter?: LLMLimiter);
+    constructor(client: LLMClient, limiter?: LLMLimiter);
     /**
      * Rerank search results by relevance.
      * Features:

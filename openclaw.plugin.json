@@ -1,0 +1,39 @@
+{
+  "id": "openclaw-memory",
+  "name": "OpenClaw Memory",
+  "kind": "memory",
+  "main": "./dist/index.js",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "backend": {
+        "type": "string",
+        "enum": ["surrealdb"]
+      },
+      "surrealdb": {
+        "type": "object",
+        "properties": {
+          "url": {"type": "string"},
+          "namespace": {"type": "string"},
+          "database": {"type": "string"},
+          "username": {"type": "string"},
+          "password": {"type": "string"}
+        }
+      },
+      "embedding": {
+        "type": "object",
+        "properties": {
+          "endpoint": {"type": "string"}
+        }
+      },
+      "documentImport": {
+        "type": "object",
+        "properties": {
+          "watchDir": {"type": "string"},
+          "chunkSize": {"type": "number"},
+          "chunkOverlap": {"type": "number"}
+        }
+      }
+    }
+  }
+}

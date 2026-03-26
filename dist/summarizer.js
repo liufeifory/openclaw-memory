@@ -1,7 +1,8 @@
 /**
- * Conversation Summarizer using Llama-3.2-1B-Instruct
+ * Conversation Summarizer using LLM
  *
  * Compresses multiple conversation turns into concise summaries.
+ * Uses cloud model when configured (high-quality task).
  * Features:
  * - Token compression ratio monitoring
  * - Alerts for over-compression (ratio < 0.1) and under-compression (ratio > 0.9)
@@ -24,7 +25,7 @@ Summary:`;
 const MIN_COMPRESSION_RATIO = 0.1; // Alert if < 0.1 (over-compression, info loss)
 const MAX_COMPRESSION_RATIO = 0.9; // Alert if > 0.9 (under-compression, not summarizing)
 export class Summarizer {
-    endpoint;
+    client;
     limiter;
     stats = {
         totalSummaries: 0,
@@ -32,8 +33,8 @@ export class Summarizer {
         overCompressionCount: 0,
         underCompressionCount: 0,
     };
-    constructor(endpoint = 'http://localhost:8081', limiter) {
-        this.endpoint = endpoint;
+    constructor(client, limiter) {
+        this.client = client;
         this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     }
     /**
@@ -79,20 +80,9 @@ export class Summarizer {
         const messagesText = messages.slice(-20).join('\n'); // Last 20 messages
         const prompt = SUMMARIZE_PROMPT.replace('{{messages}}', messagesText);
         try {
-            const result = await this.limiter.execute(async () => {
-                const response = await fetch(`${this.endpoint}/completion`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        prompt: prompt,
-                        n_predict: 100,
-                        temperature: 0.3,
-                        top_p: 0.9,
-                    }),
-                });
-                return await response.json();
+            const output = await this.limiter.execute(async () => {
+                return await this.client.complete(prompt, 'summarizer', { temperature: 0.3, maxTokens: 100 });
             });
-            const output = (result.content || result.generated_text || '').trim();
             // Guard: empty output from LLM
             if (!output || output.length === 0) {
                 logWarn('[Summarizer] LLM returned empty output');

@@ -14,6 +14,7 @@ import { Summarizer } from './summarizer.js';
 import { HybridRetriever } from './hybrid-retrieval.js';
 import { EntityIndexer } from './entity-indexer.js';
 import { logInfo, logError } from './maintenance-logger.js';
+import { LLMClient } from './llm-client.js';
 export class MemoryManager {
     db;
     embedding;
@@ -43,13 +44,25 @@ export class MemoryManager {
         this.memoryStore = new MemoryStore(this.db, this.embedding);
         this.contextBuilder = new ContextBuilder();
         // Create shared LLM limiter for rate control
-        const llamaEndpoint = config.embedding?.endpoint?.replace('8080', '8081') ?? 'http://localhost:8081';
+        const llmConfig = config.llm || {};
+        const llmClient = new LLMClient({
+            localEndpoint: llmConfig.endpoint ?? 'http://localhost:8082',
+            cloudEnabled: llmConfig.cloudEnabled ?? false,
+            cloudProvider: llmConfig.cloudProvider,
+            cloudBaseUrl: llmConfig.cloudBaseUrl,
+            cloudApiKey: llmConfig.cloudApiKey,
+            cloudModel: llmConfig.cloudModel,
+            cloudTasks: llmConfig.cloudTasks,
+        });
         this.limiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100, queueLimit: 50 });
-        this.reranker = new Reranker(llamaEndpoint, this.limiter);
-        this.conflictDetector = new ConflictDetector(llamaEndpoint, this.limiter);
+        // Local-only tasks (reranker, conflict detector, entity extractor)
+        this.reranker = new Reranker(llmClient, this.limiter);
+        this.conflictDetector = new ConflictDetector(llmClient, this.limiter);
+        // Hybrid tasks (can use cloud when configured)
         this.importanceLearning = new ImportanceLearning();
-        this.clusterer = new SemanticClusterer(llamaEndpoint, this.limiter);
-        this.summarizer = new Summarizer(llamaEndpoint, this.limiter);
+        this.clusterer = new SemanticClusterer(llmClient, this.limiter);
+        this.summarizer = new Summarizer(llmClient, this.limiter);
+        logInfo(`[MemoryManager] LLM config: ${llmClient.getConfigInfo()}`);
         // Initialize EntityIndexer and HybridRetriever
         this.entityIndexer = new EntityIndexer(this.db);
         this.hybridRetriever = new HybridRetriever(this.db, this.embedding, this.entityIndexer, this.reranker);

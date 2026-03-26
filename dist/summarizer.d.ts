@@ -1,12 +1,14 @@
 /**
- * Conversation Summarizer using Llama-3.2-1B-Instruct
+ * Conversation Summarizer using LLM
  *
  * Compresses multiple conversation turns into concise summaries.
+ * Uses cloud model when configured (high-quality task).
  * Features:
  * - Token compression ratio monitoring
  * - Alerts for over-compression (ratio < 0.1) and under-compression (ratio > 0.9)
  */
 import { LLMLimiter } from './llm-limiter.js';
+import { LLMClient } from './llm-client.js';
 export interface SummaryResult {
     summary: string;
     isEmpty: boolean;
@@ -14,10 +16,10 @@ export interface SummaryResult {
     compressionQuality?: 'good' | 'over-compressed' | 'under-compressed';
 }
 export declare class Summarizer {
-    private endpoint;
+    private client;
     private limiter;
     private stats;
-    constructor(endpoint?: string, limiter?: LLMLimiter);
+    constructor(client: LLMClient, limiter?: LLMLimiter);
     /**
      * Get summarizer statistics.
      */

@@ -1,7 +1,8 @@
 /**
- * Preference Extractor using Llama-3.2-1B-Instruct
+ * Preference Extractor using LLM
  *
  * Extracts structured user preferences from conversation.
+ * Uses cloud model when configured (high-quality task).
  */
 import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
@@ -26,10 +27,10 @@ Conversation:
 
 JSON:`;
 export class PreferenceExtractor {
-    endpoint;
+    client;
     limiter;
-    constructor(endpoint = 'http://localhost:8081', limiter) {
-        this.endpoint = endpoint;
+    constructor(client, limiter) {
+        this.client = client;
         this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     }
     /**
@@ -40,20 +41,14 @@ export class PreferenceExtractor {
         );
         try {
             const result = await this.limiter.execute(async () => {
-                const response = await fetch(`${this.endpoint}/completion`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        prompt: prompt,
-                        n_predict: 500,
-                        temperature: 0.3,
-                        top_p: 0.9,
-                    }),
-                });
-                return await response.json();
+                return await this.client.completeJson(prompt, 'preference-extractor', { temperature: 0.3, maxTokens: 500 });
             });
-            const output = (result.content || result.generated_text || '').trim();
-            return this.parseUserProfile(output);
+            return {
+                likes: Array.isArray(result.likes) ? result.likes : [],
+                dislikes: Array.isArray(result.dislikes) ? result.dislikes : [],
+                facts: result.facts || {},
+                habits: Array.isArray(result.habits) ? result.habits : [],
+            };
         }
         catch (error) {
             logError(`[PreferenceExtractor] LLM failed: ${error.message}`);
@@ -64,32 +59,6 @@ export class PreferenceExtractor {
                 habits: [],
             };
         }
-    }
-    /**
-     * Parse JSON user profile from LLM output.
-     */
-    parseUserProfile(output) {
-        const jsonMatch = output.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-            try {
-                const parsed = JSON.parse(jsonMatch[0]);
-                return {
-                    likes: Array.isArray(parsed.likes) ? parsed.likes : [],
-                    dislikes: Array.isArray(parsed.dislikes) ? parsed.dislikes : [],
-                    facts: parsed.facts || {},
-                    habits: Array.isArray(parsed.habits) ? parsed.habits : [],
-                };
-            }
-            catch {
-                // Fall through to default
-            }
-        }
-        return {
-            likes: [],
-            dislikes: [],
-            facts: {},
-            habits: [],
-        };
     }
 }
 //# sourceMappingURL=preference-extractor.js.map

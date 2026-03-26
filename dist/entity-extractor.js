@@ -1,18 +1,13 @@
 /**
- * Entity Extractor - Three-Layer Funnel Strategy
+ * Entity Extractor - Two-Layer Architecture
  *
  * Architecture:
  * Layer 1: Static Cache / Regex (zero cost, ~60% coverage)
  *   ↓
- * Layer 1.5: Mini-Batch Buffer (batch processing, 90% scheduling overhead reduction)
- *   ↓
- * Layer 2: 1B Model Pre-Filter (very low cost, ~30% coverage)
- *   ↓
- * Layer 3: 7B Model Refine (high cost, ~10% coverage)
+ * Layer 2: 7B Model Refine (high quality, ~40% coverage)
  *
  * Features:
  * - Alias normalization (Postgres → PostgreSQL, TS → TypeScript)
- * - Mini-batch buffer for LLM calls
  * - Known entity cache (loaded from database periodically)
  * - Layer stats tracking for optimization
  */
@@ -197,46 +192,22 @@ const ENTITY_PATTERNS = [
     { pattern: /\b(webpack|vite|rollup|esbuild|babel|tsc)\b/gi, name: 'build' },
 ];
 /**
- * Entity Extractor with three-layer funnel strategy
+ * Entity Extractor with two-layer architecture
  */
 export class EntityExtractor {
-    endpoint1B;
-    endpoint7B;
-    limiter1B;
+    client;
     limiter7B;
     knownEntities = new Map();
-    buffer = [];
     stats = {
         layer1Hits: 0,
         layer1Total: 0,
         layer2Hits: 0,
         layer2Total: 0,
-        layer3Hits: 0,
-        layer3Total: 0,
         totalEntities: 0,
     };
-    // Buffer configuration
-    bufferFlushInterval = 5000; // 5 seconds
-    minBatchSize = 3; // Minimum batch for LLM call
-    constructor(endpoint1B = 'http://localhost:8081', endpoint7B = 'http://localhost:8083') {
-        this.endpoint1B = endpoint1B;
-        this.endpoint7B = endpoint7B;
-        this.limiter1B = getGlobalLimiter({ maxConcurrent: 3, minInterval: 50 });
+    constructor(client) {
+        this.client = client;
         this.limiter7B = getGlobalLimiter({ maxConcurrent: 2, minInterval: 100 });
-        // Start periodic buffer flush
-        this.startPeriodicFlush();
-    }
-    flushInterval;
-    /**
-     * Start periodic buffer flush
-     */
-    startPeriodicFlush() {
-        this.flushInterval = setInterval(() => {
-            if (this.buffer.length > 0) {
-                this.flushBuffer().catch(console.error);
-            }
-        }, this.bufferFlushInterval);
-        this.flushInterval.unref();
     }
     /**
      * Add known entities to the cache (loaded from database periodically)
@@ -259,15 +230,6 @@ export class EntityExtractor {
      */
     getLayerStats() {
         return { ...this.stats };
-    }
-    /**
-     * Get buffer statistics
-     */
-    getBufferStats() {
-        return {
-            size: this.buffer.length,
-            oldest: this.buffer[0]?.addedAt,
-        };
     }
     /**
      * Normalize text using alias rules
@@ -319,146 +281,41 @@ export class EntityExtractor {
         return entities;
     }
     /**
-     * Add item to mini-batch buffer for Layer 2 processing
-     */
-    addToBuffer(text, confidence) {
-        this.buffer.push({
-            text,
-            confidence,
-            addedAt: Date.now(),
-        });
-        // Auto-flush if buffer is large enough
-        if (this.buffer.length >= 10) {
-            this.flushBuffer().catch(console.error);
-        }
-    }
-    /**
-     * Flush mini-batch buffer through Layer 2 (1B model)
-     */
-    async flushBuffer() {
-        if (this.buffer.length === 0)
-            return;
-        const texts = this.buffer.map(item => item.text);
-        this.buffer = [];
-        try {
-            const results = await this.layer2_1BFilter(texts);
-            // Log results for monitoring
-            logInfo(`[EntityExtractor] Flushed ${texts.length} items from buffer, ${results.filter(r => r).length} passed 1B filter`);
-        }
-        catch (error) {
-            logError(`[EntityExtractor] Buffer flush failed: ${error.message}`);
-        }
-    }
-    /**
-     * Layer 2: 1B Model Pre-Filter
-     * Low-cost filtering to eliminate obvious non-entities
-     * Returns boolean array indicating which texts should proceed to Layer 3
-     */
-    async layer2_1BFilter(texts) {
-        if (texts.length === 0)
-            return [];
-        this.stats.layer2Total += texts.length;
-        // Build batch prompt for efficiency
-        const batchPrompt = this.buildBatchFilterPrompt(texts);
-        try {
-            const result = await this.limiter1B.execute(async () => {
-                const response = await fetch(`${this.endpoint1B}/completion`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        prompt: batchPrompt,
-                        n_predict: texts.length * 2, // Rough estimate for yes/no answers
-                        temperature: 0.1, // Low temperature for deterministic output
-                        top_p: 0.9,
-                    }),
-                });
-                return await response.json();
-            });
-            const output = (result.content || result.generated_text || '').trim();
-            const results = this.parseBatchFilterResponse(output, texts.length);
-            // Update stats
-            const passCount = results.filter(r => r).length;
-            this.stats.layer2Hits += passCount;
-            return results;
-        }
-        catch (error) {
-            logError(`[EntityExtractor] Layer 2 1B filter failed: ${error.message}`);
-            // Return all true on error (fail open)
-            return texts.map(() => true);
-        }
-    }
-    /**
-     * Build batch filter prompt for 1B model
-     */
-    buildBatchFilterPrompt(texts) {
-        const items = texts.map((text, i) => `${i + 1}. "${text}"`).join('\n');
-        return `For each item, answer YES if it mentions a technical entity (tool, language, framework, database, platform, etc.) or NO if it's general text.
-
-Format: One answer per line (YES or NO)
-
-${items}
-
-Answers:`;
-    }
-    /**
-     * Parse batch filter response
-     */
-    parseBatchFilterResponse(output, expectedCount) {
-        const lines = output.trim().split('\n');
-        const results = [];
-        for (const line of lines) {
-            const trimmed = line.trim().toUpperCase();
-            if (trimmed.startsWith('YES')) {
-                results.push(true);
-            }
-            else if (trimmed.startsWith('NO')) {
-                results.push(false);
-            }
-            if (results.length >= expectedCount)
-                break;
-        }
-        // Fill remaining with true if parsing failed
-        while (results.length < expectedCount) {
-            results.push(true);
-        }
-        return results;
-    }
-    /**
-     * Layer 3: 7B Model Refine
+     * Layer 2: 7B Model Refine
      * High-quality entity extraction with proper noun detection
      */
-    async layer3_7BRefine(text) {
-        this.stats.layer3Total++;
+    async layer2_7BRefine(text) {
+        this.stats.layer2Total++;
         const prompt = this.buildRefinePrompt(text);
         try {
-            const result = await this.limiter7B.execute(async () => {
-                const response = await fetch(`${this.endpoint7B}/completion`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        prompt: prompt,
-                        n_predict: 500,
-                        temperature: 0.3,
-                        top_p: 0.9,
-                    }),
-                });
-                return await response.json();
+            const entities = await this.limiter7B.execute(async () => {
+                return await this.client.completeJson(prompt, 'entity-extractor', { temperature: 0.3, maxTokens: 500 });
             });
-            const output = (result.content || result.generated_text || '').trim();
-            const entities = this.parseRefineResponse(output);
-            // Update stats
-            if (entities.length > 0) {
-                this.stats.layer3Hits++;
+            const result = [];
+            if (Array.isArray(entities.entities)) {
+                for (const entity of entities.entities) {
+                    if (entity.name && typeof entity.name === 'string') {
+                        result.push({
+                            name: this.normalizeText(entity.name),
+                            confidence: typeof entity.confidence === 'number' ? entity.confidence : 0.7,
+                            source: '7b',
+                        });
+                    }
+                }
             }
-            return entities;
+            // Update stats
+            if (result.length > 0) {
+                this.stats.layer2Hits++;
+            }
+            return result;
         }
         catch (error) {
-            logError(`[EntityExtractor] Layer 3 7B refine failed: ${error.message}`);
+            logError(`[EntityExtractor] Layer 2 7B refine failed: ${error.message}`);
             return [];
         }
     }
     /**
-     * Build refine prompt for 8B model
+     * Build refine prompt for 7B model
      */
     buildRefinePrompt(text) {
         return `Extract all technical entities (tools, programming languages, frameworks, databases, platforms, libraries, etc.) from the text.
@@ -478,7 +335,7 @@ ${text}
 JSON:`;
     }
     /**
-     * Parse refine response from 8B model
+     * Parse refine response from 7B model
      */
     parseRefineResponse(output) {
         const jsonMatch = output.match(/\{[\s\S]*\}/);
@@ -495,7 +352,7 @@ JSON:`;
                         entities.push({
                             name: this.normalizeText(entity.name),
                             confidence: typeof entity.confidence === 'number' ? entity.confidence : 0.7,
-                            source: '8b',
+                            source: '7b',
                         });
                     }
                 }
@@ -523,7 +380,7 @@ JSON:`;
                     entities.push({
                         name: this.normalizeText(name),
                         confidence: match[2] ? parseFloat(match[2]) : 0.7,
-                        source: '8b',
+                        source: '7b',
                     });
                 }
             }
@@ -551,10 +408,9 @@ JSON:`;
         return stopWords.has(word.toLowerCase().trim());
     }
     /**
-     * Main extraction method - three-layer funnel
+     * Main extraction method - two-layer architecture
      * 1. First check Layer 1 (regex) - fast path
-     * 2. Add remaining text to buffer for Layer 2 (1B model)
-     * 3. For high-confidence items, use Layer 3 (8B model)
+     * 2. If not found, use Layer 2 (7B model) for deep extraction
      */
     async extract(text) {
         const allEntities = new Map();
@@ -564,15 +420,14 @@ JSON:`;
             allEntities.set(entity.name.toLowerCase(), entity);
         }
         // If Layer 1 found entities, return them
-        // Otherwise, proceed to Layer 3 for deep extraction
+        // Otherwise, proceed to Layer 2 for deep extraction
         if (layer1Entities.length > 0) {
             this.stats.totalEntities += layer1Entities.length;
             return Array.from(allEntities.values());
         }
-        // Layer 1 found nothing, use Layer 3 directly for this text
-        // (In production, you might want to batch these through Layer 2 first)
-        const layer3Entities = await this.layer3_7BRefine(text);
-        for (const entity of layer3Entities) {
+        // Layer 1 found nothing, use Layer 2 directly for this text
+        const layer2Entities = await this.layer2_7BRefine(text);
+        for (const entity of layer2Entities) {
             const key = entity.name.toLowerCase();
             if (!allEntities.has(key)) {
                 allEntities.set(key, entity);
@@ -582,31 +437,18 @@ JSON:`;
         return Array.from(allEntities.values());
     }
     /**
-     * Batch extract with mini-batch buffering
+     * Batch extract - direct extraction without buffering
      */
     async batchExtract(texts, useBuffer = true) {
         const results = [];
         if (useBuffer) {
-            // Add all texts to buffer and process in batch
+            // Direct extraction for each text
             for (const text of texts) {
-                // First try Layer 1
-                const layer1Entities = this.layer1_RegexMatch(text);
-                if (layer1Entities.length > 0) {
-                    results.push(layer1Entities);
-                }
-                else {
-                    // Add to buffer for Layer 2 processing
-                    this.addToBuffer(text, 0.5);
-                    results.push([]); // Will be populated after flush
-                }
-            }
-            // Flush buffer if we have enough items
-            if (this.buffer.length >= this.minBatchSize) {
-                await this.flushBuffer();
+                results.push(await this.extract(text));
             }
         }
         else {
-            // Direct extraction without buffering
+            // Same as above, kept for API compatibility
             for (const text of texts) {
                 results.push(await this.extract(text));
             }
@@ -620,60 +462,26 @@ JSON:`;
         this.knownEntities.clear();
     }
     /**
-     * Get all statistics including buffer and cache info
+     * Get all statistics including cache info
      */
     getFullStats() {
         return {
             ...this.stats,
             knownCacheSize: this.knownEntities.size,
-            bufferSize: this.buffer.length,
         };
     }
     /**
-     * Public method to call 7B LLM endpoint directly
-     * Used by EntityIndexer for relation classification
-     *
-     * @param prompt - The prompt to send to the 7B model
-     * @param timeout - Timeout in milliseconds (default: 10000)
-     * @returns Parsed JSON response from the model
-     */
-    async call7B(prompt, timeout = 10000) {
-        try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), timeout);
-            const result = await this.limiter7B.execute(async () => {
-                const response = await fetch(`${this.endpoint7B}/completion`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        prompt: prompt,
-                        n_predict: 500,
-                        temperature: 0.3,
-                        top_p: 0.9,
-                    }),
-                    signal: controller.signal,
-                });
-                clearTimeout(timeoutId);
-                return await response.json();
-            });
-            return result;
-        }
-        catch (error) {
-            if (error.name === 'AbortError') {
-                throw new Error(`[EntityExtractor] 7B call timed out after ${timeout}ms`);
-            }
-            throw error;
-        }
-    }
-    /**
-     * Dispose - clear background intervals
+     * Dispose - clear resources
      */
     dispose() {
-        if (this.flushInterval) {
-            clearInterval(this.flushInterval);
-            this.flushInterval = undefined;
-        }
         logInfo('[EntityExtractor] Disposed');
+    }
+    /**
+     * Delegate completeJson to internal LLM client
+     * Used by EntityIndexer for relation classification
+     */
+    async completeJson(prompt, taskType, options) {
+        return await this.client.completeJson(prompt, taskType, options);
     }
 }
 //# sourceMappingURL=entity-extractor.js.map

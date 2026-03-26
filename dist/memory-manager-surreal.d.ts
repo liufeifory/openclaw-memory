@@ -25,6 +25,15 @@ export interface MemoryManagerConfig {
     embedding?: {
         endpoint: string;
     };
+    llm?: {
+        endpoint?: string;
+        cloudEnabled?: boolean;
+        cloudProvider?: 'bailian' | 'openai' | 'custom';
+        cloudBaseUrl?: string;
+        cloudApiKey?: string;
+        cloudModel?: string;
+        cloudTasks?: ('preference' | 'summarizer' | 'clusterer' | 'reranker')[];
+    };
 }
 export declare class MemoryManager {
     private db;

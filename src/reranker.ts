@@ -1,5 +1,5 @@
 /**
- * Reranker using Llama-3.2-1B-Instruct
+ * Reranker using Qwen2.5-7B-Instruct
  *
  * Reranks vector search results based on query relevance.
  * Features:
@@ -7,8 +7,9 @@
  * - Diversity Re-ranking: Penalizes highly similar top results
  */
 
-import { logError } from './maintenance-logger.js';
+import { logError, logWarn } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
+import { LLMClient } from './llm-client.js';
 
 const RERANK_PROMPT = `Rank these memory snippets by relevance to the query.
 Output ONLY the indices in order (0-based), most relevant first.
@@ -59,12 +60,12 @@ export interface RerankConfig {
 }
 
 export class Reranker {
-  private endpoint: string;
+  private client: LLMClient;
   private limiter: LLMLimiter;
   private defaultOptions: Required<RerankConfig>;
 
-  constructor(endpoint: string = 'http://localhost:8081', limiter?: LLMLimiter) {
-    this.endpoint = endpoint;
+  constructor(client: LLMClient, limiter?: LLMLimiter) {
+    this.client = client;
     this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     this.defaultOptions = {
       topK: 5,
@@ -113,21 +114,14 @@ export class Reranker {
       .replace('{{memories}}', memoriesText);
 
     try {
-      const result = await this.limiter.execute(async () => {
-        const response = await fetch(`${this.endpoint}/completion`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt: prompt,
-            n_predict: 50,
-            temperature: 0.1,
-            top_p: 0.9,
-          }),
-        });
-        return await response.json();
-      }) as any;
+      const output = await this.limiter.execute(async () => {
+        return await this.client.complete(
+          prompt,
+          'reranker',
+          { temperature: 0.1, maxTokens: 50 }
+        );
+      }) as string;
 
-      const output = (result.content || result.generated_text || '').toString().trim();
       const rankedIndices = this.parseRanking(output, topResults.length);
 
       // Assign initial scores based on rank

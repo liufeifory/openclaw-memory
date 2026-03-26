@@ -15,6 +15,7 @@ import { SurrealDatabase, GRAPH_PROTECTION, ENTITY_RELATION_TABLE, MEMORY_TABLE,
 import { EntityExtractor, ExtractedEntity } from './entity-extractor.js';
 import { extractContextWindow, diverseSample } from './context-window.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
+import { LLMClient } from './llm-client.js';
 import * as os from 'os';
 
 /**
@@ -97,7 +98,9 @@ export class EntityIndexer {
 
   constructor(db?: SurrealDatabase) {
     this.db = db || null;
-    this.extractor = new EntityExtractor();
+    // Create a minimal LLMClient for EntityExtractor (can be null for extraction-only mode)
+    const minimalClient = new LLMClient({ localEndpoint: 'http://localhost:8082' });
+    this.extractor = new EntityExtractor(minimalClient);
 
     // Start background queue processor
     this.startBackgroundProcessor();
@@ -862,8 +865,12 @@ export class EntityIndexer {
             memorySnippets
           );
 
-          // Step 5: Call 7B LLM with timeout
-          const llmResult = await this.extractor.call7B(prompt, 10000);
+          // Step 5: Call LLM with timeout using EntityExtractor's client
+          const llmResult = await this.extractor.completeJson<{ type: string; confidence: number }>(
+            prompt,
+            'entity-indexer',
+            { temperature: 0.3, maxTokens: 100 }
+          );
 
           // Step 6: Parse and validate response
           const classification = this.parseClassificationResponse(llmResult);

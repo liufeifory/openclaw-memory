@@ -1,14 +1,8 @@
 /**
- * Memory Filter using Llama-3.2-1B-Instruct
+ * Memory Filter using LLM
  *
  * Classifies user messages and determines storage importance.
- *
- * Categories:
- * - TRIVIAL: Greetings, thanks, acknowledgments (don't store)
- * - FACT: Factual information about user (store as semantic, importance 0.7-0.9)
- * - PREFERENCE: User likes/dislikes (store as semantic, importance 0.7-0.9)
- * - EVENT: Something that happened (store as episodic, importance 0.5-0.8)
- * - QUESTION: User asking something (don't store, importance 0.3)
+ * Uses local 7B model by default (high-frequency task).
  */
 const FILTER_PROMPT = `You are a memory filter for a personal AI assistant.
 Classify the user message into ONE category and assign importance.
@@ -37,10 +31,10 @@ JSON:`;
 import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 export class MemoryFilter {
-    endpoint;
+    client;
     limiter;
-    constructor(endpoint = 'http://localhost:8081', limiter) {
-        this.endpoint = endpoint;
+    constructor(client, limiter) {
+        this.client = client;
         this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     }
     /**
@@ -50,31 +44,16 @@ export class MemoryFilter {
         const prompt = FILTER_PROMPT.replace('{{message}}', message);
         try {
             const result = await this.limiter.execute(async () => {
-                const response = await fetch(`${this.endpoint}/completion`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        prompt: prompt,
-                        n_predict: 100,
-                        temperature: 0.1,
-                        top_p: 0.9,
-                    }),
-                });
-                return await response.json();
+                return await this.client.completeJson(prompt, 'memory-filter', { temperature: 0.1, maxTokens: 100 });
             });
-            const output = (result.content || result.generated_text || '').trim();
-            // Parse JSON response
-            const parsed = this.parseJsonResponse(output);
-            // Determine storage action
-            const category = parsed.category;
-            const shouldStore = category !== 'TRIVIAL' && category !== 'QUESTION';
-            const memoryType = category === 'EVENT' ? 'episodic' :
-                category === 'FACT' || category === 'PREFERENCE' ? 'semantic' :
-                    undefined;
+            // Determine storage action - 全部入库，不再过滤
+            const category = result.category.toUpperCase();
+            const shouldStore = true; // 所有消息都存储
+            const memoryType = 'episodic'; // 默认存储为 episodic
             return {
                 category,
-                importance: parsed.importance,
-                reason: parsed.reason,
+                importance: Math.max(0.1, Math.min(0.9, result.importance || 0.5)),
+                reason: result.reason || 'auto-classified',
                 shouldStore,
                 memoryType,
             };
@@ -84,32 +63,6 @@ export class MemoryFilter {
             logError(`[MemoryFilter] LLM failed, using fallback: ${error.message}`);
             return this.fallbackClassify(message);
         }
-    }
-    /**
-     * Parse JSON response from LLM.
-     */
-    parseJsonResponse(output) {
-        // Extract JSON from output
-        const jsonMatch = output.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-            try {
-                const parsed = JSON.parse(jsonMatch[0]);
-                return {
-                    category: parsed.category?.toUpperCase() || 'TRIVIAL',
-                    importance: Math.max(0.1, Math.min(0.9, parsed.importance || 0.5)),
-                    reason: parsed.reason || 'auto-classified',
-                };
-            }
-            catch {
-                // Fall through to default
-            }
-        }
-        // Default for failed parsing
-        return {
-            category: 'TRIVIAL',
-            importance: 0.5,
-            reason: 'parse failed',
-        };
     }
     /**
      * Fallback classification using simple rules.

@@ -1,5 +1,5 @@
 /**
- * OpenClaw Memory Plugin - Native Node.js Implementation
+ * OpenClaw Memory Plugin - New SDK Format
  *
  * Backend: SurrealDB with vector search capabilities.
  *
@@ -9,37 +9,15 @@
  * - Episodic, semantic, and reflection memories
  * - Message queue + background worker for decoupled storage
  */
-interface SurrealConfig {
-    backend: 'surrealdb';
-    surrealdb: {
-        url: string;
-        namespace: string;
-        database: string;
-        username: string;
-        password: string;
-    };
-    embedding?: {
-        endpoint: string;
-    };
-    documentImport?: {
-        watchDir?: string;
-        chunkSize?: number;
-        chunkOverlap?: number;
-    };
-}
-type MemoryPluginConfig = SurrealConfig;
-declare const memoryPlugin: {
+interface PluginEntry {
     id: string;
     name: string;
     description: string;
-    kind: string;
-    init(config: MemoryPluginConfig): Promise<void>;
-    register(api: any): Promise<void>;
-    /**
-     * Dispose plugin - clean up background workers and close database connections.
-     * Called when OpenClaw shuts down or when commands complete.
-     */
-    dispose(): Promise<void>;
-};
-export default memoryPlugin;
+    kind?: string;
+    init?: (config: any) => Promise<void>;
+    register: (api: any) => void | Promise<void>;
+    dispose?: () => Promise<void>;
+}
+declare const _default: PluginEntry;
+export default _default;
 //# sourceMappingURL=index.d.ts.map

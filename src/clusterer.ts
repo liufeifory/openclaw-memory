@@ -14,6 +14,7 @@
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 import { ConflictDetector } from './conflict-detector.js';
+import { LLMClient } from './llm-client.js';
 
 const CLUSTER_PROMPT = `Group these memories into clusters based on semantic similarity.
 Output JSON format:
@@ -109,7 +110,7 @@ export interface HierarchyConfig {
 }
 
 export class SemanticClusterer {
-  private endpoint: string;
+  private client: LLMClient;
   private limiter: LLMLimiter;
   private conflictDetector: ConflictDetector;
 
@@ -122,10 +123,10 @@ export class SemanticClusterer {
     { name: 'packageName', regex: /\b[a-z][a-z0-9.-]*::[a-z][a-z0-9-]*\b/g },
   ];
 
-  constructor(endpoint: string = 'http://localhost:8081', limiter?: LLMLimiter) {
-    this.endpoint = endpoint;
+  constructor(client: LLMClient, limiter?: LLMLimiter) {
+    this.client = client;
     this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
-    this.conflictDetector = new ConflictDetector(endpoint, limiter);
+    this.conflictDetector = new ConflictDetector(client, limiter);
   }
 
   /**
@@ -145,21 +146,13 @@ export class SemanticClusterer {
       .replace('{{memories}}', memoriesText);
 
     try {
-      const result = await this.limiter.execute(async () => {
-        const response = await fetch(`${this.endpoint}/completion`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt: prompt,
-            n_predict: 500,
-            temperature: 0.2,
-            top_p: 0.9,
-          }),
-        });
-        return await response.json();
-      }) as any;
-
-      const output = (result.content || result.generated_text || '').trim();
+      const output = await this.limiter.execute(async () => {
+        return await this.client.complete(
+          prompt,
+          'clusterer',
+          { temperature: 0.2, maxTokens: 500 }
+        );
+      }) as string;
       const clusters = this.parseClusters(output, memories);
 
       const clusteredCount = clusters.reduce((sum, c) => sum + c.memoryIndices.length, 0);
@@ -208,21 +201,13 @@ export class SemanticClusterer {
       .replace('{{memories}}', memoriesText) + entitiesContext;
 
     try {
-      const result = await this.limiter.execute(async () => {
-        const response = await fetch(`${this.endpoint}/completion`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt: prompt,
-            n_predict: 500,
-            temperature: 0.2,
-            top_p: 0.9,
-          }),
-        });
-        return await response.json();
-      }) as any;
-
-      const output = (result.content || result.generated_text || '').trim();
+      const output = await this.limiter.execute(async () => {
+        return await this.client.complete(
+          prompt,
+          'clusterer',
+          { temperature: 0.2, maxTokens: 500 }
+        );
+      }) as string;
       return this.parseMergeResult(output);
     } catch (error: any) {
       logError(`[SemanticClusterer] Merge failed: ${error.message}`);

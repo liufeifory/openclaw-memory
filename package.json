@@ -8,7 +8,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "node dist/test-full.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:surreal": "node dist/test-surreal.js",
     "test:recall": "node dist/test-recall.js",
     "test:conflict": "node dist/test-conflict.js",
@@ -24,9 +25,12 @@
     "test:semantic-splitter": "node dist/test-semantic-splitter.js",
     "test:document-watcher": "node dist/test-document-watcher.js",
     "test:url-importer": "node dist/test-url-importer.js",
+    "import:docs": "node scripts/import-documents.js",
     "clean": "rm -rf dist/"
   },
   "dependencies": {
+    "@sinclair/typebox": "^0.34.48",
+    "better-sqlite3": "^12.8.0",
     "chokidar": "^3.6.0",
     "mammoth": "^1.7.0",
     "node-fetch": "^3.3.2",
@@ -34,9 +38,10 @@
     "surrealdb": "^2.0.2"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^22.19.15",
     "@types/pdf-parse": "^1.1.5",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.1"
   },
   "peerDependencies": {
     "openclaw": ">=2026.3.11"

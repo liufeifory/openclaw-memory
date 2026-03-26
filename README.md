@@ -89,12 +89,13 @@ tail -f ~/.openclaw/logs/gateway.log | grep memory
 │           Node.js 插件 (dist/index.js)                       │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
 │  │MemoryFilter  │  │MemoryManager │  │Preference        │   │
-│  │(LLM 8081)    │  │(SurrealDB)   │  │Extractor         │   │
-│  │消息分类       │  │原生图数据库   │  │(LLM 8081)        │   │
+│  │(LLM 云端)     │  │(SurrealDB)   │  │Extractor(云端)   │   │
+│  │消息分类       │  │原生图数据库   │  │偏好提取          │   │
 │  └──────────────┘  └──────────────┘  └──────────────────┘   │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
 │  │Summarizer    │  │Reranker      │  │EntityIndexer     │   │
-│  │(LLM 8081)    │  │(LLM 8081)    │  │(图索引 + 冻结)     │   │
+│  │(LLM 云端)     │  │(LLM 7B)      │  │(图索引 + 冻结)     │   │
+│  │对话摘要       │  │结果重排序     │  │                 │   │
 │  └──────────────┘  └──────────────┘  └──────────────────┘   │
 │  ┌──────────────┐  ┌──────────────┐                         │
 │  │Hybrid        │  │Conflict      │                         │
@@ -108,9 +109,7 @@ tail -f ~/.openclaw/logs/gateway.log | grep memory
 │  llama.cpp      │  │  SurrealDB 2.x                          │
 │  - BGE-M3 (8080)│  │  - 原生图数据库 (RELATE 建边)            │
 │    Embedding    │  │  - 向量索引 + 图遍历                     │
-│  - Llama-3.2-1B │  │  - 自动 TTL 清理                         │
-│    (8081)       │  │                                         │
-│  - Qwen2.5-7B   │  │                                         │
+│  - Qwen2.5-7B   │  │  - 自动 TTL 清理                         │
 │    (8082)       │  │                                         │
 └─────────────────┘  └─────────────────────────────────────────┘
 ```
@@ -119,9 +118,9 @@ tail -f ~/.openclaw/logs/gateway.log | grep memory
 
 - **纯 Node.js 实现** - 无 Python 依赖
 - **Hooks 自动触发** - `message_received` 存储消息，`before_prompt_build` 注入上下文
-- **LLM 调用** - 使用本地 llama.cpp (8081 端口) 进行消息分类、偏好提取、对话摘要
+- **LLM 调用** - 消息分类、偏好提取、对话摘要使用云端 LLM；实体提取、冲突检测、Reranker 使用本地 7B 模型
 - **Embedding** - 使用 BGE-M3 (8080 端口) 生成 1024 维向量
-- **7B 模型** - Qwen2.5-Coder-7B (8082 端口) 用于实体提取/三元组精炼
+- **7B 模型** - Qwen2.5-Coder-7B (8082 端口) 用于实体提取/三元组精炼/冲突检测/Reranker
 - **SurrealDB** - 原生图数据库后端，支持图遍历和混合检索
 
 ---
@@ -370,17 +369,10 @@ llama-server \
   --port 8080 \
   --ctx-size 8192 &
 
-# LLM 服务 (Llama-3.2-1B-Instruct)
+# 7B 模型服务 (Qwen2.5-Coder-7B-Instruct) - 实体提取/三元组精炼/冲突检测/Reranker
 llama-server \
-  --hf-repo bartowski/Llama-3.2-1B-Instruct-GGUF \
-  --hf-file Llama-3.2-1B-Instruct-Q8_0.gguf \
-  --port 8081 \
-  --ctx-size 1024 \
-  --n-gpu-layers 99 &
-
-# 7B 模型服务 (Qwen2.5-Coder-7B-Instruct) - 实体提取/三元组精炼
-llama-server \
-  --model ~/Library/Caches/llama.cpp/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
+  --hf-repo bartowski/Qwen2.5-Coder-7B-Instruct-GGUF \
+  --hf-file Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
   --port 8082 \
   --ctx-size 32768 \
   --n-gpu-layers 99 \
@@ -447,7 +439,7 @@ brew services logs llama-server
 | SurrealDB 连接失败 | `brew services restart surrealdb` |
 | 记忆检索结果为空 | 降低 `threshold` 至 0.5（正常，开始使用后会有数据） |
 | Hook 超时警告 | 正常现象，不影响功能；可增加 `timeout_ms` 配置 |
-| LLM 分类失败 | 检查 8081 端口：`curl http://localhost:8081` |
+| LLM 分类失败 | 检查 8082 端口：`curl http://localhost:8082` |
 | 实体索引延迟 | 检查后台队列：查看日志中 EntityIndexer 状态 |
 
 ---
@@ -523,10 +515,13 @@ npm run test:url-importer         # URL 导入器测试
 
 | 操作 | 延迟 (P50) | 延迟 (P99) |
 |------|-----------|-----------|
-| 消息分类 (LLM) | 200ms | 600ms |
+| 消息分类 (LLM) | 800ms | 1500ms |
 | 记忆检索 | 50ms | 300ms |
-| 偏好提取 (LLM) | 800ms | 1500ms |
-| 对话摘要 (LLM) | 800ms | 1500ms |
+| 偏好提取 (云端 LLM) | 500ms | 1200ms |
+| 对话摘要 (云端 LLM) | 500ms | 1200ms |
+| 实体提取 (7B) | 800ms | 1500ms |
+| 冲突检测 (7B) | 300ms | 800ms |
+| Reranker (7B) | 200ms | 500ms |
 | 上下文注入 | <100ms | <200ms |
 
 ### 资源消耗
@@ -535,9 +530,10 @@ npm run test:url-importer         # URL 导入器测试
 |------|------|-----|
 | 插件进程 | ~50MB | 低 |
 | BGE-M3 (8080) | ~500MB | 中（推理时） |
-| Llama-3.2-1B (8081) | ~1GB | 中（推理时） |
 | Qwen2.5-Coder-7B (8082) | ~4GB | 中（推理时） |
 | SurrealDB | ~150MB | 低 |
+
+**总计：** 约 5GB 内存（模型全加载）
 
 ---
 
@@ -564,8 +560,9 @@ npm run test:url-importer         # URL 导入器测试
 - ✅ **完整测试覆盖** - 4 个测试文件，所有测试通过
 
 ### v2.3.0 (2026-03)
-- ✅ **7B 模型支持** - Qwen2.5-Coder-7B 用于实体提取和三元组精炼
-- ✅ **三层实体提取漏斗** - Regex → 1B 模型 → 7B 模型，性能提升 80%
+- ✅ **1B 模型清理** - 迁移到 7B 模型和云端 LLM，减少本地资源占用
+- ✅ **7B 模型增强** - Qwen2.5-Coder-7B 用于实体提取、冲突检测、Reranker
+- ✅ **云端 LLM 集成** - 偏好提取、对话摘要使用云端 LLM
 - ✅ **launchd 服务配置** - 7B 模型开机自启动配置
 - ✅ **文档更新** - 本地部署、服务配置、架构说明完善
 
@@ -577,7 +574,7 @@ npm run test:url-importer         # URL 导入器测试
 - ✅ **Super Node 冻结** - 高频实体自动冻结，防止图爆炸
 - ✅ **TTL Pruning** - 7 天未访问的实体自动清理
 - ✅ **异步写入架构** - 消息队列 + 后台 Worker，非阻塞写入
-- ✅ **三层实体提取** - Layer 1 (Regex) → Layer 2 (1B 模型) → Layer 3 (8B 模型)
+- ✅ **两层实体提取** - Layer 1 (Regex) → Layer 2 (7B 模型)
 
 ### v2.1.0 (2026-03)
 - ✅ 新增冲突检测模块

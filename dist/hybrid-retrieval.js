@@ -15,6 +15,7 @@
  * 8. Return topK
  */
 import { EntityExtractor } from './entity-extractor.js';
+import { LLMClient } from './llm-client.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
 /**
  * HybridRetriever - combines vector and graph search
@@ -30,7 +31,9 @@ export class HybridRetriever {
         this.embedding = embedding;
         this.entityIndexer = entityIndexer;
         this.reranker = reranker;
-        this.entityExtractor = new EntityExtractor();
+        // Create a minimal LLMClient for EntityExtractor
+        const minimalClient = new LLMClient({ localEndpoint: 'http://localhost:8082' });
+        this.entityExtractor = new EntityExtractor(minimalClient);
     }
     /**
      * Get database client (for Stage 2 multi-degree retrieval)

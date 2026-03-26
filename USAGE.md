@@ -32,7 +32,7 @@ curl http://localhost:8000/rpc
 curl http://localhost:8080/embedding -X POST -d '{"input":"test"}'
 
 # 4. 检查 LLM 服务
-curl http://localhost:8081/
+curl http://localhost:8082/
 ```
 
 ### 安装
@@ -184,9 +184,8 @@ tail -f ~/.openclaw/logs/gateway.log | grep memory
 ### 5. 实体自动提取
 
 所有存储的消息自动：
-- Layer 1: 正则匹配名词库
-- Layer 2: 1B 模型过滤
-- Layer 3: 7B 模型精炼提取
+- Layer 1: 正则匹配名词库（~5ms，覆盖率 ~60%）
+- Layer 2: 7B 模型精炼提取（~1000ms，覆盖率 ~95%+）
 
 **无需手动操作**
 
@@ -237,14 +236,26 @@ cp ~/Downloads/article.pdf ~/.openclaw/documents/
 **方式 2：使用 URL 导入**
 
 ```
-@document_import url="https://example.com/article"
+@document_import {"url": "https://example.com/article"}
 ```
 
-**方式 3：使用 CLI**
+**方式 3：批量导入脚本**
+
+使用 `import-documents.js` 脚本批量导入 `~/.openclaw/documents` 目录中的所有文档：
 
 ```bash
-node dist/memory-cli.ts import-document ./test.pdf
+cd ~/.openclaw/plugins/openclaw-memory
+npm run import:docs
+# 或
+node scripts/import-documents.js
 ```
+
+脚本会自动：
+- 扫描 `~/.openclaw/documents` 目录
+- 解析所有支持的文档格式（PDF、Word、Markdown）
+- 使用智能语义分段
+- 将每个片段存储到记忆系统
+- 显示导入统计信息
 
 ### 手动查看统计
 
@@ -279,11 +290,18 @@ node dist/memory-cli.ts stats
 # 列出记忆
 node dist/memory-cli.ts list --limit=10
 
-# 导入文档
-node dist/memory-cli.ts import-document ./test.pdf
-
 # 清理旧记忆
 node dist/memory-cli.ts cleanup --days=30
+```
+
+### 批量导入脚本
+
+```bash
+# 导入 ~/.openclaw/documents 目录中的所有文档
+cd ~/.openclaw/plugins/openclaw-memory
+npm run import:docs
+# 或
+node scripts/import-documents.js
 ```
 
 ### services.sh (服务管理)
@@ -475,11 +493,11 @@ tail -f ~/.openclaw/logs/llama-server.log
 #### 5. LLM 分类失败
 
 ```bash
-# 检查 8081 端口
-curl http://localhost:8081
+# 检查 8082 端口
+curl http://localhost:8082
 
 # 查看模型状态
-curl http://localhost:8081/health
+curl http://localhost:8082/health
 ```
 
 ### 日志位置

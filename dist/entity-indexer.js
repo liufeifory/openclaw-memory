@@ -14,6 +14,7 @@ import { GRAPH_PROTECTION, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE } f
 import { EntityExtractor } from './entity-extractor.js';
 import { extractContextWindow, diverseSample } from './context-window.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
+import { LLMClient } from './llm-client.js';
 import * as os from 'os';
 /**
  * Entity Indexer with graph explosion protection
@@ -47,7 +48,9 @@ export class EntityIndexer {
     extractor;
     constructor(db) {
         this.db = db || null;
-        this.extractor = new EntityExtractor();
+        // Create a minimal LLMClient for EntityExtractor (can be null for extraction-only mode)
+        const minimalClient = new LLMClient({ localEndpoint: 'http://localhost:8082' });
+        this.extractor = new EntityExtractor(minimalClient);
         // Start background queue processor
         this.startBackgroundProcessor();
         // Start TTL pruning scheduler
@@ -678,8 +681,8 @@ export class EntityIndexer {
                     const memorySnippets = await this.getMemorySnippets(memoryIds.slice(0, 3), [entityA.name, entityB.name]);
                     // Step 4: Build LLM prompt
                     const prompt = this.buildRelationClassificationPrompt(entityA.name, entityA.entity_type || 'unknown', entityB.name, entityB.entity_type || 'unknown', relation.weight || 1.0, memorySnippets);
-                    // Step 5: Call 7B LLM with timeout
-                    const llmResult = await this.extractor.call7B(prompt, 10000);
+                    // Step 5: Call LLM with timeout using EntityExtractor's client
+                    const llmResult = await this.extractor.completeJson(prompt, 'entity-indexer', { temperature: 0.3, maxTokens: 100 });
                     // Step 6: Parse and validate response
                     const classification = this.parseClassificationResponse(llmResult);
                     // Step 7: Update relation with classification

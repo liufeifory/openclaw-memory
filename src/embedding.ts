@@ -3,7 +3,7 @@
  * Supports BGE-style task_type parameter for query/document distinction.
  */
 
-import { logWarn } from './maintenance-logger.js';
+import { logWarn, logInfo, logError } from './maintenance-logger.js';
 
 export interface EmbeddingResponse {
   embedding: number[];
@@ -36,31 +36,52 @@ export class EmbeddingService {
       inputText = prefixes[taskType] + text;
     }
 
-    const response = await fetch(`${this.endpoint}/embedding`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: inputText }),
-    });
+    logInfo(`[embedding] Calling ${this.endpoint}/embedding with text: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
 
-    const result: any = await response.json();
+    try {
+      const response = await fetch(`${this.endpoint}/embedding`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: inputText }),
+      });
 
-    // Handle nested array format from llama.cpp
-    // Format: [{index: 0, embedding: [[...]]}]
-    if (Array.isArray(result)) {
-      let emb = result[0]?.embedding;
-      // Unwrap nested arrays (could be [[[...]]] or [[...]])
+      logInfo(`[embedding] HTTP response status: ${response.status} ${response.statusText}`);
+
+      if (!response.ok) {
+        logWarn(`[embedding] HTTP error: ${response.status} ${response.statusText}`);
+        return [];
+      }
+
+      const result: any = await response.json();
+      logInfo(`[embedding] Response type: ${Array.isArray(result) ? 'array' : typeof result}`);
+
+      // Handle nested array format from llama.cpp
+      // Format: [{index: 0, embedding: [[...]]}]
+      if (Array.isArray(result)) {
+        let emb = result[0]?.embedding;
+        logInfo(`[embedding] Array format, embedding exists: ${!!emb}, length: ${Array.isArray(emb) ? emb.length : 'N/A'}`);
+        // Unwrap nested arrays (could be [[[...]]] or [[...]])
+        while (Array.isArray(emb) && Array.isArray(emb[0])) {
+          emb = emb[0];
+        }
+        const unwrapped = emb || [];
+        logInfo(`[embedding] Unwrapped length: ${unwrapped.length}, first value: ${unwrapped[0]}`);
+        return this.normalize(unwrapped);
+      }
+
+      // Format: {embedding: [[...]]}
+      logInfo(`[embedding] Object format, embedding exists: ${!!result.embedding}`);
+      let emb = result.embedding;
       while (Array.isArray(emb) && Array.isArray(emb[0])) {
         emb = emb[0];
       }
-      return this.normalize(emb || []);
+      const unwrapped = emb || [];
+      logInfo(`[embedding] Unwrapped length: ${unwrapped.length}, first value: ${unwrapped[0]}`);
+      return this.normalize(unwrapped);
+    } catch (error: any) {
+      logError(`[embedding] Fetch error: ${error.message}`);
+      return [];
     }
-
-    // Format: {embedding: [[...]]}
-    let emb = result.embedding;
-    while (Array.isArray(emb) && Array.isArray(emb[0])) {
-      emb = emb[0];
-    }
-    return this.normalize(emb || []);
   }
 
   /**

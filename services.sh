@@ -13,10 +13,9 @@ SCRIPT_NAME="$(basename "$0")"
 # Service configuration
 LLAMA_SERVER_LABEL="io.github.liufei.llama-server"
 LLAMA_EMBEDDING_LABEL="io.github.liufei.llama-server-embedding"
-LLAMA_LLM_LABEL="io.github.liufei.llama-server-llm"
+LLAMA_7B_LABEL="io.github.liufei.llama-server-7b"
 SURREALDB_LABEL="io.github.liufei.surrealdb"
 LLAMA_SERVER_PORT=8080
-LLAMA_LLM_PORT=8081
 LLAMA_7B_PORT=8082
 SURREALDB_PORT=8000
 
@@ -64,13 +63,12 @@ OpenClaw Memory Services Manager
   stop           停止所有服务
   restart        重启所有服务
   status         查看服务状态
-  logs [target]  查看日志 (all|embedding|llm|7b|surrealdb)
+  logs [target]  查看日志 (all|embedding|7b|surrealdb)
 
 示例:
   $SCRIPT_NAME start          # 启动所有服务
   $SCRIPT_NAME status         # 查看状态
   $SCRIPT_NAME logs embedding # 只看 Embedding 服务日志
-  $SCRIPT_NAME logs llm       # 只看 1B LLM 服务日志
   $SCRIPT_NAME logs 7b        # 只看 7B LLM 服务日志
   $SCRIPT_NAME logs surrealdb # 只看 SurrealDB 日志
 
@@ -150,17 +148,8 @@ show_status() {
     fi
     echo ""
 
-    echo "LLAMA-SERVER (LLM Llama-3.2-1B @ 端口 $LLAMA_LLM_PORT):"
-    if check_service "$LLAMA_LLM_LABEL"; then
-        echo -e "  ${GREEN}✓ 运行中${NC}"
-        show_health $LLAMA_LLM_PORT "llama-server-llm"
-    else
-        echo -e "  ${RED}✗ 未运行${NC}"
-    fi
-    echo ""
-
     echo "LLAMA-SERVER (LLM Qwen2.5-7B @ 端口 $LLAMA_7B_PORT):"
-    if check_service "io.github.liufei.llama-server-7b"; then
+    if check_service "$LLAMA_7B_LABEL"; then
         echo -e "  ${GREEN}✓ 运行中${NC}"
         show_health $LLAMA_7B_PORT "llama-server-7b"
     else
@@ -181,13 +170,11 @@ show_status() {
 show_logs() {
     local target=${1:-all}
     local embedding_log="$HOME/Library/Logs/llama-server-embedding.log"
-    local llm_log="$HOME/Library/Logs/llama-server-llm.log"
     local llm_7b_log="$HOME/Library/Logs/llama-server-7b.log"
     local surrealdb_log="$HOME/Library/Logs/surrealdb.log"
 
     if [ "$OS" = "linux" ]; then
         embedding_log="$HOME/.local/log/llama-server-embedding.log"
-        llm_log="$HOME/.local/log/llama-server-llm.log"
         llm_7b_log="$HOME/.local/log/llama-server-7b.log"
         surrealdb_log="$HOME/.local/log/surrealdb.log"
     fi
@@ -196,10 +183,6 @@ show_logs() {
         embedding|8080)
             echo "=== Embedding 服务日志 ($embedding_log) ==="
             tail -fn 100 "$embedding_log"
-            ;;
-        llm|llm-1b|8081)
-            echo "=== 1B LLM 服务日志 ($llm_log) ==="
-            tail -fn 100 "$llm_log"
             ;;
         7b|llm-7b|8082)
             echo "=== 7B LLM 服务日志 ($llm_7b_log) ==="
@@ -211,7 +194,7 @@ show_logs() {
             ;;
         *)
             echo "=== 实时日志流 ==="
-            tail -f "$embedding_log" "$llm_log" "$llm_7b_log" "$surrealdb_log" 2>/dev/null
+            tail -f "$embedding_log" "$llm_7b_log" "$surrealdb_log" 2>/dev/null
             ;;
     esac
 }
@@ -220,9 +203,7 @@ start_all() {
     log_info "启动 OpenClaw Memory 服务..."
     start_service "$LLAMA_EMBEDDING_LABEL" "llama-server-embedding (BGE-M3)"
     sleep 2
-    start_service "$LLAMA_LLM_LABEL" "llama-server-llm (Llama-3.2-1B)"
-    sleep 2
-    start_service "io.github.liufei.llama-server-7b" "llama-server-7b (Qwen2.5-7B)"
+    start_service "$LLAMA_7B_LABEL" "llama-server-7b (Qwen2.5-7B)"
     sleep 2
     start_service "$SURREALDB_LABEL" "SurrealDB"
     sleep 2
@@ -235,8 +216,7 @@ start_all() {
 stop_all() {
     log_info "停止 OpenClaw Memory 服务..."
     stop_service "$SURREALDB_LABEL" "SurrealDB"
-    stop_service "io.github.liufei.llama-server-7b" "llama-server-7b (Qwen2.5-7B)"
-    stop_service "$LLAMA_LLM_LABEL" "llama-server-llm (Llama-3.2-1B)"
+    stop_service "$LLAMA_7B_LABEL" "llama-server-7b (Qwen2.5-7B)"
     stop_service "$LLAMA_EMBEDDING_LABEL" "llama-server-embedding (BGE-M3)"
     echo ""
     log_success "所有服务已停止"

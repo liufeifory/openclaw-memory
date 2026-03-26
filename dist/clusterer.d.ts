@@ -11,6 +11,7 @@
  * - Conflict detection via conflict-detector.ts
  */
 import { LLMLimiter } from './llm-limiter.js';
+import { LLMClient } from './llm-client.js';
 export interface ClusteredMemory {
     theme: string;
     memoryIndices: number[];
@@ -41,11 +42,11 @@ export interface HierarchyConfig {
     reflectionThreshold: number;
 }
 export declare class SemanticClusterer {
-    private endpoint;
+    private client;
     private limiter;
     private conflictDetector;
     private entityPatterns;
-    constructor(endpoint?: string, limiter?: LLMLimiter);
+    constructor(client: LLMClient, limiter?: LLMLimiter);
     /**
      * Cluster memories by semantic similarity.
      * Only clusters memories with similarity > 0.9.

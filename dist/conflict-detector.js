@@ -1,7 +1,8 @@
 /**
- * Conflict Detector using Llama-3.2-1B-Instruct
+ * Conflict Detector using LLM
  *
  * Detects contradictory memories and marks old ones with superseded_by tag.
+ * Uses local 7B model by default (high-frequency task).
  */
 import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
@@ -24,10 +25,10 @@ Statement B: "{{new}}"
 
 Answer:`;
 export class ConflictDetector {
-    endpoint;
+    client;
     limiter;
-    constructor(endpoint = 'http://localhost:8081', limiter) {
-        this.endpoint = endpoint;
+    constructor(client, limiter) {
+        this.client = client;
         this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     }
     /**
@@ -68,21 +69,10 @@ export class ConflictDetector {
             .replace('{{old}}', oldStatement)
             .replace('{{new}}', newStatement);
         try {
-            const result = await this.limiter.execute(async () => {
-                const response = await fetch(`${this.endpoint}/completion`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        prompt: prompt,
-                        n_predict: 10,
-                        temperature: 0.3, // Slightly higher for better reasoning
-                        top_p: 0.9,
-                    }),
-                });
-                return await response.json();
+            const output = await this.limiter.execute(async () => {
+                return await this.client.complete(prompt, 'conflict-detector', { temperature: 0.3, maxTokens: 10 });
             });
-            const output = (result.content || result.generated_text || '').toString().trim().toUpperCase();
-            const llmResult = output.includes('YES');
+            const llmResult = output.toUpperCase().includes('YES');
             // Fallback: keyword-based conflict detection for common patterns
             if (!llmResult) {
                 const keywordConflict = this.checkKeywordConflict(oldStatement, newStatement);

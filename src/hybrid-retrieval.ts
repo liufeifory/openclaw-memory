@@ -20,6 +20,7 @@ import { EmbeddingService } from './embedding.js';
 import { EntityIndexer } from './entity-indexer.js';
 import { Reranker, RerankResult } from './reranker.js';
 import { EntityExtractor, ExtractedEntity } from './entity-extractor.js';
+import { LLMClient } from './llm-client.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
 
 /**
@@ -85,7 +86,9 @@ export class HybridRetriever {
     this.embedding = embedding;
     this.entityIndexer = entityIndexer;
     this.reranker = reranker;
-    this.entityExtractor = new EntityExtractor();
+    // Create a minimal LLMClient for EntityExtractor
+    const minimalClient = new LLMClient({ localEndpoint: 'http://localhost:8082' });
+    this.entityExtractor = new EntityExtractor(minimalClient);
   }
 
   /**
