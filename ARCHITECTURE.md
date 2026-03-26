@@ -495,14 +495,7 @@ DEFINE FIELD embedding ON topic TYPE array<number>;  -- 1024 维向量
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `backend` | string | `pgvector` | 后端类型：`pgvector` / `qdrant` / `surrealdb` |
-| `database.host` | string | `localhost` | PostgreSQL 主机 |
-| `database.port` | number | `5432` | PostgreSQL 端口 |
-| `database.database` | string | `openclaw_memory` | 数据库名 |
-| `database.user` | string | - | 数据库用户 |
-| `database.password` | string | `""` | 数据库密码 |
-| `qdrant.url` | string | `http://localhost:6333` | Qdrant 地址 |
-| `qdrant.apiKey` | string | `""` | Qdrant API 密钥 |
+| `backend` | string | `surrealdb` | 后端类型：`surrealdb` |
 | `surrealdb.url` | string | `ws://localhost:8000/rpc` | SurrealDB RPC 地址 |
 | `surrealdb.namespace` | string | `openclaw` | SurrealDB 命名空间 |
 | `surrealdb.database` | string | `memory` | SurrealDB 数据库名 |
@@ -823,8 +816,7 @@ interface ContextBuilder {
 | 插件进程 | ~50MB | 低 |
 | BGE-M3 (8080) | ~500MB | 中（推理时） |
 | Llama-3.2-1B (8081) | ~1GB | 中（推理时） |
-| PostgreSQL | ~100MB | 低 |
-| Qdrant | ~200MB | 低 |
+| SurrealDB | ~150MB | 低 |
 
 ---
 
@@ -899,7 +891,6 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
 npm run test:features    # 功能测试
 npm run test:recall      # 召回率测试
 npm run test:conflict    # 冲突检测测试
-npm run test:qdrant      # Qdrant 后端测试
 ```
 
 ### 手动测试
@@ -940,10 +931,7 @@ node dist/memory-cli.ts stats
 **架构变化：**
 
 ```typescript
-// 之前：PostgreSQL/Qdrant 双后端
-MemoryManager → PostgreSQL (pgvector) / Qdrant
-
-// 现在：新增 SurrealDB 原生支持
+// 现在：SurrealDB 原生图数据库 + 向量索引
 MemoryManager → SurrealDB (原生图数据库 + 向量索引)
 ```
 
@@ -1030,6 +1018,7 @@ MemoryManager → SurrealDB (原生图数据库 + 向量索引)
 ```
 
 **使用方式：**
+
 ```typescript
 // 1. 目录监控模式
 const watcher = chokidar.watch('~/.openclaw/documents');
@@ -1037,7 +1026,29 @@ watcher.on('add', path => importDocument(path));
 
 // 2. URL 导入
 await urlImporter.import('https://example.com/article');
+
+// 3. 批量导入脚本
+// cd ~/.openclaw/plugins/openclaw-memory
+// npm run import:docs
 ```
+
+### 批量导入脚本
+
+`scripts/import-documents.js` 提供批量导入功能：
+
+```bash
+# 运行批量导入
+npm run import:docs
+
+# 或手动执行
+node scripts/import-documents.js
+```
+
+**功能：**
+- 自动扫描 `~/.openclaw/documents` 目录
+- 从 `openclaw.json` 加载配置（chunkSize、chunkOverlap）
+- 批量解析并导入所有支持的文档
+- 显示导入统计信息
 
 ### 冲突检测优化
 

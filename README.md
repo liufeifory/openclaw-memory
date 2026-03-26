@@ -177,7 +177,7 @@ importance = 0.5 × base_importance
 ### 检索流程
 
 1. 查询文本 → BGE-M3 Embedding (1024 维向量)
-2. pgvector/Qdrant HNSW 相似度搜索
+2. SurrealDB 向量索引 + 图遍历混合检索
 3. 过滤阈值 <0.6 的结果
 4. 按 `similarity × importance` 排序
 5. 返回 Top 5
@@ -231,27 +231,6 @@ importance = 0.5 × base_importance
 | `documentImport.chunkSize` | 语义分段目标大小 | 500 |
 | `documentImport.chunkOverlap` | 段落重叠字符数 | 50 |
 
-#### Qdrant 配置（已弃用）
-
-```json
-{
-  "plugins": {
-    "slots": {
-      "memory": "openclaw-memory"
-    },
-    "openclaw-memory": {
-      "backend": "qdrant",
-      "qdrant": {
-        "url": "http://localhost:6333"
-      },
-      "embedding": {
-        "endpoint": "http://localhost:8080"
-      }
-    }
-  }
-}
-```
-
 ### 环境变量（可选）
 
 ```bash
@@ -302,6 +281,17 @@ cp ~/Downloads/article.pdf ~/.openclaw/documents/
 @document_import {"path": "~/Documents/report.pdf"}
 ```
 
+#### 方式三：批量导入脚本
+
+使用 `import-documents.js` 脚本批量导入当前文档目录中的所有文件：
+
+```bash
+cd ~/.openclaw/plugins/openclaw-memory
+node import-documents.js
+```
+
+脚本会自动扫描 `~/.openclaw/documents` 目录，导入所有支持的文档格式。
+
 #### 支持的格式
 
 | 格式 | 扩展名 | 说明 |
@@ -310,6 +300,16 @@ cp ~/Downloads/article.pdf ~/.openclaw/documents/
 | Word | `.docx` | 使用 mammoth 解析 |
 | Markdown | `.md`, `.markdown` | 直接读取文本 |
 | HTML | URL | 从网页提取文本内容 |
+
+#### 智能语义分段
+
+文档导入时使用**智能语义分段**技术：
+
+1. **段落边界** - 优先保持文档原有结构
+2. **句子边界** - 避免在句子中间切断
+3. **语义相似性** - 使用关键词重叠检测主题变化
+
+确保每个文本块在语义上是连贯的，检索效果更准确。
 
 详细文档请参阅 [docs/DOCUMENT_IMPORT.md](docs/DOCUMENT_IMPORT.md)
 
@@ -570,7 +570,7 @@ npm run test:url-importer         # URL 导入器测试
 - ✅ **文档更新** - 本地部署、服务配置、架构说明完善
 
 ### v2.2.0 (2026-03)
-- ✅ **SurrealDB 后端** - 原生图数据库支持，取代 PostgreSQL/Qdrant
+- ✅ **SurrealDB 后端** - 原生图数据库支持
 - ✅ **实体索引器** - LLM 自动提取人名/地名/组织，构建图节点
 - ✅ **混合检索** - 向量检索 + 图遍历 + Reranker 重排序
 - ✅ **图遍历检索** - 从查询实体出发，多跳遍历相关实体
@@ -580,10 +580,9 @@ npm run test:url-importer         # URL 导入器测试
 - ✅ **三层实体提取** - Layer 1 (Regex) → Layer 2 (1B 模型) → Layer 3 (8B 模型)
 
 ### v2.1.0 (2026-03)
-- ✅ 新增 Qdrant 后端支持
 - ✅ 新增冲突检测模块
 - ✅ 优化重排序算法
-- ✅ 修复 pgvector 索引问题
+- ✅ 修复 SurrealDB 索引问题
 
 ### v2.0.0 (2026-02)
 - ✅ 重构为纯 TypeScript 实现（移除 Python 依赖）

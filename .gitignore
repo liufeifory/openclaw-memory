@@ -28,7 +28,6 @@ logs/
 *.sqlite3
 
 # Runtime directories
-qdrant/
 llama.cpp/
 
 # Git worktrees

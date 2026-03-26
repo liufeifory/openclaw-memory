@@ -116,39 +116,6 @@ OpenClaw 配置文件：`~/.openclaw/config.json`
 | `database.password` | string | 否 | `""` | 数据库密码 |
 | `embedding.endpoint` | string | 是 | `http://localhost:8080` | Embedding 服务地址 |
 
-### Qdrant 配置
-
-```json
-{
-  "plugins": {
-    "slots": {
-      "memory": "openclaw-memory"
-    },
-    "openclaw-memory": {
-      "backend": "qdrant",
-      "qdrant": {
-        "url": "http://localhost:6333",
-        "port": 6333,
-        "apiKey": ""
-      },
-      "embedding": {
-        "endpoint": "http://localhost:8080"
-      }
-    }
-  }
-}
-```
-
-**参数说明：**
-
-| 字段 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| `backend` | string | 是 | `qdrant` | 后端类型 |
-| `qdrant.url` | string | 是 | `http://localhost:6333` | Qdrant 服务地址 |
-| `qdrant.port` | number | 否 | `6333` | Qdrant 端口 |
-| `qdrant.apiKey` | string | 否 | `""` | API 密钥（如有） |
-| `embedding.endpoint` | string | 是 | `http://localhost:8080` | Embedding 服务地址 |
-
 ---
 
 ## 🔍 检索配置
@@ -520,6 +487,78 @@ importance = base_importance × 0.5
     }
   }
 }
+```
+
+---
+
+## 📄 文档导入配置
+
+### 目录监控模式
+
+```json
+{
+  "plugins": {
+    "openclaw-memory": {
+      "documentImport": {
+        "watchDir": "~/.openclaw/documents",
+        "chunkSize": 500,
+        "chunkOverlap": 50
+      }
+    }
+  }
+}
+```
+
+**参数说明：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `watchDir` | string | 无 | 监控目录路径，文件放入自动导入 |
+| `chunkSize` | number | `500` | 语义分段目标字符数 |
+| `chunkOverlap` | number | `50` | 段落重叠字符数，保持上下文连贯 |
+
+**支持的文件格式：**
+
+| 格式 | 扩展名 | 解析库 |
+|------|--------|--------|
+| PDF | `.pdf` | pdf-parse |
+| Word | `.docx` | mammoth |
+| Markdown | `.md`, `.markdown` | 内置 |
+
+**使用方式：**
+
+```bash
+# 1. 创建监控目录
+mkdir -p ~/.openclaw/documents
+
+# 2. 放入文件（自动导入）
+cp ~/Downloads/manual.pdf ~/.openclaw/documents/
+
+# 3. 查看日志确认导入
+tail -f ~/.openclaw/logs/gateway.log | grep -i document
+```
+
+### document_import 工具
+
+无需配置监控目录，可直接使用 `document_import` 工具导入：
+
+**从 URL 导入：**
+```
+@document_import {"url": "https://example.com/article"}
+```
+
+**从本地文件导入：**
+```
+@document_import {"path": "~/Documents/report.pdf"}
+```
+
+### 批量导入脚本
+
+使用 `import-documents.js` 脚本批量导入：
+
+```bash
+cd ~/.openclaw/plugins/openclaw-memory
+node import-documents.js
 ```
 
 ---
