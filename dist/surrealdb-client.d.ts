@@ -11,12 +11,14 @@ export interface SurrealConfig {
 declare const MEMORY_TABLE = "memory";
 declare const ENTITY_TABLE = "entity";
 declare const ENTITY_RELATION_TABLE = "entity_relation";
+declare const DOCUMENTS_TABLE = "documents";
+declare const DOCUMENT_IMPORT_STATE_TABLE = "document_import_state";
 declare const TOPIC_TABLE = "topic";
 declare const TOPIC_MEMORY_TABLE = "topic_memory";
 declare const ENTITY_ALIAS_TABLE = "entity_alias";
 declare const TOPIC_SOFT_LIMIT = 400;
 declare const TOPIC_HARD_LIMIT = 500;
-export { TOPIC_TABLE, TOPIC_MEMORY_TABLE, ENTITY_ALIAS_TABLE, TOPIC_SOFT_LIMIT, TOPIC_HARD_LIMIT, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE };
+export { TOPIC_TABLE, TOPIC_MEMORY_TABLE, ENTITY_ALIAS_TABLE, TOPIC_SOFT_LIMIT, TOPIC_HARD_LIMIT, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE, DOCUMENTS_TABLE, DOCUMENT_IMPORT_STATE_TABLE };
 export interface EntityStats {
     total_entities: number;
     by_type: Record<string, number>;
@@ -331,5 +333,49 @@ export declare class SurrealDatabase {
         min_weight: number;
         by_type: Record<string, number>;
     }>;
+    /**
+     * Check if a document has been imported
+     * @param filePath - Absolute file path
+     * @returns Document import state or null if not found
+     */
+    getDocumentImportState(filePath: string): Promise<{
+        id?: string;
+        file_path: string;
+        file_hash?: string;
+        file_size?: number;
+        imported_at?: string;
+        chunks_count?: number;
+        entities_extracted: boolean;
+        relations_extracted: boolean;
+        status: string;
+        error?: string;
+    } | null>;
+    /**
+     * Update or create document import state
+     * @param filePath - Absolute file path
+     * @param updates - Fields to update
+     */
+    upsertDocumentImportState(filePath: string, updates: {
+        file_hash?: string;
+        file_size?: number;
+        chunks_count?: number;
+        entities_extracted?: boolean;
+        relations_extracted?: boolean;
+        status?: 'pending' | 'importing' | 'imported' | 'extracting_entities' | 'extracting_relations' | 'completed' | 'error';
+        error?: string;
+    }): Promise<void>;
+    /**
+     * Get documents pending import or extraction
+     * @param status - Filter by status
+     * @returns List of pending documents
+     */
+    getPendingDocuments(status?: string): Promise<Array<{
+        file_path: string;
+        file_size?: number;
+        chunks_count?: number;
+        entities_extracted: boolean;
+        relations_extracted: boolean;
+        status: string;
+    }>>;
 }
 //# sourceMappingURL=surrealdb-client.d.ts.map

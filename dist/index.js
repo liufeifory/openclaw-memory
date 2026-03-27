@@ -460,19 +460,30 @@ export default createPluginEntry({
             if (watchDir.startsWith('~/')) {
                 watchDir = watchDir.replace('~/', process.env.HOME + '/');
             }
-            // For document watcher, we need to initialize immediately
-            await ensureInitialized();
-            const mm = getMemoryManager(config);
-            const importer = createDocumentImporter(mm, {
-                watchDir,
-                chunkSize: docConfig.chunkSize,
-                chunkOverlap: docConfig.chunkOverlap,
+            // Document watcher starts asynchronously - does NOT block TUI startup
+            // Uses setImmediate to defer initialization until after register() returns
+            setImmediate(async () => {
+                try {
+                    await ensureInitialized();
+                    const mm = getMemoryManager(config);
+                    const importer = createDocumentImporter(mm, {
+                        watchDir,
+                        chunkSize: docConfig.chunkSize,
+                        chunkOverlap: docConfig.chunkOverlap,
+                    });
+                    documentWatcher = importer.watcher;
+                    await documentWatcher?.start(); // Non-blocking async start
+                    logInfo(`Document watcher started (async): ${watchDir}`);
+                }
+                catch (error) {
+                    logError(`Failed to start document watcher: ${error.message}`);
+                }
             });
-            documentWatcher = importer.watcher; // Store reference for cleanup
-            await documentWatcher?.start(); // Start watcher and wait for initial scan
-            logInfo(`Document watcher started: ${watchDir}`);
+            logInfo(`Document watcher scheduled to start asynchronously: ${watchDir}`);
         }
-        // Note: setImmediate above handles initialization for non-document-watcher mode
+        else {
+            // Note: setImmediate above handles initialization for non-document-watcher mode
+        }
         // Schedule auto-cleanup AFTER document watcher completes initial scan
         if (watchDir) {
             setTimeout(() => {

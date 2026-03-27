@@ -6,6 +6,13 @@
  * - Cloud providers (Aliyun Bailian, etc.)
  */
 import { logError, logWarn } from './maintenance-logger.js';
+// Tasks that MUST use local endpoint (never route to cloud)
+const LOCAL_ONLY_TASKS = new Set([
+    'entity-extractor',
+    'entity-indexer',
+    'relation-classifier',
+    'memory-filter',
+]);
 export class LLMClient {
     config;
     defaultOptions;
@@ -19,8 +26,12 @@ export class LLMClient {
     }
     /**
      * Check if a task should use cloud LLM
+     * Local-only tasks are never routed to cloud
      */
     shouldUseCloud(taskType) {
+        // Local-only tasks are NEVER routed to cloud
+        if (LOCAL_ONLY_TASKS.has(taskType))
+            return false;
         if (!this.config.cloudEnabled)
             return false;
         if (!this.config.cloudTasks)

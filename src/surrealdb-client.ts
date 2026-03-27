@@ -21,6 +21,10 @@ const RELATES_TABLE = 'relates';
 const VECTOR_DIMENSION = 1024;
 const SCHEMA_VERSION = 1;
 
+// Document import tracking
+const DOCUMENTS_TABLE = 'documents';
+const DOCUMENT_IMPORT_STATE_TABLE = 'document_import_state';
+
 // Stage 2: Co-occurrence threshold - minimum memories to form entity-entity relationship
 const CO_OCCURRENCE_THRESHOLD = 3;
 
@@ -33,7 +37,7 @@ const ENTITY_ALIAS_TABLE = 'entity_alias';
 const TOPIC_SOFT_LIMIT = 400;  // 80% threshold, trigger Topic creation
 const TOPIC_HARD_LIMIT = 500;  // 100% threshold, force freeze
 
-export { TOPIC_TABLE, TOPIC_MEMORY_TABLE, ENTITY_ALIAS_TABLE, TOPIC_SOFT_LIMIT, TOPIC_HARD_LIMIT, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE };
+export { TOPIC_TABLE, TOPIC_MEMORY_TABLE, ENTITY_ALIAS_TABLE, TOPIC_SOFT_LIMIT, TOPIC_HARD_LIMIT, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE, DOCUMENTS_TABLE, DOCUMENT_IMPORT_STATE_TABLE };
 
 export interface EntityStats {
   total_entities: number;
@@ -440,6 +444,37 @@ export class SurrealDatabase {
       DEFINE FIELD IF NOT EXISTS merged_at ON TABLE ${ENTITY_TABLE} TYPE option<datetime>;
     `);
     logInfo('Entity table extended');
+
+    // Document import state tracking table
+    await this.query(`
+      DEFINE TABLE IF NOT EXISTS ${DOCUMENT_IMPORT_STATE_TABLE} SCHEMAFULL;
+      DEFINE FIELD IF NOT EXISTS file_path ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} TYPE string;
+      DEFINE FIELD IF NOT EXISTS file_hash ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} TYPE option<string>;
+      DEFINE FIELD IF NOT EXISTS file_size ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} TYPE option<int>;
+      DEFINE FIELD IF NOT EXISTS imported_at ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} TYPE datetime DEFAULT time::now();
+      DEFINE FIELD IF NOT EXISTS chunks_count ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} TYPE option<int>;
+      DEFINE FIELD IF NOT EXISTS entities_extracted ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} TYPE bool DEFAULT false;
+      DEFINE FIELD IF NOT EXISTS relations_extracted ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} TYPE bool DEFAULT false;
+      DEFINE FIELD IF NOT EXISTS status ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} TYPE string DEFAULT 'pending';
+      DEFINE FIELD IF NOT EXISTS error ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} TYPE option<string>;
+    `);
+    logInfo('Document import state table defined');
+
+    try {
+      await this.query(`DEFINE INDEX IF NOT EXISTS doc_state_path_idx ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} FIELDS file_path;`);
+      logInfo('Document state file_path index created');
+      migrated = true;
+    } catch (error: any) {
+      logWarn(`[SurrealDB] Document state file_path index creation failed: ${error.message}`);
+    }
+
+    try {
+      await this.query(`DEFINE INDEX IF NOT EXISTS doc_state_status_idx ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} FIELDS status;`);
+      logInfo('Document state status index created');
+      migrated = true;
+    } catch (error: any) {
+      logWarn(`[SurrealDB] Document state status index creation failed: ${error.message}`);
+    }
 
     await this.storeSchemaVersion();
     return migrated;
@@ -2580,6 +2615,146 @@ export class SurrealDatabase {
     } catch (error: any) {
       logError(`[SurrealDB] getRelationStats failed: ${error.message}`);
       return { total_relations: 0, avg_weight: 0, max_weight: 0, min_weight: 0, by_type: {} };
+    }
+  }
+
+  // ============================================================
+  // Document Import State Management
+  // ============================================================
+
+  /**
+   * Check if a document has been imported
+   * @param filePath - Absolute file path
+   * @returns Document import state or null if not found
+   */
+  async getDocumentImportState(filePath: string): Promise<{
+    id?: string;
+    file_path: string;
+    file_hash?: string;
+    file_size?: number;
+    imported_at?: string;
+    chunks_count?: number;
+    entities_extracted: boolean;
+    relations_extracted: boolean;
+    status: string;
+    error?: string;
+  } | null> {
+    if (!this.client) {
+      throw new Error('[SurrealDB] Client not connected');
+    }
+
+    try {
+      const result = await this.executeQuery(
+        `SELECT * FROM ${DOCUMENT_IMPORT_STATE_TABLE} WHERE file_path = $filePath LIMIT 1`,
+        { filePath }
+      );
+
+      const data = this.extractResult(result);
+      if (data && data.length > 0) {
+        return data[0];
+      }
+      return null;
+    } catch (error: any) {
+      logError(`[SurrealDB] getDocumentImportState failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Update or create document import state
+   * @param filePath - Absolute file path
+   * @param updates - Fields to update
+   */
+  async upsertDocumentImportState(filePath: string, updates: {
+    file_hash?: string;
+    file_size?: number;
+    chunks_count?: number;
+    entities_extracted?: boolean;
+    relations_extracted?: boolean;
+    status?: 'pending' | 'importing' | 'imported' | 'extracting_entities' | 'extracting_relations' | 'completed' | 'error';
+    error?: string;
+  }): Promise<void> {
+    if (!this.client) {
+      throw new Error('[SurrealDB] Client not connected');
+    }
+
+    try {
+      const setFields: string[] = [];
+      const params: Record<string, any> = { filePath };
+
+      if (updates.file_hash !== undefined) {
+        setFields.push('file_hash = $file_hash');
+        params.file_hash = updates.file_hash;
+      }
+      if (updates.file_size !== undefined) {
+        setFields.push('file_size = $file_size');
+        params.file_size = updates.file_size;
+      }
+      if (updates.chunks_count !== undefined) {
+        setFields.push('chunks_count = $chunks_count');
+        params.chunks_count = updates.chunks_count;
+      }
+      if (updates.entities_extracted !== undefined) {
+        setFields.push('entities_extracted = $entities_extracted');
+        params.entities_extracted = updates.entities_extracted;
+      }
+      if (updates.relations_extracted !== undefined) {
+        setFields.push('relations_extracted = $relations_extracted');
+        params.relations_extracted = updates.relations_extracted;
+      }
+      if (updates.status !== undefined) {
+        setFields.push('status = $status');
+        params.status = updates.status;
+      }
+      if (updates.error !== undefined) {
+        setFields.push('error = $error');
+        params.error = updates.error;
+      }
+
+      if (setFields.length > 0) {
+        await this.executeQuery(
+          `UPSERT ${DOCUMENT_IMPORT_STATE_TABLE} SET ${setFields.join(', ')}, imported_at = time::now() WHERE file_path = $filePath`,
+          params
+        );
+      }
+    } catch (error: any) {
+      logError(`[SurrealDB] upsertDocumentImportState failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get documents pending import or extraction
+   * @param status - Filter by status
+   * @returns List of pending documents
+   */
+  async getPendingDocuments(status?: string): Promise<Array<{
+    file_path: string;
+    file_size?: number;
+    chunks_count?: number;
+    entities_extracted: boolean;
+    relations_extracted: boolean;
+    status: string;
+  }>> {
+    if (!this.client) {
+      throw new Error('[SurrealDB] Client not connected');
+    }
+
+    try {
+      let sql: string;
+      if (status) {
+        sql = `SELECT * FROM ${DOCUMENT_IMPORT_STATE_TABLE} WHERE status = $status`;
+      } else {
+        // Get all documents that are not completed
+        sql = `SELECT * FROM ${DOCUMENT_IMPORT_STATE_TABLE} WHERE status != 'completed' ORDER BY imported_at ASC`;
+      }
+
+      const result = await this.executeQuery(sql, status ? { status } : {});
+      const data = this.extractResult(result);
+      return data || [];
+    } catch (error: any) {
+      logError(`[SurrealDB] getPendingDocuments failed: ${error.message}`);
+      return [];
     }
   }
 }

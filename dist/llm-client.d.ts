@@ -26,6 +26,7 @@ export declare class LLMClient {
     constructor(config: LLMConfig, defaultOptions?: LLMOptions);
     /**
      * Check if a task should use cloud LLM
+     * Local-only tasks are never routed to cloud
      */
     private shouldUseCloud;
     /**

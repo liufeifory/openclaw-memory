@@ -27,8 +27,17 @@ export interface LLMConfig {
   cloudModel?: string;
 
   // Which tasks use cloud (others use local)
+  // Only these tasks can use cloud when configured
   cloudTasks?: ('preference' | 'summarizer' | 'clusterer' | 'reranker')[];
 }
+
+// Tasks that MUST use local endpoint (never route to cloud)
+const LOCAL_ONLY_TASKS = new Set([
+  'entity-extractor',
+  'entity-indexer',
+  'relation-classifier',
+  'memory-filter',
+]);
 
 export class LLMClient {
   private config: LLMConfig;
@@ -45,8 +54,12 @@ export class LLMClient {
 
   /**
    * Check if a task should use cloud LLM
+   * Local-only tasks are never routed to cloud
    */
   private shouldUseCloud(taskType: string): boolean {
+    // Local-only tasks are NEVER routed to cloud
+    if (LOCAL_ONLY_TASKS.has(taskType)) return false;
+
     if (!this.config.cloudEnabled) return false;
     if (!this.config.cloudTasks) return false;
     return this.config.cloudTasks.includes(taskType as any);
