@@ -27,11 +27,16 @@ export class EmbeddingService {
         }
         logInfo(`[embedding] Calling ${this.endpoint}/embedding with text: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
         try {
+            // Add 5 second timeout for embedding requests
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
             const response = await fetch(`${this.endpoint}/embedding`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ input: inputText }),
+                signal: controller.signal,
             });
+            clearTimeout(timeoutId);
             logInfo(`[embedding] HTTP response status: ${response.status} ${response.statusText}`);
             if (!response.ok) {
                 logWarn(`[embedding] HTTP error: ${response.status} ${response.statusText}`);
@@ -63,7 +68,12 @@ export class EmbeddingService {
             return this.normalize(unwrapped);
         }
         catch (error) {
-            logError(`[embedding] Fetch error: ${error.message}`);
+            if (error.name === 'AbortError') {
+                logError('[embedding] Fetch timeout after 5000ms');
+            }
+            else {
+                logError(`[embedding] Fetch error: ${error.message}`);
+            }
             return [];
         }
     }
