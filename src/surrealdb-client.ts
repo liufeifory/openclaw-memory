@@ -1752,6 +1752,46 @@ export class SurrealDatabase {
     }
   }
 
+  /**
+   * Get memory payload including embedding by memory ID
+   * @param memoryId - Memory ID
+   * @returns Memory payload with embedding
+   */
+  async getMemoryPayload(memoryId: number): Promise<{ content: string; embedding?: number[]; type?: string } | null> {
+    if (!this.client) {
+      throw new Error('[SurrealDB] Client not connected');
+    }
+
+    try {
+      const result = await this.executeQuery(
+        `SELECT content, embedding, type FROM ${MEMORY_TABLE}:${memoryId}`,
+        {}
+      );
+
+      if (Array.isArray(result) && result.length > 0) {
+        let data: any[] = [];
+        if (Array.isArray(result[0])) {
+          data = result[0] || [];
+        } else if ((result as any)[0]?.result) {
+          data = (result as any)[0].result || [];
+        }
+
+        if (data && data.length > 0) {
+          return {
+            content: data[0].content || '',
+            embedding: data[0].embedding || undefined,
+            type: data[0].type || 'episodic',
+          };
+        }
+      }
+
+      return null;
+    } catch (error: any) {
+      logError(`[SurrealDB] getMemoryPayload failed: ${error.message}`);
+      return null;
+    }
+  }
+
   async close(): Promise<void> {
     if (this.client) {
       await this.client.close();

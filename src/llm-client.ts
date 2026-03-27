@@ -138,18 +138,23 @@ export class LLMClient {
     const isCloud = this.shouldUseCloud(taskType);
     const mergedOptions = { ...this.defaultOptions, ...options };
 
-    // CRITICAL DEBUG - will show in any log level
-    const criticalMsg = `[LLMClient_CRITICAL] endpoint=${endpoint} taskType=${taskType} isCloud=${isCloud}`;
-    logInfo(criticalMsg);
-    console.log(criticalMsg);
-    process.stderr.write(criticalMsg + '\n');
+    // 验证输入
+    if (!prompt || prompt.trim().length === 0) {
+      const err = new Error(`Empty prompt for task ${taskType}`);
+      logError(`[LLMClient] ${err.message}`);
+      throw err;
+    }
+
+    // 检查输入长度 (qwen3.5-plus max context: 196601 tokens, ~800k chars)
+    const maxChars = 180000; // 保守限制
+    if (prompt.length > maxChars) {
+      logWarn(`[LLMClient] Prompt too long for ${taskType}: ${prompt.length} chars, truncating to ${maxChars}`);
+      prompt = prompt.substring(0, maxChars);
+    }
 
     try {
       const body = this.buildRequestBody(prompt, mergedOptions, taskType);
       const headers = this.buildHeaders(taskType);
-
-      logInfo(`[LLMClient] About to fetch ${endpoint}`);
-      console.log(`[LLMClient] About to fetch ${endpoint}`);
 
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -157,11 +162,9 @@ export class LLMClient {
         body: JSON.stringify(body),
       });
 
-      logInfo(`[LLMClient] Response status: ${response.status}`);
-      console.log(`[LLMClient] Response status: ${response.status}`);
-
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const errorText = await response.text().catch(() => response.statusText);
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
       }
 
       const data = await response.json();

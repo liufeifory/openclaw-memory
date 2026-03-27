@@ -132,7 +132,10 @@ export class SemanticClusterer {
         }
         // Extract entities BEFORE merge to ensure preservation
         const extractedEntities = this.extractEntities(cluster.memories);
-        const memoriesText = cluster.memories
+        // Limit to 20 memories per merge to avoid token overflow
+        const MAX_MEM_COUNT = 20;
+        const memoriesToMerge = cluster.memories.slice(0, MAX_MEM_COUNT);
+        const memoriesText = memoriesToMerge
             .map((m, i) => `[${i}] ${m}`)
             .join('\n');
         // Add entity preservation instruction

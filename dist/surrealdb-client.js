@@ -1491,6 +1491,40 @@ export class SurrealDatabase {
             return [];
         }
     }
+    /**
+     * Get memory payload including embedding by memory ID
+     * @param memoryId - Memory ID
+     * @returns Memory payload with embedding
+     */
+    async getMemoryPayload(memoryId) {
+        if (!this.client) {
+            throw new Error('[SurrealDB] Client not connected');
+        }
+        try {
+            const result = await this.executeQuery(`SELECT content, embedding, type FROM ${MEMORY_TABLE}:${memoryId}`, {});
+            if (Array.isArray(result) && result.length > 0) {
+                let data = [];
+                if (Array.isArray(result[0])) {
+                    data = result[0] || [];
+                }
+                else if (result[0]?.result) {
+                    data = result[0].result || [];
+                }
+                if (data && data.length > 0) {
+                    return {
+                        content: data[0].content || '',
+                        embedding: data[0].embedding || undefined,
+                        type: data[0].type || 'episodic',
+                    };
+                }
+            }
+            return null;
+        }
+        catch (error) {
+            logError(`[SurrealDB] getMemoryPayload failed: ${error.message}`);
+            return null;
+        }
+    }
     async close() {
         if (this.client) {
             await this.client.close();

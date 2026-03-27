@@ -9,19 +9,22 @@
  */
 import { SurrealDatabase } from './surrealdb-client.js';
 import { EmbeddingService } from './embedding.js';
+import { LLMClient } from './llm-client.js';
 export declare class TopicIndexer {
     private queue;
     private processing;
     private db;
     private embedding;
+    private llmClient;
+    private limiter;
     totalTopicsCreated: number;
     totalMemoriesClustered: number;
     totalNoiseArchived: number;
-    constructor(db?: SurrealDatabase, embedding?: EmbeddingService);
+    constructor(db?: SurrealDatabase, embedding?: EmbeddingService, llmClient?: LLMClient);
     /**
      * Initialize with dependencies
      */
-    init(db: SurrealDatabase, embedding: EmbeddingService): void;
+    init(db: SurrealDatabase, embedding: EmbeddingService, llmClient?: LLMClient): void;
     private scanInterval?;
     private processInterval?;
     private idleCheckInterval?;
@@ -64,7 +67,6 @@ export declare class TopicIndexer {
     private clusterMemoriesByEmbedding;
     /**
      * Stage 2: Name topics using LLM
-     * Placeholder - would call actual LLM service
      */
     private nameTopics;
     /**

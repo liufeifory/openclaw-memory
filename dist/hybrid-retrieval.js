@@ -61,15 +61,27 @@ export class HybridRetriever {
         // Amnesia Mode: 100ms timeout for graph operations
         const GRAPH_TIMEOUT_MS = 100;
         try {
+            // Step 0: Calculate dynamic threshold based on query length
+            // Short queries need higher threshold to avoid false positives
+            const queryLength = query.trim().length;
+            const dynamicThreshold = queryLength < 10
+                ? Math.max(threshold, 0.85) // Short query: higher threshold
+                : threshold; // Normal query: use provided threshold
             // Step 1: Vector search (semantic similarity) - always runs
-            const INITIAL_K = Math.max(topK * 4, 20); // Get more for reranking
+            const INITIAL_K = queryLength < 10
+                ? topK // Short query: reduce candidate count
+                : Math.max(topK * 4, 20); // Normal query: get more for reranking
             const vectorResults = await this.vectorSearch(query, sessionId, INITIAL_K);
             stats.vectorCount = vectorResults.length;
             // Step 2: Extract entities from query
             const entities = await this.extractEntitiesFromQuery(query);
-            const entityIds = await Promise.all(entities.map(e => this.getEntityIdByName(e.name)));
+            // Quality check: filter entities by confidence (user's suggestion)
+            // Only keep entities with confidence >= 0.7 for graph/topic traversal
+            const highConfEntities = entities.filter(e => e.confidence >= 0.7);
+            const entityIds = await Promise.all(highConfEntities.map(e => this.getEntityIdByName(e.name)));
             const validEntityIds = entityIds.filter(id => id !== 0 && !isNaN(id));
             // Step 3: Graph traversal search with timeout (Amnesia Mode)
+            // Skip if no high-confidence entities found
             let graphResults = [];
             if (validEntityIds.length > 0) {
                 try {
@@ -90,7 +102,12 @@ export class HybridRetriever {
                     graphResults = [];
                 }
             }
+            else if (entities.length > 0 && highConfEntities.length === 0) {
+                // Entities extracted but all low confidence - skip graph
+                logInfo(`[HybridRetriever] Skip graph: ${entities.length} entities extracted but all confidence < 0.7`);
+            }
             // Step 4: Topic Recall (Stage 3) - broad association
+            // Skip if no high-confidence entities found
             let topicResults = [];
             if (validEntityIds.length > 0) {
                 try {
@@ -107,8 +124,8 @@ export class HybridRetriever {
             stats.mergedCount = mergedResults.length;
             // Step 6: Reranker re-sorting
             const rerankedResults = await this.rerankResults(query, mergedResults);
-            // Step 7: Threshold filtering
-            const filteredResults = rerankedResults.filter(r => (r.score ?? r.similarity ?? 0) >= threshold);
+            // Step 7: Threshold filtering (using dynamic threshold)
+            const filteredResults = rerankedResults.filter(r => (r.score ?? r.similarity ?? 0) >= dynamicThreshold);
             // Step 8: Return topK
             const finalResults = filteredResults.slice(0, topK);
             stats.finalCount = finalResults.length;

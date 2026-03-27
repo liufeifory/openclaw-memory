@@ -218,6 +218,16 @@ export declare class SurrealDatabase {
      * @returns Array of linked memories
      */
     getMemoriesByTopic(topicId: string, limit?: number): Promise<LinkedMemory[]>;
+    /**
+     * Get memory payload including embedding by memory ID
+     * @param memoryId - Memory ID
+     * @returns Memory payload with embedding
+     */
+    getMemoryPayload(memoryId: number): Promise<{
+        content: string;
+        embedding?: number[];
+        type?: string;
+    } | null>;
     close(): Promise<void>;
     /**
      * Add an alias for an entity

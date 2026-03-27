@@ -7,29 +7,54 @@
  * - Idle task scheduler for resource efficiency
  * - Priority queue for urgent topic creation
  */
-import { logInfo, logError } from './maintenance-logger.js';
+import { logInfo, logWarn, logError } from './maintenance-logger.js';
+import { LLMLimiter } from './llm-limiter.js';
 const TOPIC_SOFT_LIMIT = 400;
 const IDLE_THRESHOLD_MS = 5000; // 5 seconds of no activity
 const NOISE_THRESHOLD = 0.5; // Cosine similarity threshold for noise
+const TOPIC_NAMING_PROMPT = `Analyze these memory snippets and generate a concise topic name and description.
+
+Rules:
+- Name: 2-5 words, descriptive (e.g., "TypeScript Development", "Cloud Infrastructure")
+- Description: One sentence summarizing the topic (max 30 words)
+- Focus on common themes across memories
+
+Memories:
+{{memories}}
+
+Output JSON format:
+{
+  "name": "topic name",
+  "description": "brief description"
+}
+
+JSON:`;
 export class TopicIndexer {
     queue = [];
     processing = false;
     db = null;
     embedding = null;
+    llmClient = null;
+    limiter = null;
     // Statistics
     totalTopicsCreated = 0;
     totalMemoriesClustered = 0;
     totalNoiseArchived = 0;
-    constructor(db, embedding) {
+    constructor(db, embedding, llmClient) {
         this.db = db || null;
         this.embedding = embedding || null;
+        this.llmClient = llmClient || null;
+        this.limiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     }
     /**
      * Initialize with dependencies
      */
-    init(db, embedding) {
+    init(db, embedding, llmClient) {
         this.db = db;
         this.embedding = embedding;
+        if (llmClient) {
+            this.llmClient = llmClient;
+        }
     }
     scanInterval;
     processInterval;
@@ -225,43 +250,62 @@ export class TopicIndexer {
         if (!this.embedding) {
             throw new Error('EmbeddingService not initialized');
         }
-        // 1. Get embeddings for all memories
+        // 1. Get embeddings for all memories from database
         const embeddings = [];
-        for (const memoryId of memoryIds) {
-            // This would need a method to get stored embedding
-            // For now, placeholder
-            embeddings.push(new Array(1024).fill(0));
+        const validMemoryIds = [];
+        if (!this.db) {
+            logError('[TopicIndexer] Database not initialized');
+            return { clusters: [], outliers: [] };
         }
+        for (const memoryId of memoryIds) {
+            try {
+                const payload = await this.db.getMemoryPayload(memoryId);
+                if (payload && payload.embedding && payload.embedding.length > 0) {
+                    embeddings.push(payload.embedding);
+                    validMemoryIds.push(memoryId);
+                }
+                else {
+                    logWarn(`[TopicIndexer] No embedding found for memory ${memoryId}`);
+                }
+            }
+            catch (error) {
+                logWarn(`[TopicIndexer] Failed to get embedding for memory ${memoryId}: ${error.message}`);
+            }
+        }
+        if (embeddings.length === 0) {
+            logWarn('[TopicIndexer] No embeddings found for any memories');
+            return { clusters: [], outliers: [] };
+        }
+        logInfo(`[TopicIndexer] Retrieved ${embeddings.length} embeddings for clustering`);
         // 2. Compute similarity matrix and cluster
         const clusters = [];
         const assigned = new Set();
         const outliers = [];
-        // Simple k-means style clustering (placeholder)
-        // In production, use proper hierarchical clustering or DBSCAN
-        for (let i = 0; i < memoryIds.length && clusters.length < maxClusters; i++) {
+        // Simple k-means style clustering
+        for (let i = 0; i < validMemoryIds.length && clusters.length < maxClusters; i++) {
             if (assigned.has(i))
                 continue;
             // Create new cluster with this memory as centroid
             const cluster = {
                 clusterId: clusters.length,
-                memoryIds: [memoryIds[i]],
+                memoryIds: [validMemoryIds[i]],
                 centroid: embeddings[i],
             };
             assigned.add(i);
             // Find similar memories
-            for (let j = i + 1; j < memoryIds.length; j++) {
+            for (let j = i + 1; j < validMemoryIds.length; j++) {
                 if (assigned.has(j))
                     continue;
                 const similarity = this.cosineSimilarity(embeddings[i], embeddings[j]);
                 if (similarity > 0.7) { // Threshold for same cluster
-                    cluster.memoryIds.push(memoryIds[j]);
+                    cluster.memoryIds.push(validMemoryIds[j]);
                     assigned.add(j);
                 }
             }
             clusters.push(cluster);
         }
         // Handle unassigned memories (noise or fit into existing clusters)
-        for (let i = 0; i < memoryIds.length; i++) {
+        for (let i = 0; i < validMemoryIds.length; i++) {
             if (assigned.has(i))
                 continue;
             // Check distance to each cluster center
@@ -274,7 +318,7 @@ export class TopicIndexer {
             }
             // If too far from all centers, mark as noise
             if (maxSimilarity < NOISE_THRESHOLD) {
-                outliers.push(memoryIds[i]);
+                outliers.push(validMemoryIds[i]);
             }
             else {
                 // Find best matching cluster and add to it
@@ -290,7 +334,7 @@ export class TopicIndexer {
                     }
                 }
                 if (bestCluster >= 0) {
-                    clusters[bestCluster].memoryIds.push(memoryIds[i]);
+                    clusters[bestCluster].memoryIds.push(validMemoryIds[i]);
                 }
             }
         }
@@ -298,15 +342,65 @@ export class TopicIndexer {
     }
     /**
      * Stage 2: Name topics using LLM
-     * Placeholder - would call actual LLM service
      */
     async nameTopics(clusters, memories) {
         const topics = [];
+        if (!this.db) {
+            logError('[TopicIndexer] Database not initialized, using fallback names');
+            return clusters.map((c, i) => ({
+                name: `Topic-${i}`,
+                description: `Auto-generated topic for ${c.memoryIds.length} memories`,
+                memoryIds: c.memoryIds,
+            }));
+        }
         for (const cluster of clusters) {
-            // Get sample memories for context
-            const sampleMemories = cluster.memoryIds.slice(0, 5);
-            // In production, call LLM service here to generate name and description
-            // For now, use placeholder names
+            // Get sample memories for context (up to 5)
+            const sampleMemoryIds = cluster.memoryIds.slice(0, 5);
+            const sampleTexts = [];
+            // Fetch memory content from database
+            for (const memoryId of sampleMemoryIds) {
+                try {
+                    const payload = await this.db.getMemoryPayload(memoryId);
+                    if (payload && payload.content) {
+                        sampleTexts.push(payload.content.substring(0, 200)); // Limit each memory to 200 chars
+                    }
+                }
+                catch (error) {
+                    logWarn(`[TopicIndexer] Failed to get memory ${memoryId}: ${error.message}`);
+                }
+            }
+            if (sampleTexts.length === 0) {
+                // Fallback to placeholder if no content available
+                topics.push({
+                    name: `Topic-${cluster.clusterId}`,
+                    description: `Auto-generated topic for ${cluster.memoryIds.length} memories`,
+                    memoryIds: cluster.memoryIds,
+                });
+                continue;
+            }
+            // Call LLM to generate name and description
+            const memoriesText = sampleTexts.map((t, i) => `[${i + 1}] ${t}`).join('\n');
+            const prompt = TOPIC_NAMING_PROMPT.replace('{{memories}}', memoriesText);
+            try {
+                if (this.llmClient) {
+                    const response = await this.limiter.execute(async () => {
+                        return await this.llmClient.completeJson(prompt, 'topic-indexer', { temperature: 0.3, maxTokens: 200 });
+                    });
+                    if (response && response.name && response.description) {
+                        topics.push({
+                            name: response.name.trim(),
+                            description: response.description.trim(),
+                            memoryIds: cluster.memoryIds,
+                        });
+                        logInfo(`[TopicIndexer] Named topic: "${response.name.trim()}"`);
+                        continue;
+                    }
+                }
+            }
+            catch (error) {
+                logError(`[TopicIndexer] LLM naming failed: ${error.message}, using fallback`);
+            }
+            // Fallback to placeholder if LLM fails
             topics.push({
                 name: `Topic-${cluster.clusterId}`,
                 description: `Auto-generated topic for ${cluster.memoryIds.length} memories`,
@@ -383,9 +477,37 @@ export class TopicIndexer {
             const memories = await this.db.getMemoriesByTopic(topicId, 50);
             if (memories.length === 0)
                 return null;
-            // In production, fetch actual embeddings and compute centroid
-            // Placeholder: return zeros
-            return new Array(1024).fill(0);
+            // Fetch actual embeddings and compute centroid
+            const embeddings = [];
+            for (const mem of memories) {
+                try {
+                    const payload = await this.db.getMemoryPayload(mem.id);
+                    if (payload && payload.embedding && payload.embedding.length > 0) {
+                        embeddings.push(payload.embedding);
+                    }
+                }
+                catch (error) {
+                    logWarn(`[TopicIndexer] Failed to get embedding for memory ${mem.id}: ${error.message}`);
+                }
+            }
+            if (embeddings.length === 0) {
+                logWarn(`[TopicIndexer] No embeddings found for topic ${topicId}`);
+                return null;
+            }
+            // Compute centroid (average of all embeddings)
+            const dimension = embeddings[0].length;
+            const centroid = new Array(dimension).fill(0);
+            for (const embedding of embeddings) {
+                for (let i = 0; i < dimension; i++) {
+                    centroid[i] += embedding[i];
+                }
+            }
+            // Average
+            for (let i = 0; i < dimension; i++) {
+                centroid[i] /= embeddings.length;
+            }
+            logInfo(`[TopicIndexer] Computed centroid for topic ${topicId} from ${embeddings.length} embeddings`);
+            return centroid;
         }
         catch (error) {
             logError(`[TopicIndexer] computeTopicCentroid failed: ${error.message}`);

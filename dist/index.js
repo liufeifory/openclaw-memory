@@ -193,17 +193,122 @@ process.on('SIGTERM', async () => {
  * Build context string from retrieved memories.
  */
 function buildMemoryContext(memories) {
-    if (memories.length === 0) {
+    if (!memories || memories.length === 0) {
         return '';
     }
-    const contextParts = memories.map(m => {
+    const contextParts = memories
+        .filter(m => {
+        const content = m.content || m.text || '';
+        return content && content.trim().length > 0; // Filter out empty content
+    })
+        .map(m => {
         const type = m.type || m.memory_type || 'unknown';
         const similarity = m.similarity?.toFixed(3) || 'N/A';
         const importance = m.importance?.toFixed(2) || 'N/A';
         const content = m.content || m.text || '';
         return `[${type.toUpperCase()}] (sim: ${similarity}, imp: ${importance}) ${content}`;
     });
+    if (contextParts.length === 0) {
+        return ''; // No valid memories after filtering
+    }
     return '\n--- Relevant Memories ---\n' + contextParts.join('\n') + '\n--- End Memories ---\n';
+}
+/**
+ * Intent detection patterns for memory type prioritization
+ * Zero-cost keyword matching (no LLM call)
+ */
+const INTENT_PATTERNS = {
+    episodic: [
+        /上次/, /之前/, /刚才/, /曾经/, /什么时候/, /哪天/, /几号/, /那天/,
+        /最近/, /最近一次/, /前几天/, /上周/, /上个月/,
+        /具体/, /详细/, /原话/, /怎么说的/, /怎么说/,
+        /记得/, /还记得/, /我说/,
+        /我说过/, /我提过/,
+        /那次/, /那个/, /这件事/, /那件事/, /这个事/,
+        /怎么做的/, /如何做的/, /步骤/, /流程/, /过程/,
+    ],
+    semantic: [
+        /我喜欢/, /我讨厌/, /我想要/, /我不喜欢/, /我爱/, /我烦/,
+        /习惯/, /通常/, /一般/, /平时/, /老是/, /总是/,
+        /推荐/, /适合我/, /我需要/, /我要找/,
+        /偏好/, /更喜欢/, /最喜欢/, /比较好/,
+    ],
+    reflection: [
+        /总结/, /学到/, /收获/, /心得/, /体会/, /感悟/,
+        /总的来说/, /整体上/, /概括/, /简述/,
+        /进展/, /进步/, /提升/, /改善/, /变化/,
+        /做了什么/, /完成了/, /做完了/,
+    ],
+};
+/**
+ * Time window config (in days) for each intent type
+ */
+const TIME_WINDOWS = {
+    episodic: 7,
+    semantic: 30,
+    reflection: 90,
+    default: 30,
+};
+/**
+ * Time decay factor: 0.98 = 2% decay per day
+ */
+const TIME_DECAY_FACTOR = 0.98;
+/**
+ * Detect user intent from query using keyword matching
+ */
+function detectIntent(query) {
+    for (const [intent, patterns] of Object.entries(INTENT_PATTERNS)) {
+        for (const pattern of patterns) {
+            if (pattern.test(query)) {
+                return intent;
+            }
+        }
+    }
+    return 'default';
+}
+/**
+ * Check if query has explicit detail recall intent
+ */
+function hasDetailIntent(query) {
+    return /上次 |之前 |记得 |具体 |原话 |怎么说的 |还记得/.test(query);
+}
+/**
+ * Calculate comprehensive score for memory sorting
+ * Combines: intent match + time decay + similarity + type priority
+ */
+function calculateMemoryScore(memory, intent, hasDetail) {
+    const type = memory.type || memory.memory_type || 'episodic';
+    // 1. Intent match score
+    const intentScore = (type === intent) ? 1.0 : 0.5;
+    // 2. Time decay score (newer is better)
+    const memoryDate = memory.created_at ? new Date(memory.created_at).getTime() : Date.now();
+    const daysOld = (Date.now() - memoryDate) / (24 * 60 * 60 * 1000);
+    const timeScore = Math.pow(TIME_DECAY_FACTOR, Math.max(0, daysOld));
+    // 3. Similarity score
+    const similarityScore = memory.similarity || memory.score || 0;
+    // 4. Type priority based on intent
+    let typePriority;
+    if (hasDetail) {
+        // Detail intent: episodic first
+        typePriority = type === 'episodic' ? 1.5 : 0.8;
+    }
+    else {
+        // Default: reflection/semantic first
+        const priorityMap = {
+            reflection: 1.2,
+            semantic: 1.0,
+            episodic: 0.8,
+        };
+        typePriority = priorityMap[type] || 0.8;
+    }
+    // Combined score
+    return intentScore * typePriority + timeScore * 0.8 + similarityScore * 0.7;
+}
+/**
+ * Sort memories by comprehensive score
+ */
+function sortMemoriesByScore(memories, intent, hasDetail) {
+    return memories.sort((a, b) => calculateMemoryScore(b, intent, hasDetail) - calculateMemoryScore(a, intent, hasDetail));
 }
 function getMemoryManager(config) {
     if (!memoryManager) {
@@ -459,6 +564,10 @@ export default createPluginEntry({
             if (!lastMessageContent) {
                 return;
             }
+            // 短消息不触发记忆检索（参考原始 OpenClaw 逻辑）
+            if (lastMessageContent.trim().length < 5) {
+                return;
+            }
             // TUI mode: copy message to queue (async, non-blocking)
             const messageHash = `${sessionId}:${lastMessageContent.slice(0, 50)}`;
             if (!storedMessages.has(messageHash)) {
@@ -469,17 +578,31 @@ export default createPluginEntry({
             const timeoutMs = 1000;
             try {
                 await ensureInitialized();
-                // 1. Retrieve relevant memories (with timeout)
+                // 1. Detect user intent (zero-cost keyword matching)
+                const intent = detectIntent(lastMessageContent);
+                const hasDetail = hasDetailIntent(lastMessageContent);
+                logInfo(`[Memory Inject] intent=${intent}, hasDetail=${hasDetail}, query="${lastMessageContent.slice(0, 30)}..."`);
+                // 2. Retrieve relevant memories (with timeout)
                 const memories = await Promise.race([
-                    memoryManager.retrieveRelevant(lastMessageContent, sessionId, 3, 0.65),
+                    memoryManager.retrieveRelevant(lastMessageContent, sessionId, 10, 0.6), // Get more for sorting
                     new Promise((_, reject) => setTimeout(() => reject(new Error('Memory retrieval timeout')), timeoutMs))
                 ]);
                 if (!memories || memories.length === 0) {
                     return;
                 }
-                // 2. Build context (limit total length)
-                const context = buildMemoryContext(memories.slice(0, 3));
-                // 3. Return prependContext
+                // 3. Sort memories by comprehensive score (intent + time + similarity)
+                const sortedMemories = sortMemoriesByScore(memories, intent, hasDetail);
+                // 4. Take top 3 after sorting
+                const topMemories = sortedMemories.slice(0, 3);
+                // 5. Build context
+                const context = buildMemoryContext(topMemories);
+                // 6. Don't inject if context is empty
+                if (!context || context.trim().length === 0) {
+                    logInfo('[Memory Inject] No context to inject (empty)');
+                    return;
+                }
+                logInfo(`[Memory Inject] Injecting context: ${context.substring(0, 100)}...`);
+                // 7. Return prependContext
                 return {
                     prependContext: context,
                 };

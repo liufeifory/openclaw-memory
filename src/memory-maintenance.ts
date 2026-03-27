@@ -9,7 +9,7 @@
 
 import { SurrealDatabase } from './surrealdb-client.js';
 import { ImportanceLearning } from './importance-learning.js';
-import { logInfo } from './maintenance-logger.js';
+import { logInfo, logError } from './maintenance-logger.js';
 
 export interface MemoryMaintenanceConfig {
   decayFactor?: number;
@@ -125,14 +125,64 @@ export class MemoryMaintenance {
   async maybeGenerateReflection(
     generateFn: (summaries: string[]) => Promise<string>
   ): Promise<boolean> {
-    const stats = await this.db.getStats();
+    // Count episodic memories by scrolling through them
+    let episodicCount = 0;
+    let offset = 0;
 
-    // In production:
-    // 1. Count episodic memories
-    // 2. If count % interval == 0, generate reflection
-    // 3. Summarize recent memories using LLM
+    while (true) {
+      const memories = await this.db.scroll({ type: 'episodic' }, 100, offset);
+      if (memories.length === 0) break;
+      episodicCount += memories.length;
+      offset += memories.length;
+    }
 
-    return false;
+    // Check if count is a multiple of reflection interval
+    if (episodicCount < this.config.reflectionInterval) {
+      return false;
+    }
+
+    if (episodicCount % this.config.reflectionInterval !== 0) {
+      return false;
+    }
+
+    logInfo(`[MemoryMaintenance] Generating reflection: ${episodicCount} episodic memories (interval: ${this.config.reflectionInterval})`);
+
+    try {
+      // Get recent episodic memories for summarization
+      const recentMemories: string[] = [];
+      let memOffset = 0;
+
+      while (recentMemories.length < this.config.reflectionInterval) {
+        const memories = await this.db.scroll({ type: 'episodic' }, 50, memOffset);
+        if (memories.length === 0) break;
+
+        for (const mem of memories) {
+          const content = mem.payload.content || mem.payload.summary || '';
+          if (content.trim()) {
+            recentMemories.push(content);
+          }
+        }
+        memOffset += memories.length;
+      }
+
+      if (recentMemories.length < 10) {
+        logInfo('[MemoryMaintenance] Not enough content for reflection');
+        return false;
+      }
+
+      // Generate reflection using LLM
+      const reflection = await generateFn(recentMemories.slice(0, 50));
+
+      if (reflection && reflection.trim().length > 0 && reflection !== 'No significant content.') {
+        logInfo(`[MemoryMaintenance] Generated reflection: "${reflection.substring(0, 50)}..."`);
+        return true;
+      }
+
+      return false;
+    } catch (error: any) {
+      logError(`[MemoryMaintenance] Reflection generation failed: ${error.message}`);
+      return false;
+    }
   }
 
   /**
