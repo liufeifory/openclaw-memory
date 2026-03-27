@@ -324,6 +324,29 @@ const INTENT_PATTERNS: Record<string, RegExp[]> = {
 };
 
 /**
+ * Historical query patterns - triggers deep retrieval mode
+ * When detected, expands time windows significantly
+ */
+const HISTORICAL_PATTERNS: RegExp[] = [
+  /很久以前/, /很久之前/, /好久以前/, /好久之前/,
+  /几个月前/, /半年前/, /一年前/, /年前/, /多年前/,
+  /去年/, /前年/, /早年/, /当初/, /最初/, /刚开始/,
+  /第一次/, /最早/, /最开始的/, /原始的/,
+  /所有/, /全部/, /完整/, /全部历史/, /历史记录/,
+  /从头到尾/, /整个过程/, /来龙去脉/,
+];
+
+/**
+ * Extended time windows for historical queries (in days)
+ */
+const HISTORICAL_TIME_WINDOWS: Record<string, number> = {
+  episodic: 365,      // 1 year
+  semantic: 730,      // 2 years
+  reflection: 730,    // 2 years
+  default: 365,       // 1 year
+};
+
+/**
  * Time window config (in days) for each intent type
  */
 const TIME_WINDOWS: Record<string, number> = {
@@ -357,6 +380,25 @@ function detectIntent(query: string): string {
  */
 function hasDetailIntent(query: string): boolean {
   return /上次 |之前 |记得 |具体 |原话 |怎么说的 |还记得/.test(query);
+}
+
+/**
+ * Check if query is a historical query (wants old information)
+ */
+function isHistoricalQuery(query: string): boolean {
+  return HISTORICAL_PATTERNS.some(p => p.test(query));
+}
+
+/**
+ * Get time window for intent type
+ * @param intent - Detected intent type
+ * @param isHistorical - Whether this is a historical query
+ */
+function getTimeWindow(intent: string, isHistorical: boolean): number {
+  if (isHistorical) {
+    return HISTORICAL_TIME_WINDOWS[intent] || HISTORICAL_TIME_WINDOWS.default;
+  }
+  return TIME_WINDOWS[intent] || TIME_WINDOWS.default;
 }
 
 /**
@@ -719,12 +761,15 @@ export default createPluginEntry({
         // 1. Detect user intent (zero-cost keyword matching)
         const intent = detectIntent(lastMessageContent);
         const hasDetail = hasDetailIntent(lastMessageContent);
+        const isHistorical = isHistoricalQuery(lastMessageContent);
 
-        logInfo(`[Memory Inject] intent=${intent}, hasDetail=${hasDetail}, query="${lastMessageContent.slice(0, 30)}..."`);
+        logInfo(`[Memory Inject] intent=${intent}, hasDetail=${hasDetail}, isHistorical=${isHistorical}, query="${lastMessageContent.slice(0, 30)}..."`);
 
         // 2. Retrieve relevant memories (with timeout)
+        // For historical queries, increase top_k to get more results from longer time range
+        const topK = isHistorical ? 30 : 10;
         const memories = await Promise.race([
-          memoryManager!.retrieveRelevant(lastMessageContent, sessionId, 10, 0.6),  // Get more for sorting
+          memoryManager!.retrieveRelevant(lastMessageContent, sessionId, topK, 0.5),  // Lower threshold for historical
           new Promise<any[]>((_, reject) =>
             setTimeout(() => reject(new Error('Memory retrieval timeout')), timeoutMs)
           )
@@ -737,8 +782,9 @@ export default createPluginEntry({
         // 3. Sort memories by comprehensive score (intent + time + similarity)
         const sortedMemories = sortMemoriesByScore(memories, intent, hasDetail);
 
-        // 4. Take top 3 after sorting
-        const topMemories = sortedMemories.slice(0, 3);
+        // 4. Take top N after sorting (more for historical queries)
+        const takeCount = isHistorical ? 10 : 3;
+        const topMemories = sortedMemories.slice(0, takeCount);
 
         // 5. Build context
         const context = buildMemoryContext(topMemories);
