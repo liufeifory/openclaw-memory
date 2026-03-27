@@ -119,14 +119,21 @@ export class LLMClient {
             logWarn(`[LLMClient] Prompt too long for ${taskType}: ${prompt.length} chars, truncating to ${maxChars}`);
             prompt = prompt.substring(0, maxChars);
         }
+        // Add timeout control for LLM requests (default 30s, can be overridden)
+        const timeoutMs = taskType === 'entity-extractor' ? 10000 : 30000; // 10s for entity extraction, 30s for others
+        let timeoutId;
         try {
             const body = this.buildRequestBody(prompt, mergedOptions, taskType);
             const headers = this.buildHeaders(taskType);
+            const controller = new AbortController();
+            timeoutId = setTimeout(() => controller.abort(), timeoutMs);
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify(body),
+                signal: controller.signal,
             });
+            clearTimeout(timeoutId);
             if (!response.ok) {
                 const errorText = await response.text().catch(() => response.statusText);
                 throw new Error(`HTTP ${response.status}: ${errorText}`);
@@ -139,6 +146,10 @@ export class LLMClient {
             return result;
         }
         catch (error) {
+            if (error.name === 'AbortError' || error.message?.includes('abort')) {
+                logError(`[LLMClient] Request timeout for ${taskType} after ${timeoutMs}ms`);
+                throw new Error(`LLM timeout after ${timeoutMs}ms for ${taskType}`);
+            }
             logError(`[LLMClient] ${isCloud ? 'Cloud' : 'Local'} LLM failed for ${taskType}: ${error.message}`);
             throw error;
         }

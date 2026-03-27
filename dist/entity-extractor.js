@@ -310,6 +310,8 @@ export class EntityExtractor {
             return result;
         }
         catch (error) {
+            // Timeout or other errors should not block - return empty array
+            // Layer 1 results (if any) will be used alone
             logError(`[EntityExtractor] Layer 2 7B refine failed: ${error.message}`);
             return [];
         }
