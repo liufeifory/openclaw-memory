@@ -5,6 +5,8 @@
 import { logWarn, logInfo, logError } from './maintenance-logger.js';
 export class EmbeddingService {
     endpoint;
+    cache = new Map();
+    CACHE_LIMIT = 1000; // LRU cache limit
     constructor(endpoint = 'http://localhost:8080') {
         this.endpoint = endpoint;
     }
@@ -25,11 +27,17 @@ export class EmbeddingService {
             };
             inputText = prefixes[taskType] + text;
         }
+        // Check cache first
+        const cacheKey = inputText;
+        if (this.cache.has(cacheKey)) {
+            logInfo(`[embedding] Cache hit for: "${text.substring(0, 30)}..."`);
+            return this.cache.get(cacheKey);
+        }
         logInfo(`[embedding] Calling ${this.endpoint}/embedding with text: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
         try {
-            // Add 5 second timeout for embedding requests
+            // Add 30 second timeout for embedding requests (handles llama-server cold start)
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            const timeoutId = setTimeout(() => controller.abort(), 30000);
             const response = await fetch(`${this.endpoint}/embedding`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -55,7 +63,9 @@ export class EmbeddingService {
                 }
                 const unwrapped = emb || [];
                 logInfo(`[embedding] Unwrapped length: ${unwrapped.length}, first value: ${unwrapped[0]}`);
-                return this.normalize(unwrapped);
+                const normalized = this.normalize(unwrapped);
+                this.setCache(cacheKey, normalized);
+                return normalized;
             }
             // Format: {embedding: [[...]]}
             logInfo(`[embedding] Object format, embedding exists: ${!!result.embedding}`);
@@ -65,17 +75,31 @@ export class EmbeddingService {
             }
             const unwrapped = emb || [];
             logInfo(`[embedding] Unwrapped length: ${unwrapped.length}, first value: ${unwrapped[0]}`);
-            return this.normalize(unwrapped);
+            const normalized = this.normalize(unwrapped);
+            this.setCache(cacheKey, normalized);
+            return normalized;
         }
         catch (error) {
             if (error.name === 'AbortError') {
-                logError('[embedding] Fetch timeout after 5000ms');
+                logError('[embedding] Fetch timeout after 30000ms (llama-server may be cold starting)');
             }
             else {
                 logError(`[embedding] Fetch error: ${error.message}`);
             }
             return [];
         }
+    }
+    /**
+     * Store embedding in LRU cache
+     */
+    setCache(text, embedding) {
+        if (this.cache.size >= this.CACHE_LIMIT) {
+            // Remove oldest entry (first key)
+            const firstKey = this.cache.keys().next().value;
+            if (firstKey)
+                this.cache.delete(firstKey);
+        }
+        this.cache.set(text, embedding);
     }
     /**
      * Normalize embedding vector to unit length for cosine similarity.

@@ -8,6 +8,8 @@ export interface EmbeddingResponse {
 export type EmbeddingTaskType = 'query' | 'document' | 'search_query' | 'passage';
 export declare class EmbeddingService {
     private endpoint;
+    private cache;
+    private readonly CACHE_LIMIT;
     constructor(endpoint?: string);
     /**
      * Generate embedding for text.
@@ -15,6 +17,10 @@ export declare class EmbeddingService {
      * @param taskType - Optional task type for BGE-style models (query vs document)
      */
     embed(text: string, taskType?: EmbeddingTaskType): Promise<number[]>;
+    /**
+     * Store embedding in LRU cache
+     */
+    private setCache;
     /**
      * Normalize embedding vector to unit length for cosine similarity.
      */
