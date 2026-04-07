@@ -2,10 +2,12 @@
  * Document Parser - extracts text content from PDF, Word, Markdown, and HTML.
  */
 import fs from 'fs/promises';
-import pdf from 'pdf-parse';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import mammoth from 'mammoth';
 import fetch from 'node-fetch';
 import { logWarn } from './maintenance-logger.js';
+const execAsync = promisify(exec);
 export class DocumentParser {
     /**
      * Parse a document from a local file path.
@@ -54,14 +56,68 @@ export class DocumentParser {
         }
     }
     /**
-     * Parse PDF file using pdf-parse.
+     * Parse PDF file using pdftotext (Poppler) - more reliable than PyPDF2.
+     * Falls back to PyPDF2 if pdftotext is not available.
      */
     async parsePdf(filePath) {
         try {
-            const dataBuffer = await fs.readFile(filePath);
-            const data = await pdf(dataBuffer);
+            // Try pdftotext first (Poppler) - most reliable
+            const { stdout: pdftotextCheck } = await execAsync('which pdftotext', { timeout: 5000 });
+            if (pdftotextCheck.trim()) {
+                const { stdout, stderr } = await execAsync(`pdftotext "${filePath}" -`, { maxBuffer: 100 * 1024 * 1024, timeout: 60000 } // 100MB buffer, 60s timeout for large PDFs
+                );
+                // Only fall back if stdout is empty (pdftotext failed completely)
+                // Ignore Syntax Error warnings - pdftotext still extracts valid text
+                if (stdout.trim().length === 0) {
+                    logWarn(`[DocumentParser] pdftotext produced no output for ${filePath}, falling back to PyPDF2`);
+                    return await this.parsePdfWithPyPDF2(filePath);
+                }
+                // Log warnings but don't fall back
+                if (stderr && stderr.includes('Error')) {
+                    logWarn(`[DocumentParser] pdftotext warnings for ${filePath}: ${stderr.slice(0, 200)}`);
+                }
+                return {
+                    content: stdout,
+                    metadata: {
+                        source: filePath,
+                        type: 'pdf',
+                        path: filePath,
+                    },
+                };
+            }
+        }
+        catch (error) {
+            // pdftotext not available or failed, try PyPDF2
+            logWarn(`[DocumentParser] pdftotext failed for ${filePath}, falling back to PyPDF2: ${error.message}`);
+        }
+        // Fallback to PyPDF2
+        return await this.parsePdfWithPyPDF2(filePath);
+    }
+    /**
+     * Parse PDF file using Python PyPDF2 (fallback method).
+     */
+    async parsePdfWithPyPDF2(filePath) {
+        try {
+            // Use Python PyPDF2 for PDF parsing
+            const pythonScript = `
+import sys
+import PyPDF2
+
+reader = PyPDF2.PdfReader(open(sys.argv[1], 'rb'))
+text = []
+for page in reader.pages:
+    t = page.extract_text()
+    if t:
+        text.append(t)
+print('\\n'.join(text))
+`;
+            const { stdout, stderr } = await execAsync(`python3 -c '${pythonScript.replace(/'/g, "'\\''")}' "${filePath}"`, { maxBuffer: 100 * 1024 * 1024, timeout: 60000 } // 100MB buffer, 60s timeout
+            );
+            if (stderr && !stderr.includes('Warning')) {
+                logWarn(`[DocumentParser] PyPDF2 warnings for ${filePath}: ${stderr}`);
+            }
             return {
-                content: data.text,
+                content: stdout,
                 metadata: {
                     source: filePath,
                     type: 'pdf',

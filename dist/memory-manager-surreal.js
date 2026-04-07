@@ -1,8 +1,6 @@
 /**
  * Memory Manager - orchestrates all memory operations using SurrealDB.
  */
-import { SurrealDatabase } from './surrealdb-client.js';
-import { EmbeddingService } from './embedding.js';
 import { MemoryStore } from './memory-store-surreal.js';
 import { ContextBuilder } from './context-builder.js';
 import { Reranker } from './reranker.js';
@@ -14,7 +12,7 @@ import { Summarizer } from './summarizer.js';
 import { HybridRetriever } from './hybrid-retrieval.js';
 import { EntityIndexer } from './entity-indexer.js';
 import { logInfo, logError } from './maintenance-logger.js';
-import { LLMClient } from './llm-client.js';
+import { ServiceFactory, getDB, getEmbedding, getLLM } from './service-factory.js';
 export class MemoryManager {
     db;
     embedding;
@@ -39,21 +37,17 @@ export class MemoryManager {
         lastTtlPruning: 0,
     };
     constructor(config) {
-        this.db = new SurrealDatabase(config.surrealdb);
-        this.embedding = new EmbeddingService(config.embedding?.endpoint ?? 'http://localhost:8080');
+        // Initialize ServiceFactory if not already initialized
+        if (!ServiceFactory.isInitialized()) {
+            ServiceFactory.init(config);
+        }
+        // Get services from factory (single source of truth)
+        this.db = getDB();
+        this.embedding = getEmbedding();
         this.memoryStore = new MemoryStore(this.db, this.embedding);
         this.contextBuilder = new ContextBuilder();
-        // Create shared LLM limiter for rate control
-        const llmConfig = config.llm || {};
-        const llmClient = new LLMClient({
-            localEndpoint: llmConfig.endpoint ?? 'http://localhost:8082',
-            cloudEnabled: llmConfig.cloudEnabled ?? false,
-            cloudProvider: llmConfig.cloudProvider,
-            cloudBaseUrl: llmConfig.cloudBaseUrl,
-            cloudApiKey: llmConfig.cloudApiKey,
-            cloudModel: llmConfig.cloudModel,
-            cloudTasks: llmConfig.cloudTasks,
-        });
+        // Get LLM client from factory
+        const llmClient = getLLM();
         this.limiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100, queueLimit: 50 });
         // Local-only tasks (reranker, conflict detector, entity extractor)
         this.reranker = new Reranker(llmClient, this.limiter);

@@ -35,7 +35,7 @@
     "mammoth": "^1.7.0",
     "node-fetch": "^3.3.2",
     "pdf-parse": "^1.1.1",
-    "surrealdb": "^2.0.2"
+    "surrealdb": "^2.0.3"
   },
   "devDependencies": {
     "@types/node": "^22.19.15",

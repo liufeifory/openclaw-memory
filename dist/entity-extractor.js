@@ -266,6 +266,7 @@ export class EntityExtractor {
                     const knownConfidence = this.knownEntities.get(key);
                     entities.push({
                         name: normalizedName,
+                        entity_type: name, // Use pattern name as entity type
                         confidence: knownConfidence ?? 0.8, // High confidence for known entities
                         source: knownConfidence ? 'cache' : 'regex',
                         originalText: matchedText,

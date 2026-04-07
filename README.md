@@ -1,216 +1,58 @@
 # OpenClaw Memory Plugin
 
-> 🧠 为 OpenClaw 赋予长期记忆能力 —— 语义检索、自动反思、记忆进化
+基于 SurrealDB 的智能记忆插件，为 OpenClaw AI 助手提供长期记忆能力。
 
-[![Version](https://img.shields.io/badge/version-2.2.0-blue)](https://github.com/liufeifory/openclaw-memory/releases)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-≥2026.3.11-orange)](https://github.com/openclaw/openclaw)
+## 特性
 
----
+- **向量检索** - BGE-M3 语义搜索，1024 维向量
+- **知识图谱** - 自动提取实体和关系，支持多跳查询
+- **混合检索** - 向量相似度 + 图结构相关性
+- **文档导入** - 支持 PDF/Word/Markdown 自动分块入库
+- **冲突检测** - 自动识别和更新过时信息
 
-## 📖 简介
-
-OpenClaw Memory 是一个生产级的长期记忆系统 **Node.js 插件**，为 OpenClaw AI 助手提供语义记忆检索能力。
-
-**核心特性：**
-
-- 🔍 **语义检索** —— 基于向量相似度智能搜索历史记忆
-- ⚡ **动态重要性** —— 根据访问频率和时间自动调整记忆权重
-- 🔄 **自动进化** —— 高频情景记忆自动升级为稳定语义记忆
-- 💡 **自动反思** —— 定期生成总结性洞察
-- 📉 **记忆衰减** —— 长期未访问的记忆自动降低权重
-- 🗄️ **SurrealDB 后端** —— 原生图数据库，支持图遍历和混合检索
-- 🎯 **全自动** —— 消息自动分类存储，上下文自动注入
-
----
-
-## 🚀 5 分钟快速开始
-
-### 前置要求
-
-| 组件 | 版本 | 安装命令 |
-|------|------|----------|
-| Node.js | ≥18 | `brew install node` |
-| SurrealDB | ≥2.0 | `brew install surrealdb` |
-| llama.cpp | 最新 | `brew install llama.cpp` |
-
-### 一键安装
+## 安装
 
 ```bash
-# 1. 克隆插件
-cd ~/.openclaw/plugins
-git clone https://github.com/liufeifory/openclaw-memory.git
-cd openclaw-memory
+# 1. 安装依赖
+npm install
 
-# 2. 安装依赖 & 构建
-npm install && npm run build
+# 2. 编译
+npm run build
 
 # 3. 启动 SurrealDB
-brew services start surrealdb
+surreal start --bind 0.0.0.0:8001 memory.db
 
-# 4. 启动 llama.cpp 服务
-brew services start llama.cpp
-
-# 5. 配置 OpenClaw (见下方配置章节)
+# 4. 启动 oMLX (Embedding + LLM)
+omlx serve --port 8000
 ```
 
-### 验证安装
+## 配置
 
-```bash
-# 检查插件状态
-openclaw plugins list
-
-# 查看日志
-tail -f ~/.openclaw/logs/gateway.log | grep memory
-```
-
-看到以下日志即表示成功 ✅：
-
-```
-[openclaw-memory] Plugin initialized with SurrealDB
-[openclaw-memory] Plugin registered
-```
-
----
-
-## 🏗️ 架构概览
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     OpenClaw 主程序                          │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐  │
-│  │message_     │    │before_prompt│    │memory_search    │  │
-│  │received Hook│    │_build Hook  │    │Tool             │  │
-│  └──────┬──────┘    └──────┬──────┘    └────────┬────────┘  │
-└─────────┼──────────────────┼────────────────────┼───────────┘
-          │                  │                    │
-          ▼                  ▼                    ▼
-┌─────────────────────────────────────────────────────────────┐
-│           Node.js 插件 (dist/index.js)                       │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
-│  │MemoryFilter  │  │MemoryManager │  │Preference        │   │
-│  │(LLM 云端)     │  │(SurrealDB)   │  │Extractor(云端)   │   │
-│  │消息分类       │  │原生图数据库   │  │偏好提取          │   │
-│  └──────────────┘  └──────────────┘  └──────────────────┘   │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
-│  │Summarizer    │  │Reranker      │  │EntityIndexer     │   │
-│  │(LLM 云端)     │  │(LLM 7B)      │  │(图索引 + 冻结)     │   │
-│  │对话摘要       │  │结果重排序     │  │                 │   │
-│  └──────────────┘  └──────────────┘  └──────────────────┘   │
-│  ┌──────────────┐  ┌──────────────┐                         │
-│  │Hybrid        │  │Conflict      │                         │
-│  │Retriever     │  │Detector      │                         │
-│  │(向量 + 图)     │  │(语义冲突检测) │                         │
-│  └──────────────┘  └──────────────┘                         │
-└─────────────────────────────────────────────────────────────┘
-          │                  │
-          ▼                  ▼
-┌─────────────────┐  ┌─────────────────────────────────────────┐
-│  llama.cpp      │  │  SurrealDB 2.x                          │
-│  - BGE-M3 (8080)│  │  - 原生图数据库 (RELATE 建边)            │
-│    Embedding    │  │  - 向量索引 + 图遍历                     │
-│  - Qwen2.5-7B   │  │  - 自动 TTL 清理                         │
-│    (8082)       │  │                                         │
-└─────────────────┘  └─────────────────────────────────────────┘
-```
-
-**关键说明：**
-
-- **纯 Node.js 实现** - 无 Python 依赖
-- **Hooks 自动触发** - `message_received` 存储消息，`before_prompt_build` 注入上下文
-- **LLM 调用** - 消息分类、偏好提取、对话摘要使用云端 LLM；实体提取、冲突检测、Reranker 使用本地 7B 模型
-- **Embedding** - 使用 BGE-M3 (8080 端口) 生成 1024 维向量
-- **7B 模型** - Qwen2.5-Coder-7B (8082 端口) 用于实体提取/三元组精炼/冲突检测/Reranker
-- **SurrealDB** - 原生图数据库后端，支持图遍历和混合检索
-
----
-
-## 📦 核心功能
-
-### 记忆类型
-
-| 类型 | 说明 | 重要性 | 衰减 | 提升条件 |
-|------|------|--------|------|----------|
-| **Episodic** | 事件、对话、经历 | 0.5-0.8 | 每日 ×0.98 | 访问 >10 次 → Semantic |
-| **Semantic** | 用户偏好、事实 | 0.7-0.9 | 每日 ×0.98 | - |
-| **Reflection** | 自动生成的洞察 | 0.9 (固定) | 无 | 每 50 条 episodic 生成 |
-
-### 🆕 Stage 2 新增功能 (v2.4.0)
-
-| 功能 | 说明 | 优势 |
-|------|------|------|
-| **文档导入** | 支持 PDF、Word、Markdown、HTML 格式 | 自动从本地文件或 URL 导入知识 |
-| **智能语义分段** | 关键词重叠检测、主题转变识别 | 保持语义连贯，不切断句子 |
-| **目录监控** | chokidar 监控目录变化 | 文件放入自动导入，无需手动操作 |
-| **document_import tool** | 支持 URL 和本地文件导入 | 灵活的 API 导入方式 |
-
-### 🆕 Stage 1 新增功能 (v2.2.0)
-
-| 功能 | 说明 | 优势 |
-|------|------|------|
-| **实体索引** | LLM 自动提取人名/地名/组织，构建图节点 | 支持实体级检索和关系遍历 |
-| **图遍历检索** | 从查询实体出发，多跳遍历相关实体 | 发现隐性关联，提升召回率 |
-| **混合检索** | 向量检索 + 图遍历 + Reranker 重排序 | 结合语义相似度和结构化关联 |
-| **Super Node 冻结** | 高频实体自动冻结，防止图爆炸 | 控制图规模，提升遍历效率 |
-| **TTL Pruning** | 7 天未访问的实体自动清理 | 自动维护图索引健康度 |
-| **冲突检测** | 新记忆与旧记忆冲突时自动标记取代 | 保持知识库一致性 |
-
-### 消息分类规则
-
-| 分类 | 示例 | 是否存储 | 记忆类型 |
-|------|------|----------|----------|
-| TRIVIAL | "你好"、"谢谢"、"再见" | ❌ | - |
-| FACT | "我是程序员"、"我用 Mac" | ✅ | semantic |
-| PREFERENCE | "我喜欢 Python"、"我讨厌早起" | ✅ | semantic |
-| EVENT | "今天去了星巴克"、"刚完成项目" | ✅ | episodic |
-| QUESTION | "什么是向量数据库？" | ❌ | - |
-
-### 重要性算法
-
-```typescript
-importance = 0.5 × base_importance
-           + 0.3 × log(access_count + 1)
-           + 0.2 × exp(-days_since_creation / 30)
-```
-
-### 检索流程
-
-1. 查询文本 → BGE-M3 Embedding (1024 维向量)
-2. SurrealDB 向量索引 + 图遍历混合检索
-3. 过滤阈值 <0.6 的结果
-4. 按 `similarity × importance` 排序
-5. 返回 Top 5
-
----
-
-## ⚙️ 配置
-
-### OpenClaw 配置
-
-编辑 `~/.openclaw/config.json`：
-
-#### 文档导入配置（可选）
+在 `~/.openclaw/openclaw.json` 中配置：
 
 ```json
 {
   "plugins": {
-    "slots": {
-      "memory": "openclaw-memory"
-    },
     "entries": {
       "openclaw-memory": {
         "enabled": true,
         "config": {
-          "backend": "surrealdb",
           "surrealdb": {
-            "url": "http://localhost:8000",
+            "url": "ws://127.0.0.1:8001/rpc",
             "namespace": "openclaw",
             "database": "memory",
             "username": "root",
             "password": "root"
           },
           "embedding": {
-            "endpoint": "http://localhost:8080"
+            "endpoint": "http://localhost:8000/v1/embeddings",
+            "model": "bge-m3-mlx-fp16",
+            "apiKey": "your-api-key"
+          },
+          "llm": {
+            "localEndpoint": "http://localhost:8000",
+            "localApiKey": "your-api-key",
+            "localModel": "gemma-4-e4b-it-8bit"
           },
           "documentImport": {
             "watchDir": "~/.openclaw/documents",
@@ -224,389 +66,54 @@ importance = 0.5 × base_importance
 }
 ```
 
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `documentImport.watchDir` | 监控目录，文件放入自动导入 | 无 |
-| `documentImport.chunkSize` | 语义分段目标大小 | 500 |
-| `documentImport.chunkOverlap` | 段落重叠字符数 | 50 |
-
-### 环境变量（可选）
+## CLI 使用
 
 ```bash
-export MEMORY_SURREALDB_URL=http://localhost:8000
-export MEMORY_NAMESPACE=openclaw
-export MEMORY_DATABASE=memory
-export MEMORY_USERNAME=root
-export MEMORY_PASSWORD=root
-export MEMORY_EMBEDDING_ENDPOINT=http://localhost:8080
-```
+# 查看统计
+node dist/memory-cli.js stats
 
----
-
-## 📖 使用示例
-
-### 自动功能（无需手动调用）
-
-记忆系统全自动运行：
-
-1. **自动存储** - 用户消息自动分类并存储
-2. **自动检索** - 每次对话自动注入相关记忆
-3. **偏好提取** - 每 10 条消息自动提取用户偏好
-4. **对话摘要** - 每 10 条消息自动生成摘要
-
-### 文档导入功能
-
-#### 方式一：目录监控（自动导入）
-
-将 PDF/Word/Markdown 文件放入配置的监控目录，系统会自动导入。
-
-```bash
-# 配置监控目录
-mkdir -p ~/.openclaw/documents
-
-# 放入文件后自动导入
-cp ~/Downloads/article.pdf ~/.openclaw/documents/
-```
-
-#### 方式二：使用 document_import 工具
-
-**从 URL 导入：**
-```
-@document_import {"url": "https://example.com/article"}
-```
-
-**从本地文件导入：**
-```
-@document_import {"path": "~/Documents/report.pdf"}
-```
-
-#### 方式三：批量导入脚本
-
-使用 `import-documents.js` 脚本批量导入当前文档目录中的所有文件：
-
-```bash
-cd ~/.openclaw/plugins/openclaw-memory
-node import-documents.js
-```
-
-脚本会自动扫描 `~/.openclaw/documents` 目录，导入所有支持的文档格式。
-
-#### 支持的格式
-
-| 格式 | 扩展名 | 说明 |
-|------|--------|------|
-| PDF | `.pdf` | 使用 pdf-parse 解析 |
-| Word | `.docx` | 使用 mammoth 解析 |
-| Markdown | `.md`, `.markdown` | 直接读取文本 |
-| HTML | URL | 从网页提取文本内容 |
-
-#### 智能语义分段
-
-文档导入时使用**智能语义分段**技术：
-
-1. **段落边界** - 优先保持文档原有结构
-2. **句子边界** - 避免在句子中间切断
-3. **语义相似性** - 使用关键词重叠检测主题变化
-
-确保每个文本块在语义上是连贯的，检索效果更准确。
-
-详细文档请参阅 [docs/DOCUMENT_IMPORT.md](docs/DOCUMENT_IMPORT.md)
-
-### 手动检索（可选）
-
-在对话中调用 `memory_search` 工具：
-
-```
-用户：@memory_search 查询="用户的编程语言经验" top_k=5
-```
-
-或在代码中使用：
-
-```typescript
-const result = await memory_search({
-  query: "用户之前说过什么关于 Python 的事？",
-  top_k: 5,
-  threshold: 0.6
-})
-
-console.log(result.memories)
-```
-
-### CLI 工具
-
-```bash
 # 存储记忆
-node dist/memory-cli.ts store "用户喜欢 TypeScript" \
-  --type=semantic --importance=0.8
+node dist/memory-cli.js store "用户喜欢 TypeScript" --type=semantic
 
 # 搜索记忆
-node dist/memory-cli.ts search "编程语言偏好" \
-  --top-k=5 --threshold=0.6
-
-# 查看统计
-node dist/memory-cli.ts stats
-
-# 列出所有记忆
-node dist/memory-cli.ts list --limit=10
+node dist/memory-cli.js search "编程语言偏好" --top-k=5
 ```
 
----
-
-## 🔧 服务管理
-
-### 启动 llama.cpp 服务
+## 测试
 
 ```bash
-# 使用 Homebrew 管理（推荐）
-brew services start llama.cpp
-
-# 或手动启动
-# Embedding 服务 (BGE-M3)
-llama-server \
-  --hf-repo lm-kit/bge-m3-gguf \
-  --hf-file bge-m3-Q8_0.gguf \
-  --embedding \
-  --port 8080 \
-  --ctx-size 8192 &
-
-# 7B 模型服务 (Qwen2.5-Coder-7B-Instruct) - 实体提取/三元组精炼/冲突检测/Reranker
-llama-server \
-  --hf-repo bartowski/Qwen2.5-Coder-7B-Instruct-GGUF \
-  --hf-file Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf \
-  --port 8082 \
-  --ctx-size 32768 \
-  --n-gpu-layers 99 \
-  --threads 8 \
-  --mlock \
-  --chat-template qwen25 &
-```
-
-### 使用 services.sh（launchd 管理）
-
-```bash
-cd ~/.openclaw/plugins/openclaw-memory
-
-./services.sh status    # 查看服务状态
-./services.sh start     # 启动服务
-./services.sh stop      # 停止服务
-./services.sh restart   # 重启服务
-./services.sh logs      # 查看日志
-```
-
----
-
-## 🐛 故障排查
-
-### 插件未加载
-
-```bash
-# 检查配置语法
-cat ~/.openclaw/config.json | python3 -m json.tool
-
-# 查看完整日志
-tail -f ~/.openclaw/logs/gateway.log
-```
-
-### 数据库连接失败
-
-```bash
-# 检查 SurrealDB 是否运行
-brew services list | grep surrealdb
-
-# 连接 SurrealDB
-surreal sql --endpoint http://localhost:8000 --username root --password root
-
-# 检查命名空间和数据库
-surreal sql --endpoint http://localhost:8000 --username root --password root --ns openclaw --db memory
-```
-
-### Embedding 服务不可用
-
-```bash
-# 测试服务
-curl -X POST http://localhost:8080/embedding \
-  -H "Content-Type: application/json" \
-  -d '{"input":"test"}'
-
-# 查看日志
-brew services logs llama-server
-```
-
-### 常见问题
-
-| 问题 | 解决方案 |
-|------|----------|
-| SurrealDB 连接失败 | `brew services restart surrealdb` |
-| 记忆检索结果为空 | 降低 `threshold` 至 0.5（正常，开始使用后会有数据） |
-| Hook 超时警告 | 正常现象，不影响功能；可增加 `timeout_ms` 配置 |
-| LLM 分类失败 | 检查 8082 端口：`curl http://localhost:8082` |
-| 实体索引延迟 | 检查后台队列：查看日志中 EntityIndexer 状态 |
-
----
-
-## 📁 项目结构
-
-```
-openclaw-memory/
-├── src/                      # TypeScript 源码
-│   ├── index.ts              # 插件入口（Hooks、Tool 注册）
-│   ├── memory-manager.ts     # 内存管理核心
-│   ├── memory-manager-surreal.ts  # SurrealDB 后端实现
-│   ├── surrealdb-client.ts   # SurrealDB 客户端封装
-│   ├── memory-store-surreal.ts    # 记忆存储实现
-│   ├── hybrid-retrieval.ts   # 混合检索（向量 + 图）
-│   ├── entity-indexer.ts     # 实体索引器（图构建）
-│   ├── entity-extractor.ts   # 实体提取（LLM）
-│   ├── memory-filter.ts      # 消息分类（LLM 调用）
-│   ├── preference-extractor.ts # 偏好提取
-│   ├── summarizer.ts         # 对话摘要
-│   ├── reranker.ts           # 重排序
-│   ├── clusterer.ts          # 聚类
-│   ├── conflict-detector.ts  # 冲突检测
-│   ├── document-parser.ts    # 文档解析器 (PDF/Word/Markdown)
-│   ├── document-splitter.ts  # 智能语义分段器
-│   ├── document-watcher.ts   # 目录监控器
-│   ├── url-importer.ts       # URL 导入器
-│   ├── document-importer.ts  # 统一导入入口
-│   └── ...
-├── dist/                     # 编译输出
-├── package.json              # Node.js 配置
-├── tsconfig.json             # TypeScript 配置
-├── deploy.sh                 # 一键部署脚本
-├── services.sh               # launchd/systemd 管理脚本
-└── docs/                     # 文档
-    ├── README.md
-    ├── QUICKSTART.md
-    ├── CONFIG.md
-    ├── ARCHITECTURE.md
-    └── superpowers/
-        ├── specs/            # 设计文档
-        └── plans/            # 实现计划
-```
-
----
-
-## 🧪 测试
-
-```bash
-# 运行完整测试
 npm test
-
-# 单独测试
-npm run test:surreal       # SurrealDB 后端测试
-npm run test:entity-extractor    # 实体提取测试
-npm run test:entity-indexer      # 实体索引器测试
-npm run test:hybrid-retriever    # 混合检索测试
-npm run test:graph-integration   # 图集成测试
-npm run test:recall        # 召回率测试
-npm run test:conflict      # 冲突检测测试
-npm run test:features      # 功能测试
-
-# 文档导入功能测试
-npm run test:document-import      # 解析器集成测试
-npm run test:semantic-splitter    # 智能语义分段测试
-npm run test:document-watcher     # 目录监控器测试
-npm run test:url-importer         # URL 导入器测试
 ```
 
----
+## 架构
 
-## 📊 性能指标
+```
+src/
+├── index.ts              # 插件入口
+├── config.ts             # 统一配置
+├── service-factory.ts    # 服务工厂（单例）
+├── memory-manager-surreal.ts  # 记忆管理器
+├── surrealdb-client.ts   # SurrealDB 客户端
+├── embedding.ts          # 向量嵌入服务
+├── llm-client.ts         # LLM 客户端
+├── entity-extractor.ts   # 实体提取
+├── entity-indexer.ts     # 实体索引（图谱）
+├── hybrid-retrieval.ts   # 混合检索
+├── document-parser.ts    # 文档解析
+├── document-watcher.ts   # 文件监听
+└── memory-cli.ts         # 命令行工具
+```
 
-| 操作 | 延迟 (P50) | 延迟 (P99) |
-|------|-----------|-----------|
-| 消息分类 (LLM) | 800ms | 1500ms |
-| 记忆检索 | 50ms | 300ms |
-| 偏好提取 (云端 LLM) | 500ms | 1200ms |
-| 对话摘要 (云端 LLM) | 500ms | 1200ms |
-| 实体提取 (7B) | 800ms | 1500ms |
-| 冲突检测 (7B) | 300ms | 800ms |
-| Reranker (7B) | 200ms | 500ms |
-| 上下文注入 | <100ms | <200ms |
+## 环境变量
 
-### 资源消耗
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| SURREALDB_URL | http://localhost:8001 | SurrealDB 地址 |
+| EMBEDDING_ENDPOINT | http://localhost:8000/v1/embeddings | Embedding 服务 |
+| EMBEDDING_MODEL | bge-m3-mlx-fp16 | 向量模型 |
+| LLM_ENDPOINT | http://localhost:8000 | LLM 服务 |
+| LLM_MODEL | gemma-4-e4b-it-8bit | LLM 模型 |
 
-| 组件 | 内存 | CPU |
-|------|------|-----|
-| 插件进程 | ~50MB | 低 |
-| BGE-M3 (8080) | ~500MB | 中（推理时） |
-| Qwen2.5-Coder-7B (8082) | ~4GB | 中（推理时） |
-| SurrealDB | ~150MB | 低 |
+## License
 
-**总计：** 约 5GB 内存（模型全加载）
-
----
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 开启 Pull Request
-
----
-
-## 📝 更新日志
-
-### v2.4.0 (2026-03)
-
-- ✅ **文档导入功能** - 支持 PDF、Word、Markdown、HTML 格式导入
-- ✅ **智能语义分段** - 关键词重叠检测、主题转变识别，保持语义连贯
-- ✅ **目录监控器** - chokidar 监控目录，文件放入自动导入
-- ✅ **document_import tool** - 支持从 URL 或本地文件导入
-- ✅ **完整测试覆盖** - 4 个测试文件，所有测试通过
-
-### v2.3.0 (2026-03)
-- ✅ **1B 模型清理** - 迁移到 7B 模型和云端 LLM，减少本地资源占用
-- ✅ **7B 模型增强** - Qwen2.5-Coder-7B 用于实体提取、冲突检测、Reranker
-- ✅ **云端 LLM 集成** - 偏好提取、对话摘要使用云端 LLM
-- ✅ **launchd 服务配置** - 7B 模型开机自启动配置
-- ✅ **文档更新** - 本地部署、服务配置、架构说明完善
-
-### v2.2.0 (2026-03)
-- ✅ **SurrealDB 后端** - 原生图数据库支持
-- ✅ **实体索引器** - LLM 自动提取人名/地名/组织，构建图节点
-- ✅ **混合检索** - 向量检索 + 图遍历 + Reranker 重排序
-- ✅ **图遍历检索** - 从查询实体出发，多跳遍历相关实体
-- ✅ **Super Node 冻结** - 高频实体自动冻结，防止图爆炸
-- ✅ **TTL Pruning** - 7 天未访问的实体自动清理
-- ✅ **异步写入架构** - 消息队列 + 后台 Worker，非阻塞写入
-- ✅ **两层实体提取** - Layer 1 (Regex) → Layer 2 (7B 模型)
-
-### v2.1.0 (2026-03)
-- ✅ 新增冲突检测模块
-- ✅ 优化重排序算法
-- ✅ 修复 SurrealDB 索引问题
-
-### v2.0.0 (2026-02)
-- ✅ 重构为纯 TypeScript 实现（移除 Python 依赖）
-- ✅ 新增自动反思生成
-- ✅ 新增记忆提升机制
-- ✅ 性能提升 40%
-
----
-
-## 📄 许可证
-
-MIT License
-
----
-
-## 🙏 致谢
-
-- [OpenClaw](https://github.com/openclaw/openclaw) - AI 助手框架
-- [SurrealDB](https://surrealdb.com/) - 原生图数据库
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - 本地 LLM 推理
-
----
-
-<div align="center">
-
-**Made with ❤️ for OpenClaw**
-
-[报告问题](https://github.com/liufeifory/openclaw-memory/issues) · [请求特性](https://github.com/liufeifory/openclaw-memory/issues)
-
-</div>
+MIT

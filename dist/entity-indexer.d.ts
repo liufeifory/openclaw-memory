@@ -12,6 +12,7 @@
  */
 import { SurrealDatabase } from './surrealdb-client.js';
 import { EntityExtractor } from './entity-extractor.js';
+import { LLMClient } from './llm-client.js';
 /**
  * Indexer statistics
  */
@@ -56,7 +57,7 @@ export declare class EntityIndexer {
     private readonly pruneIntervalDays;
     private db;
     private extractor;
-    constructor(db?: SurrealDatabase);
+    constructor(db?: SurrealDatabase, llmClient?: LLMClient);
     /**
      * Set database client
      */

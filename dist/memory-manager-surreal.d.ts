@@ -3,6 +3,8 @@
  */
 import { MigrationResult } from './surrealdb-client.js';
 import type { MemoryWithSimilarity } from './memory-store-surreal.js';
+import type { PluginConfig } from './config.js';
+export type MemoryManagerConfig = PluginConfig;
 export interface RetrievalFunnelStats {
     initialCount: number;
     afterTimeDecay: number;
@@ -13,27 +15,6 @@ export interface RetrievalFunnelStats {
     avgSimilarity: number;
     avgImportance: number;
     typeDistribution: Record<string, number>;
-}
-export interface MemoryManagerConfig {
-    surrealdb: {
-        url: string;
-        namespace: string;
-        database: string;
-        username: string;
-        password: string;
-    };
-    embedding?: {
-        endpoint: string;
-    };
-    llm?: {
-        endpoint?: string;
-        cloudEnabled?: boolean;
-        cloudProvider?: 'bailian' | 'openai' | 'custom';
-        cloudBaseUrl?: string;
-        cloudApiKey?: string;
-        cloudModel?: string;
-        cloudTasks?: ('preference' | 'summarizer' | 'clusterer' | 'reranker')[];
-    };
 }
 export declare class MemoryManager {
     private db;

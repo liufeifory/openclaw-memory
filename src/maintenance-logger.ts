@@ -65,3 +65,45 @@ export function logWarn(message: string): void {
 export function logError(message: string): void {
   logMaintenance('ERROR', message);
 }
+
+/**
+ * Error severity levels for unified error handling.
+ */
+export enum ErrorSeverity {
+  CRITICAL = 'critical',   // Must interrupt flow, throw error
+  WARNING = 'warning',     // Can continue, log and proceed
+  INFO = 'info',           // Ignorable, minimal logging
+}
+
+/**
+ * Unified error handling - logs with stack trace and handles by severity.
+ * @param error - The error object
+ * @param context - Context string (e.g., 'vectorSearch', 'processQueue')
+ * @param severity - Error severity level
+ * @returns void (throws for CRITICAL, logs for others)
+ */
+export function handleError(
+  error: Error | any,
+  context: string,
+  severity: ErrorSeverity = ErrorSeverity.WARNING
+): void {
+  const errorMsg = error?.message || String(error);
+  const stackTrace = error?.stack || '';
+
+  if (severity === ErrorSeverity.CRITICAL) {
+    logError(`[${context}] CRITICAL: ${errorMsg}`);
+    if (stackTrace) {
+      logError(`[${context}] Stack: ${stackTrace}`);
+    }
+    throw error;  // Re-throw for critical errors
+  } else if (severity === ErrorSeverity.WARNING) {
+    logWarn(`[${context}] ${errorMsg}`);
+    if (stackTrace) {
+      logWarn(`[${context}] Stack: ${stackTrace}`);
+    }
+  } else {
+    // INFO level - minimal logging
+    logInfo(`[${context}] ${errorMsg}`);
+  }
+}
+

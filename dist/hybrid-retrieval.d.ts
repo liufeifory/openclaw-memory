@@ -19,6 +19,7 @@ import { EmbeddingService } from './embedding.js';
 import { EntityIndexer } from './entity-indexer.js';
 import { Reranker } from './reranker.js';
 import { ExtractedEntity } from './entity-extractor.js';
+import { LLMClient } from './llm-client.js';
 /**
  * Memory result with similarity score
  */
@@ -60,7 +61,7 @@ export declare class HybridRetriever {
     private entityIndexer;
     private reranker;
     private entityExtractor;
-    constructor(db: SurrealDatabase, embedding: EmbeddingService, entityIndexer: EntityIndexer, reranker: Reranker);
+    constructor(db: SurrealDatabase, embedding: EmbeddingService, entityIndexer: EntityIndexer, reranker: Reranker, llmClient?: LLMClient);
     /**
      * Get database client (for Stage 2 multi-degree retrieval)
      */

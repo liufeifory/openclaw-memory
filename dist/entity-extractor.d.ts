@@ -17,6 +17,7 @@ import { LLMClient } from './llm-client.js';
  */
 export interface ExtractedEntity {
     name: string;
+    entity_type?: string;
     confidence: number;
     source?: 'regex' | 'cache' | '7b';
     originalText?: string;

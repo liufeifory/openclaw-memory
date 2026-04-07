@@ -17,6 +17,11 @@ import { EntityIndexer } from './entity-indexer.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
 import type { MemoryWithSimilarity } from './memory-store-surreal.js';
 import { LLMClient } from './llm-client.js';
+import { ServiceFactory, getDB, getEmbedding, getLLM } from './service-factory.js';
+import type { PluginConfig } from './config.js';
+
+// Re-export PluginConfig as MemoryManagerConfig for backward compatibility
+export type MemoryManagerConfig = PluginConfig;
 
 export interface RetrievalFunnelStats {
   initialCount: number;
@@ -28,28 +33,6 @@ export interface RetrievalFunnelStats {
   avgSimilarity: number;
   avgImportance: number;
   typeDistribution: Record<string, number>;
-}
-
-export interface MemoryManagerConfig {
-  surrealdb: {
-    url: string;
-    namespace: string;
-    database: string;
-    username: string;
-    password: string;
-  };
-  embedding?: {
-    endpoint: string;
-  };
-  llm?: {
-    endpoint?: string;
-    cloudEnabled?: boolean;
-    cloudProvider?: 'bailian' | 'openai' | 'custom';
-    cloudBaseUrl?: string;
-    cloudApiKey?: string;
-    cloudModel?: string;
-    cloudTasks?: ('preference' | 'summarizer' | 'clusterer' | 'reranker')[];
-  };
 }
 
 export class MemoryManager {
@@ -77,23 +60,19 @@ export class MemoryManager {
   };
 
   constructor(config: MemoryManagerConfig) {
-    this.db = new SurrealDatabase(config.surrealdb);
-    this.embedding = new EmbeddingService(config.embedding?.endpoint ?? 'http://localhost:8080');
+    // Initialize ServiceFactory if not already initialized
+    if (!ServiceFactory.isInitialized()) {
+      ServiceFactory.init(config);
+    }
+
+    // Get services from factory (single source of truth)
+    this.db = getDB();
+    this.embedding = getEmbedding();
     this.memoryStore = new MemoryStore(this.db, this.embedding);
     this.contextBuilder = new ContextBuilder();
 
-    // Create shared LLM limiter for rate control
-    const llmConfig: NonNullable<MemoryManagerConfig['llm']> = config.llm || {};
-    const llmClient = new LLMClient({
-      localEndpoint: llmConfig.endpoint ?? 'http://localhost:8082',
-      cloudEnabled: llmConfig.cloudEnabled ?? false,
-      cloudProvider: llmConfig.cloudProvider,
-      cloudBaseUrl: llmConfig.cloudBaseUrl,
-      cloudApiKey: llmConfig.cloudApiKey,
-      cloudModel: llmConfig.cloudModel,
-      cloudTasks: llmConfig.cloudTasks,
-    });
-
+    // Get LLM client from factory
+    const llmClient = getLLM();
     this.limiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100, queueLimit: 50 });
 
     // Local-only tasks (reranker, conflict detector, entity extractor)

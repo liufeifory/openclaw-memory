@@ -1,9 +1,14 @@
 /**
- * Embedding service using llama.cpp HTTP endpoint.
- * Supports BGE-style task_type parameter for query/document distinction.
+ * Embedding service supporting multiple backends:
+ * - llama.cpp HTTP endpoint (legacy)
+ * - OpenAI-compatible API (oMLX, vLLM, etc.)
  */
 
 import { logWarn, logInfo, logError } from './maintenance-logger.js';
+import type { EmbeddingConfig } from './config.js';
+
+// Re-export EmbeddingConfig from config.ts for backward compatibility
+export type { EmbeddingConfig } from './config.js';
 
 export interface EmbeddingResponse {
   embedding: number[];
@@ -13,11 +18,41 @@ export type EmbeddingTaskType = 'query' | 'document' | 'search_query' | 'passage
 
 export class EmbeddingService {
   private endpoint: string;
+  private model?: string;
+  private apiKey?: string;
+  private apiType: 'llama' | 'openai';
   private cache = new Map<string, number[]>();
   private readonly CACHE_LIMIT = 1000;  // LRU cache limit
 
-  constructor(endpoint: string = 'http://localhost:8080') {
-    this.endpoint = endpoint;
+  constructor(config: EmbeddingConfig | string) {
+    // Support both new (object) and legacy (string) format
+    if (typeof config === 'string') {
+      // Legacy: just endpoint string
+      this.endpoint = config;
+      this.apiType = 'llama';
+      logWarn('[EmbeddingService] Using legacy string config, consider using EmbeddingConfig object');
+    } else {
+      // New: config object
+      this.endpoint = config.endpoint;
+      this.model = config.model;
+      this.apiKey = config.apiKey;
+      this.apiType = this.detectApiType(config.endpoint);
+    }
+
+    if (!this.endpoint) {
+      throw new Error('Embedding endpoint is required');
+    }
+  }
+
+  /**
+   * Detect API type from endpoint URL
+   */
+  private detectApiType(endpoint: string): 'llama' | 'openai' {
+    // OpenAI-compatible endpoints typically include /v1/ in the path
+    if (endpoint.includes('/v1/')) {
+      return 'openai';
+    }
+    return 'llama';
   }
 
   /**
@@ -45,17 +80,86 @@ export class EmbeddingService {
       return this.cache.get(cacheKey)!;
     }
 
-    logInfo(`[embedding] Calling ${this.endpoint}/embedding with text: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
+    if (this.apiType === 'openai') {
+      return this.embedOpenAI(inputText, cacheKey);
+    } else {
+      return this.embedLlama(inputText, cacheKey);
+    }
+  }
+
+  /**
+   * Embed using OpenAI-compatible API (oMLX, vLLM, etc.)
+   */
+  private async embedOpenAI(text: string, cacheKey: string): Promise<number[]> {
+    const url = this.endpoint.includes('/v1/embeddings')
+      ? this.endpoint
+      : `${this.endpoint.replace(/\/$/, '')}/v1/embeddings`;
+
+    logInfo(`[embedding] OpenAI API: ${url}`);
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (this.apiKey) {
+      headers['Authorization'] = `Bearer ${this.apiKey}`;
+    }
+
+    const body: any = {
+      input: text,
+      model: this.model || 'bge-m3',
+    };
 
     try {
-      // Add 30 second timeout for embedding requests (handles llama-server cold start)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        logError(`[embedding] OpenAI API error ${response.status}: ${errorText}`);
+        return [];
+      }
+
+      const result: any = await response.json();
+
+      // OpenAI format: {data: [{embedding: [...]}], model: "..."}
+      const embedding = result.data?.[0]?.embedding;
+      if (!embedding || !Array.isArray(embedding)) {
+        logError(`[embedding] Invalid OpenAI response format`);
+        return [];
+      }
+
+      const normalized = this.normalize(embedding);
+      this.setCache(cacheKey, normalized);
+      return normalized;
+    } catch (error: any) {
+      logError(`[embedding] OpenAI API error: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Embed using llama.cpp HTTP API (legacy)
+   */
+  private async embedLlama(text: string, cacheKey: string): Promise<number[]> {
+    logInfo(`[embedding] Llama API: ${this.endpoint}/embedding`);
+
+    try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 30000);
 
       const response = await fetch(`${this.endpoint}/embedding`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: inputText }),
+        body: JSON.stringify({ input: text }),
         signal: controller.signal,
       });
 
@@ -103,7 +207,11 @@ export class EmbeddingService {
         logError('[embedding] Fetch timeout after 30000ms (llama-server may be cold starting)');
       } else {
         logError(`[embedding] Fetch error: ${error.message}`);
+        if (error.stack) {
+          logError(`[embedding] Stack trace: ${error.stack}`);
+        }
       }
+      logWarn('[embedding] Returning empty embedding due to fetch failure');
       return [];
     }
   }
@@ -113,7 +221,6 @@ export class EmbeddingService {
    */
   private setCache(text: string, embedding: number[]): void {
     if (this.cache.size >= this.CACHE_LIMIT) {
-      // Remove oldest entry (first key)
       const firstKey = this.cache.keys().next().value;
       if (firstKey) this.cache.delete(firstKey);
     }

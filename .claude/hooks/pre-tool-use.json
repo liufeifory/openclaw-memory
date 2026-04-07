@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Edit": [
+      {
+        "matcher": ".*\\.(ts|js)$",
+        "hooks": [
+          {
+            "type": "command", 
+            "command": "echo '⚠️ 检查: 是否修改了接口？grep -rn 使用处同步更新'"
+          }
+        ]
+      }
+    ]
+  }
+}

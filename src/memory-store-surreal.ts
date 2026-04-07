@@ -402,7 +402,7 @@ export class MemoryStore {
   }
 
   /**
-   * Get memory statistics.
+   * Get memory statistics from database (not memory cache).
    */
   async getStats(): Promise<{
     episodic_count: number;
@@ -410,12 +410,13 @@ export class MemoryStore {
     reflection_count: number;
     total_count: number;
   }> {
-    const dbStats = await this.db.getStats();
+    // Query actual counts from database
+    const counts = await this.db.queryTypeCounts();
     return {
-      episodic_count: this.episodicMemories.size,
-      semantic_count: this.semanticMemories.size,
-      reflection_count: this.reflectionMemories.size,
-      total_count: dbStats.total_points,
+      episodic_count: counts.episodic || 0,
+      semantic_count: counts.semantic || 0,
+      reflection_count: counts.reflection || 0,
+      total_count: counts.total || 0,
     };
   }
 

@@ -15,8 +15,8 @@
  * 8. Return topK
  */
 import { EntityExtractor } from './entity-extractor.js';
-import { LLMClient } from './llm-client.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
+import { getLLM, ServiceFactory } from './service-factory.js';
 /**
  * HybridRetriever - combines vector and graph search
  */
@@ -26,14 +26,20 @@ export class HybridRetriever {
     entityIndexer;
     reranker;
     entityExtractor;
-    constructor(db, embedding, entityIndexer, reranker) {
+    constructor(db, embedding, entityIndexer, reranker, llmClient) {
         this.db = db;
         this.embedding = embedding;
         this.entityIndexer = entityIndexer;
         this.reranker = reranker;
-        // Create a minimal LLMClient for EntityExtractor
-        const minimalClient = new LLMClient({ localEndpoint: 'http://localhost:8082' });
-        this.entityExtractor = new EntityExtractor(minimalClient);
+        // Get LLMClient from factory if not provided
+        const client = llmClient || (ServiceFactory.isInitialized() ? getLLM() : null);
+        if (client) {
+            this.entityExtractor = new EntityExtractor(client);
+        }
+        else {
+            this.entityExtractor = null;
+            logWarn('[HybridRetriever] Created without LLMClient - entity extraction disabled');
+        }
     }
     /**
      * Get database client (for Stage 2 multi-degree retrieval)
@@ -85,10 +91,20 @@ export class HybridRetriever {
             let graphResults = [];
             if (validEntityIds.length > 0) {
                 try {
-                    graphResults = await Promise.race([
-                        this.graphSearch(validEntityIds, INITIAL_K),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('Graph search timeout')), GRAPH_TIMEOUT_MS))
-                    ]);
+                    // Use AbortController for proper timeout cleanup (avoid memory leak from un-cleared setTimeout)
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), GRAPH_TIMEOUT_MS);
+                    try {
+                        graphResults = await this.graphSearch(validEntityIds, INITIAL_K);
+                        clearTimeout(timeoutId); // Clean up timeout on success
+                    }
+                    catch (searchError) {
+                        clearTimeout(timeoutId); // Clean up timeout on error
+                        if (controller.signal.aborted) {
+                            throw new Error('Graph search timeout');
+                        }
+                        throw searchError;
+                    }
                     stats.graphCount = graphResults.length;
                 }
                 catch (timeoutError) {
@@ -97,6 +113,9 @@ export class HybridRetriever {
                     }
                     else {
                         logError(`[HybridRetriever] graphSearch failed: ${timeoutError.message}`);
+                        if (timeoutError.stack) {
+                            logError(`[HybridRetriever] Stack: ${timeoutError.stack}`);
+                        }
                     }
                     // Continue with vector-only results
                     graphResults = [];
@@ -140,7 +159,11 @@ export class HybridRetriever {
         }
         catch (error) {
             logError(`[HybridRetriever] retrieve failed: ${error.message}`);
+            if (error.stack) {
+                logError(`[HybridRetriever] Stack: ${error.stack}`);
+            }
             // Return empty result on error
+            logWarn('[HybridRetriever] Returning empty results due to retrieve failure');
             return {
                 results: [],
                 stats,
@@ -180,6 +203,10 @@ export class HybridRetriever {
         }
         catch (error) {
             logError(`[HybridRetriever] vectorSearch failed: ${error.message}`);
+            if (error.stack) {
+                logError(`[HybridRetriever] Stack: ${error.stack}`);
+            }
+            logWarn('[HybridRetriever] Returning empty results due to vector search failure');
             return [];
         }
     }

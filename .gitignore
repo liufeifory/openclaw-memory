@@ -1,20 +1,8 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-*.swp
-*.swo
-*~
-*.py  # Python source files (Node.js implementation only)
-
-# Node
+# Dependencies
 node_modules/
-*.log
+
+# Build output
+dist/
 
 # Config
 .env
@@ -26,12 +14,22 @@ logs/
 
 # Database
 *.sqlite3
+surrealdb/
 
-# Runtime directories
-llama.cpp/
+# IDE
+.vscode/
+.idea/
 
-# Git worktrees
-.worktrees/
+# OS
+Thumbs.db
 
-# SurrealDB data
-surrealdb/data/
+# Temporary files
+*.tmp
+*.temp
+*.mjs
+*.cjs
+*.py
+
+# Test reports
+TEST_REPORT*.md
+*-report.md

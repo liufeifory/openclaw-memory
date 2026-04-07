@@ -1,8 +1,98 @@
 /**
- * SurrealDB Client wrapper - SurrealDB 2.x compatible
+ * SurrealDB Client wrapper - SurrealDB 3.x compatible via HTTP API
  */
-import { Surreal, RecordId } from 'surrealdb';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
+// HTTP API client for SurrealDB 3.x
+class SurrealHTTPClient {
+    baseUrl;
+    authHeader;
+    namespace;
+    database;
+    constructor(url, username, password, namespace, database) {
+        // Convert ws:// to http:// and strip /rpc suffix if present
+        this.baseUrl = url
+            .replace('ws://', 'http://')
+            .replace('wss://', 'https://')
+            .replace(/\/rpc$/, '');
+        this.authHeader = 'Basic ' + Buffer.from(username + ':' + password).toString('base64');
+        this.namespace = namespace;
+        this.database = database;
+    }
+    async query(sql, params) {
+        // Build LET statements for params if provided
+        let letStatements = '';
+        if (params && Object.keys(params).length > 0) {
+            for (const [key, value] of Object.entries(params)) {
+                // Serialize value appropriately for SurrealDB
+                let serializedValue;
+                if (Array.isArray(value)) {
+                    // Arrays need to be serialized as JSON-like format
+                    serializedValue = JSON.stringify(value);
+                }
+                else if (typeof value === 'string') {
+                    // Strings need quotes
+                    serializedValue = `"${value.replace(/"/g, '\\"')}"`;
+                }
+                else if (typeof value === 'number') {
+                    serializedValue = value.toString();
+                }
+                else if (typeof value === 'boolean') {
+                    serializedValue = value ? 'true' : 'false';
+                }
+                else if (value === null || value === undefined) {
+                    serializedValue = 'NONE';
+                }
+                else {
+                    // Objects need JSON serialization
+                    serializedValue = JSON.stringify(value);
+                }
+                letStatements += `LET ${key.startsWith('$') ? key : '$' + key} = ${serializedValue};`;
+            }
+        }
+        // Use text/plain format for SurrealDB 3.x HTTP API
+        const fullSql = `USE NS ${this.namespace} DB ${this.database};${letStatements}${sql}${sql.endsWith(';') ? '' : ';'}`;
+        const response = await fetch(`${this.baseUrl}/sql`, {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'text/plain',
+                'Authorization': this.authHeader,
+            },
+            body: fullSql,
+        });
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`SurrealDB HTTP error ${response.status}: ${text}`);
+        }
+        const data = await response.json();
+        // SurrealDB 3.x HTTP API returns array of results
+        // First result is USE statement, then LET statements, then actual query
+        if (Array.isArray(data) && data.length > 0) {
+            // Count how many non-query results we have (USE + LET statements)
+            const nonQueryCount = 1 + (params ? Object.keys(params).length : 0);
+            if (data.length > nonQueryCount) {
+                // Return the actual query result (skip USE and LET results)
+                return data.slice(nonQueryCount).map((r) => r.result);
+            }
+            else if (data.length === nonQueryCount) {
+                // Only USE and LET, no actual query result - this shouldn't happen normally
+                return [];
+            }
+            // Fallback: if we have 1 result, it might be the query itself
+            return data[0].result;
+        }
+        return data;
+    }
+    async healthCheck() {
+        try {
+            const result = await this.query('SELECT count() FROM information_schema.tables GROUP ALL');
+            return Array.isArray(result);
+        }
+        catch {
+            return false;
+        }
+    }
+}
 const MEMORY_TABLE = 'memory';
 const ENTITY_TABLE = 'entity';
 const MEMORY_ENTITY_TABLE = 'memory_entity';
@@ -38,6 +128,9 @@ export class SurrealDatabase {
     client = null;
     initialized = false;
     config;
+    // Heartbeat for connection monitoring
+    heartbeatInterval;
+    heartbeatEnabled = true;
     // Retry configuration - increased for boot-time race conditions
     maxRetries = 10;
     baseDelayMs = 2000;
@@ -57,11 +150,14 @@ export class SurrealDatabase {
         }
         // Client exists, check if connection is still alive
         try {
-            await this.client.query('SELECT 1 AS ok FROM NONE', {});
+            const result = await this.client.query('SELECT count() FROM information_schema.tables GROUP ALL');
+            if (!Array.isArray(result)) {
+                throw new Error('Invalid health check result');
+            }
         }
-        catch {
+        catch (error) {
             // Connection dead, reconnect
-            logInfo('[SurrealDB] Connection lost, reconnecting...');
+            logInfo(`[SurrealDB] Connection lost, reconnecting... (${error.message})`);
             this.client = null;
             this.initialized = false;
             await this.initialize();
@@ -73,8 +169,10 @@ export class SurrealDatabase {
             // Connection exists, check if it's still alive
             try {
                 // Try a simple query to verify connection
-                await this.client.query('SELECT 1 AS ok FROM NONE', {});
-                return { success: true, migrated: false, changes: [] };
+                const result = await this.client.query('SELECT count() FROM information_schema.tables GROUP ALL');
+                if (Array.isArray(result)) {
+                    return { success: true, migrated: false, changes: [] };
+                }
             }
             catch {
                 // Connection dead, will reconnect below
@@ -83,17 +181,9 @@ export class SurrealDatabase {
         }
         const result = { success: true, migrated: false, changes: [] };
         try {
-            // SurrealDB v2.x: Connect with namespace, database, and authentication in options
+            // Create HTTP client for SurrealDB 3.x
             await this.executeWithRetry(async () => {
-                this.client = new Surreal();
-                await this.client.connect(this.config.url, {
-                    namespace: this.config.namespace,
-                    database: this.config.database,
-                    authentication: {
-                        username: this.config.username,
-                        password: this.config.password,
-                    },
-                });
+                this.client = new SurrealHTTPClient(this.config.url, this.config.username, this.config.password, this.config.namespace, this.config.database);
             }, 'connect');
             const schemaMigrated = await this.createSchema();
             if (schemaMigrated) {
@@ -101,6 +191,8 @@ export class SurrealDatabase {
                 result.migrated = true;
             }
             this.initialized = true;
+            // Start heartbeat for connection monitoring
+            this.startHeartbeat();
         }
         catch (error) {
             result.success = false;
@@ -425,39 +517,30 @@ export class SurrealDatabase {
         return this.executeQuery(sql, params);
     }
     /**
-     * Raw query execution with automatic re-authentication on permission errors.
+     * Raw query execution with automatic reconnection on errors.
      * This is the low-level method that all query operations should use.
      */
     async executeQuery(sql, params) {
         // Ensure we have a valid connection
         await this.ensureConnected();
         try {
-            const result = await this.client.query(sql, params || {});
+            const result = await this.client.query(sql, params);
             return result;
         }
         catch (error) {
-            // Re-authenticate on permission errors
-            if (error.message?.includes('Anonymous access not allowed') ||
-                error.message?.includes('Not enough permissions')) {
-                logInfo('[SurrealDB] Re-authenticating due to permission error...');
-                await this.executeWithRetry(async () => {
-                    await this.client.signin({
-                        username: this.config.username,
-                        password: this.config.password,
-                    });
-                }, 'signin');
-                // Retry the query
-                return this.client.query(sql, params || {});
-            }
             // On connection lost, try to reconnect
-            if (error.message?.includes('connection') || error.message?.includes('closed') ||
-                error.message?.includes('timeout') || error.message?.includes('ECONNRESET')) {
+            const errorMsg = error.message?.toLowerCase() || '';
+            if (errorMsg.includes('connection') || errorMsg.includes('closed') ||
+                errorMsg.includes('timeout') || errorMsg.includes('econnreset') ||
+                errorMsg.includes('fetch') || errorMsg.includes('econnrefused') ||
+                errorMsg.includes('socket') || errorMsg.includes('network') ||
+                errorMsg.includes('aborted') || errorMsg.includes('disconnect')) {
                 logInfo('[SurrealDB] Connection error detected, reconnecting...');
                 this.client = null;
                 this.initialized = false;
                 await this.ensureConnected();
                 // Retry the query once
-                return this.client.query(sql, params || {});
+                return this.client.query(sql, params);
             }
             throw error;
         }
@@ -479,10 +562,56 @@ export class SurrealDatabase {
         }
         throw new Error(`[SurrealDB] ${operationName} failed after ${this.maxRetries} retries: ${lastError?.message}`);
     }
+    /**
+     * Start heartbeat to monitor connection health
+     */
+    startHeartbeat() {
+        if (this.heartbeatInterval) {
+            return; // Already running
+        }
+        this.heartbeatEnabled = true;
+        this.heartbeatInterval = setInterval(async () => {
+            if (!this.heartbeatEnabled || !this.client) {
+                return;
+            }
+            try {
+                const healthy = await this.client.healthCheck();
+                if (!healthy) {
+                    logInfo('[SurrealDB] Heartbeat failed, marking connection for reconnect');
+                    this.initialized = false;
+                }
+            }
+            catch (error) {
+                logWarn(`[SurrealDB] Heartbeat error: ${error.message}`);
+                this.initialized = false;
+            }
+        }, 30000); // Check every 30 seconds
+        logInfo('[SurrealDB] Heartbeat started (30s interval)');
+    }
+    /**
+     * Stop heartbeat monitoring
+     */
+    stopHeartbeat() {
+        this.heartbeatEnabled = false;
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = undefined;
+            logInfo('[SurrealDB] Heartbeat stopped');
+        }
+    }
+    /**
+     * Dispose - clean up resources
+     */
+    dispose() {
+        this.stopHeartbeat();
+        this.client = null;
+        this.initialized = false;
+        logInfo('[SurrealDB] Disposed');
+    }
     async upsert(id, embedding, payload, options) {
         // Ensure we have a valid connection
         await this.ensureConnected();
-        const recordId = new RecordId(MEMORY_TABLE, id);
+        const recordId = `${MEMORY_TABLE}:${id}`;
         // Build SET clause for upsert
         const fields = [];
         const params = {};
@@ -621,7 +750,7 @@ export class SurrealDatabase {
         // Ensure we have a valid connection
         await this.ensureConnected();
         try {
-            const recordId = new RecordId(MEMORY_TABLE, id);
+            const recordId = `${MEMORY_TABLE}:${id}`;
             const result = await this.executeQuery(`SELECT * FROM ${String(recordId)}`, {});
             // SurrealDB 3.x returns [[record]] format
             let records = [];
@@ -649,7 +778,7 @@ export class SurrealDatabase {
         // Ensure we have a valid connection
         await this.ensureConnected();
         try {
-            const recordId = new RecordId(MEMORY_TABLE, id);
+            const recordId = `${MEMORY_TABLE}:${id}`;
             // Build SET clause for update
             const fields = [];
             const params = {};
@@ -756,7 +885,7 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Client not connected');
         }
         for (const id of ids) {
-            const recordId = new RecordId(MEMORY_TABLE, id);
+            const recordId = `${MEMORY_TABLE}:${id}`;
             await this.executeQuery(`DELETE ${String(recordId)}`, {});
         }
     }
@@ -787,6 +916,47 @@ export class SurrealDatabase {
             collection_name: MEMORY_TABLE,
         };
     }
+    /**
+     * Query counts by memory type (episodic, semantic, reflection).
+     */
+    async queryTypeCounts() {
+        // Ensure we have a valid connection
+        await this.ensureConnected();
+        try {
+            const result = await this.executeQuery(`
+        SELECT type, count() AS count FROM memory GROUP BY type
+      `);
+            // Parse SurrealDB 3.x result format
+            let data = [];
+            if (Array.isArray(result) && result.length > 0) {
+                if (Array.isArray(result[0])) {
+                    data = result[0] || [];
+                }
+                else if (result[0]?.result) {
+                    data = result[0].result || [];
+                }
+            }
+            const counts = {
+                episodic: 0,
+                semantic: 0,
+                reflection: 0,
+            };
+            for (const row of data) {
+                const type = row.type || 'episodic';
+                const count = row.count || 0;
+                counts[type] = count;
+            }
+            return {
+                episodic: counts.episodic || 0,
+                semantic: counts.semantic || 0,
+                reflection: counts.reflection || 0,
+                total: counts.episodic + counts.semantic + counts.reflection,
+            };
+        }
+        catch {
+            return { episodic: 0, semantic: 0, reflection: 0, total: 0 };
+        }
+    }
     async getSchemaVersion() {
         if (!this.client) {
             return 0;
@@ -813,12 +983,10 @@ export class SurrealDatabase {
             return;
         }
         try {
-            const recordId = new RecordId('metadata', 1);
-            await this.client.upsert({
-                id: recordId,
-                schema_version: SCHEMA_VERSION,
-                updated_at: new Date().toISOString(),
-            });
+            await this.query(`
+        UPSERT INTO metadata:id 'metadata:1'
+        SET schema_version = ${SCHEMA_VERSION}, updated_at = time::now();
+      `);
         }
         catch (error) {
             logError(`[SurrealDB] Failed to store schema version: ${error.message}`);
@@ -1559,10 +1727,8 @@ export class SurrealDatabase {
         }
     }
     async close() {
-        if (this.client) {
-            await this.client.close();
-            this.client = null;
-        }
+        // HTTP client doesn't need to close connections
+        this.client = null;
         // Reset initialized flag to allow re-initialization after close
         this.initialized = false;
     }

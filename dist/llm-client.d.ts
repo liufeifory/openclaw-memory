@@ -5,20 +5,13 @@
  * - Local llama.cpp server (OpenAI-compatible API)
  * - Cloud providers (Aliyun Bailian, etc.)
  */
+import type { LLMConfig } from './config.js';
+export type { LLMConfig } from './config.js';
 export interface LLMOptions {
     maxTokens?: number;
     temperature?: number;
     topP?: number;
     model?: string;
-}
-export interface LLMConfig {
-    localEndpoint?: string;
-    cloudEnabled?: boolean;
-    cloudProvider?: 'bailian' | 'openai' | 'custom';
-    cloudBaseUrl?: string;
-    cloudApiKey?: string;
-    cloudModel?: string;
-    cloudTasks?: ('preference' | 'summarizer' | 'clusterer' | 'reranker')[];
 }
 export declare class LLMClient {
     private config;
@@ -42,6 +35,11 @@ export declare class LLMClient {
      */
     private buildHeaders;
     /**
+     * Detect and clean repetitive patterns in LLM output
+     * Handles cases like "MySQL 8.4.4.4.4.4.4.4..." or "the the the the"
+     */
+    private cleanRepetitiveOutput;
+    /**
      * Parse response based on provider type
      */
     private parseResponse;
@@ -54,6 +52,7 @@ export declare class LLMClient {
     complete(prompt: string, taskType: string, options?: LLMOptions): Promise<string>;
     /**
      * Parse JSON response from LLM
+     * Handles responses with markdown code blocks, "Thinking Process" prefix, etc.
      */
     completeJson<T>(prompt: string, taskType: string, options?: LLMOptions): Promise<T>;
     /**

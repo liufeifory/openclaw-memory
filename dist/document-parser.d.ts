@@ -21,9 +21,14 @@ export declare class DocumentParser {
      */
     parseUrl(url: string): Promise<ParsedDocument>;
     /**
-     * Parse PDF file using pdf-parse.
+     * Parse PDF file using pdftotext (Poppler) - more reliable than PyPDF2.
+     * Falls back to PyPDF2 if pdftotext is not available.
      */
     private parsePdf;
+    /**
+     * Parse PDF file using Python PyPDF2 (fallback method).
+     */
+    private parsePdfWithPyPDF2;
     /**
      * Parse Word document using mammoth.
      */

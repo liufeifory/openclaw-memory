@@ -21,6 +21,7 @@ import { LLMClient } from './llm-client.js';
  */
 export interface ExtractedEntity {
   name: string;
+  entity_type?: string;  // Entity type (language, database, framework, tool, platform, etc.)
   confidence: number;
   source?: 'regex' | 'cache' | '7b';
   originalText?: string;
@@ -324,6 +325,7 @@ export class EntityExtractor {
 
           entities.push({
             name: normalizedName,
+            entity_type: name,  // Use pattern name as entity type
             confidence: knownConfidence ?? 0.8,  // High confidence for known entities
             source: knownConfidence ? 'cache' : 'regex',
             originalText: matchedText,

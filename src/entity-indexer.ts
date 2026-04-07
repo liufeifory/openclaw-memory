@@ -16,6 +16,7 @@ import { EntityExtractor, ExtractedEntity } from './entity-extractor.js';
 import { extractContextWindow, diverseSample } from './context-window.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
 import { LLMClient } from './llm-client.js';
+import { getDB, getLLM, ServiceFactory } from './service-factory.js';
 import * as os from 'os';
 
 /**
@@ -96,11 +97,19 @@ export class EntityIndexer {
   // Entity extractor for processing queue items
   private extractor: EntityExtractor;
 
-  constructor(db?: SurrealDatabase) {
+  constructor(db?: SurrealDatabase, llmClient?: LLMClient) {
     this.db = db || null;
-    // Create a minimal LLMClient for EntityExtractor (can be null for extraction-only mode)
-    const minimalClient = new LLMClient({ localEndpoint: 'http://localhost:8082' });
-    this.extractor = new EntityExtractor(minimalClient);
+    // Get LLMClient from factory if not provided
+    // Note: ServiceFactory must be initialized before using EntityIndexer
+    const client = llmClient || (ServiceFactory.isInitialized() ? getLLM() : null);
+    if (client) {
+      this.extractor = new EntityExtractor(client);
+    } else {
+      // Create a placeholder extractor that will fail gracefully
+      // This allows EntityIndexer to be created before config is loaded
+      this.extractor = null as any;
+      logWarn('[EntityIndexer] Created without LLMClient - call setExtractor() after initialization');
+    }
 
     // Start background queue processor
     this.startBackgroundProcessor();
@@ -590,7 +599,7 @@ export class EntityIndexer {
       }
 
       // Upsert entity and create link
-      const entityId = await this.db.upsertEntity(entity.name, entity.source || 'unknown');
+      const entityId = await this.db.upsertEntity(entity.name, entity.entity_type || entity.source || 'unknown');
 
       logInfo(`[EntityIndexer] Created entity "${entity.name}" (ID: ${entityId})`);
 

@@ -14,7 +14,7 @@ import { GRAPH_PROTECTION, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE } f
 import { EntityExtractor } from './entity-extractor.js';
 import { extractContextWindow, diverseSample } from './context-window.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
-import { LLMClient } from './llm-client.js';
+import { getLLM, ServiceFactory } from './service-factory.js';
 import * as os from 'os';
 /**
  * Entity Indexer with graph explosion protection
@@ -46,11 +46,20 @@ export class EntityIndexer {
     db = null;
     // Entity extractor for processing queue items
     extractor;
-    constructor(db) {
+    constructor(db, llmClient) {
         this.db = db || null;
-        // Create a minimal LLMClient for EntityExtractor (can be null for extraction-only mode)
-        const minimalClient = new LLMClient({ localEndpoint: 'http://localhost:8082' });
-        this.extractor = new EntityExtractor(minimalClient);
+        // Get LLMClient from factory if not provided
+        // Note: ServiceFactory must be initialized before using EntityIndexer
+        const client = llmClient || (ServiceFactory.isInitialized() ? getLLM() : null);
+        if (client) {
+            this.extractor = new EntityExtractor(client);
+        }
+        else {
+            // Create a placeholder extractor that will fail gracefully
+            // This allows EntityIndexer to be created before config is loaded
+            this.extractor = null;
+            logWarn('[EntityIndexer] Created without LLMClient - call setExtractor() after initialization');
+        }
         // Start background queue processor
         this.startBackgroundProcessor();
         // Start TTL pruning scheduler
@@ -462,7 +471,7 @@ export class EntityIndexer {
                 continue;
             }
             // Upsert entity and create link
-            const entityId = await this.db.upsertEntity(entity.name, entity.source || 'unknown');
+            const entityId = await this.db.upsertEntity(entity.name, entity.entity_type || entity.source || 'unknown');
             logInfo(`[EntityIndexer] Created entity "${entity.name}" (ID: ${entityId})`);
             await this.db.linkMemoryEntity(item.memoryId, entityId, entity.confidence);
             logInfo(`[EntityIndexer] Linked memory ${item.memoryId} -> entity ${entityId}`);

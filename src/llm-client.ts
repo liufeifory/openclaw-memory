@@ -7,28 +7,16 @@
  */
 
 import { logError, logInfo, logWarn } from './maintenance-logger.js';
+import type { LLMConfig } from './config.js';
+
+// Re-export LLMConfig from config.ts for backward compatibility
+export type { LLMConfig } from './config.js';
 
 export interface LLMOptions {
   maxTokens?: number;
   temperature?: number;
   topP?: number;
   model?: string;  // For cloud providers
-}
-
-export interface LLMConfig {
-  // Local LLM config
-  localEndpoint?: string;
-
-  // Cloud LLM config
-  cloudEnabled?: boolean;
-  cloudProvider?: 'bailian' | 'openai' | 'custom';
-  cloudBaseUrl?: string;
-  cloudApiKey?: string;
-  cloudModel?: string;
-
-  // Which tasks use cloud (others use local)
-  // Only these tasks can use cloud when configured
-  cloudTasks?: ('preference' | 'summarizer' | 'clusterer' | 'reranker')[];
 }
 
 // Tasks that MUST use local endpoint (never route to cloud)
@@ -70,11 +58,16 @@ export class LLMClient {
    */
   private getEndpoint(taskType: string): string {
     if (this.shouldUseCloud(taskType)) {
-      return this.config.cloudBaseUrl ?? 'https://dashscope.aliyuncs.com/v1';
+      if (!this.config.cloudBaseUrl) {
+        throw new Error('[LLMClient] cloudBaseUrl not configured for cloud LLM');
+      }
+      return this.config.cloudBaseUrl;
     }
-    const localEndpoint = this.config.localEndpoint ?? 'http://localhost:8082';
-    // Append /completion for local llama.cpp server
-    return localEndpoint.replace(/\/$/, '') + '/completion';
+    if (!this.config.localEndpoint) {
+      throw new Error('[LLMClient] localEndpoint not configured. Please set llm.endpoint in config.');
+    }
+    // For omlx and other OpenAI-compatible servers, use /v1/chat/completions
+    return this.config.localEndpoint.replace(/\/$/, '') + '/v1/chat/completions';
   }
 
   /**
@@ -83,24 +76,33 @@ export class LLMClient {
   private buildRequestBody(prompt: string, options: LLMOptions, taskType: string): any {
     const isCloud = this.shouldUseCloud(taskType);
 
+    // Both omlx and cloud use OpenAI-compatible chat completions format
+    let model: string;
     if (isCloud) {
-      // Cloud format: OpenAI-compatible chat completions
-      return {
-        model: this.config.cloudModel ?? 'qwen3.5-plus',
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: options.maxTokens ?? this.defaultOptions.maxTokens,
-        temperature: options.temperature ?? this.defaultOptions.temperature,
-        top_p: options.topP ?? this.defaultOptions.topP,
-      };
+      model = this.config.cloudModel ?? 'qwen3.5-plus';
     } else {
-      // Local llama.cpp format
-      return {
-        prompt: prompt,
-        n_predict: options.maxTokens ?? this.defaultOptions.maxTokens,
-        temperature: options.temperature ?? this.defaultOptions.temperature,
-        top_p: options.topP ?? this.defaultOptions.topP,
-      };
+      if (!this.config.localModel) {
+        throw new Error('[LLMClient] localModel not configured. Please set llm.model in config.');
+      }
+      model = this.config.localModel;
     }
+
+    const body: any = {
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: options.maxTokens ?? this.defaultOptions.maxTokens,
+      temperature: options.temperature ?? this.defaultOptions.temperature,
+      top_p: options.topP ?? this.defaultOptions.topP,
+    };
+
+    // Add repetition penalty for local models to prevent degenerate output
+    // Most local LLM servers support this parameter
+    if (!isCloud) {
+      body.repetition_penalty = 1.1;  // Default 1.0, higher = less repetition
+      body.frequency_penalty = 0.3;   // Penalize repeated tokens
+    }
+
+    return body;
   }
 
   /**
@@ -112,12 +114,76 @@ export class LLMClient {
     };
 
     if (this.shouldUseCloud(taskType)) {
+      // Cloud provider auth
       if (this.config.cloudApiKey) {
         headers['Authorization'] = `Bearer ${this.config.cloudApiKey}`;
+      }
+    } else {
+      // Local LLM auth (e.g., omlx)
+      if (this.config.localApiKey) {
+        headers['Authorization'] = `Bearer ${this.config.localApiKey}`;
       }
     }
 
     return headers;
+  }
+
+  /**
+   * Detect and clean repetitive patterns in LLM output
+   * Handles cases like "MySQL 8.4.4.4.4.4.4.4..." or "the the the the"
+   */
+  private cleanRepetitiveOutput(text: string): string {
+    if (!text || text.length < 10) return text;
+
+    // Detect pattern: word/number followed by repeated short segment
+    // e.g., "8.4.4.4.4.4" or "the the the"
+    const repeatedPattern = text.match(/(.{1,10}?)\1{3,}/g);
+    if (repeatedPattern) {
+      logWarn(`[LLMClient] Detected repetitive pattern: ${repeatedPattern[0].slice(0, 30)}...`);
+
+      // Remove the repetition, keep only first occurrence
+      for (const pattern of repeatedPattern) {
+        const match = pattern.match(/(.{1,10}?)\1{3,}/);
+        if (match) {
+          // Keep only 1-2 repetitions
+          const cleaned = match[1].repeat(Math.min(2, Math.ceil(pattern.length / match[1].length / 3)));
+          text = text.replace(pattern, cleaned);
+        }
+      }
+    }
+
+    // Detect runaway repetition at end of string
+    // e.g., "...Manual.4.4.4.4.4"
+    const endRepetition = text.match(/(.{1,5})\1{5,}$/);
+    if (endRepetition) {
+      const match = endRepetition;
+      const base = match[1];
+      // Count how many times it repeats
+      const repeatCount = (text.length - text.lastIndexOf(base)) / base.length;
+      if (repeatCount > 3) {
+        logWarn(`[LLMClient] Cleaning runaway repetition at end`);
+        // Find where repetition starts and truncate
+        const lastNormal = text.slice(0, text.lastIndexOf(base) + base.length * 2);
+        text = lastNormal;
+      }
+    }
+
+    // Detect JSON value corruption: "title": "MySQL 8.4.4.4.4.4.4.4..."
+    const jsonValueCorruption = text.match(/"([^"]+?)":\s*"([^"]*?)(.{1,5})\3{4,}"/g);
+    if (jsonValueCorruption) {
+      for (const corrupted of jsonValueCorruption) {
+        const keyMatch = corrupted.match(/"([^"]+)":/);
+        const valueStart = corrupted.match(/:\s*"([^"]*?)(.{1,5})\2{4,}/);
+        if (keyMatch && valueStart) {
+          const key = keyMatch[1];
+          const cleanValue = valueStart[1] + valueStart[2]; // Keep only first occurrence
+          text = text.replace(corrupted, `"${key}": "${cleanValue}"`);
+          logWarn(`[LLMClient] Fixed corrupted JSON value for key: ${key}`);
+        }
+      }
+    }
+
+    return text;
   }
 
   /**
@@ -131,8 +197,8 @@ export class LLMClient {
         // Cloud format: OpenAI-compatible response
         return data.choices?.[0]?.message?.content ?? data.content ?? '';
       } else {
-        // Local llama.cpp format
-        return data.content ?? data.generated_text ?? '';
+        // Local LLM: try OpenAI-compatible format first (omlx), then llama.cpp format
+        return data.choices?.[0]?.message?.content ?? data.content ?? data.generated_text ?? '';
       }
     } catch (error: any) {
       logError(`[LLMClient] Failed to parse response: ${error.message}`);
@@ -165,8 +231,8 @@ export class LLMClient {
       prompt = prompt.substring(0, maxChars);
     }
 
-    // Add timeout control for LLM requests (default 30s, can be overridden)
-    const timeoutMs = taskType === 'entity-extractor' ? 10000 : 30000;  // 10s for entity extraction, 30s for others
+    // Add timeout control for LLM requests (default 60s, can be overridden)
+    const timeoutMs = taskType === 'entity-extractor' ? 30000 : 60000;  // 30s for entity extraction, 60s for others
     let timeoutId: NodeJS.Timeout | undefined;
 
     try {
@@ -191,7 +257,10 @@ export class LLMClient {
       }
 
       const data = await response.json();
-      const result = this.parseResponse(data, taskType);
+      let result = this.parseResponse(data, taskType);
+
+      // Clean up any repetitive patterns in output
+      result = this.cleanRepetitiveOutput(result);
 
       if (!result) {
         logWarn(`[LLMClient] Empty response for task ${taskType}`);
@@ -210,17 +279,39 @@ export class LLMClient {
 
   /**
    * Parse JSON response from LLM
+   * Handles responses with markdown code blocks, "Thinking Process" prefix, etc.
    */
   async completeJson<T>(prompt: string, taskType: string, options?: LLMOptions): Promise<T> {
     const result = await this.complete(prompt, taskType, options);
 
     try {
-      // Extract JSON from response (may contain markdown or extra text)
-      const jsonMatch = result.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]) as T;
+      // Remove markdown code block markers if present
+      let cleaned = result
+        .replace(/```json\s*/gi, '')
+        .replace(/```\s*/g, '')
+        .trim();
+
+      // Try to extract JSON object
+      let jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+
+      // If no JSON found, try to find it after "Thinking Process" or similar prefixes
+      if (!jsonMatch) {
+        const parts = cleaned.split(/(?:Thinking Process:|思考过程:|Reasoning:)/i);
+        const lastPart = parts[parts.length - 1] || cleaned;
+        jsonMatch = lastPart.match(/\{[\s\S]*\}/);
       }
-      return JSON.parse(result) as T;
+
+      if (jsonMatch) {
+        // Clean up common JSON formatting issues
+        const jsonStr = jsonMatch[0]
+          .replace(/,\s*}/g, '}')  // Remove trailing commas
+          .replace(/,\s*]/g, ']')  // Remove trailing commas in arrays
+          .replace(/"\s*:\s*"/g, '": "')  // Fix spacing
+          .replace(/\n/g, ' ');  // Remove newlines in JSON
+
+        return JSON.parse(jsonStr) as T;
+      }
+      return JSON.parse(cleaned) as T;
     } catch (error: any) {
       logError(`[LLMClient] Failed to parse JSON response for ${taskType}: ${error.message}`);
       logError(`[LLMClient] Raw response: ${result.substring(0, 500)}`);

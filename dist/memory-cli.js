@@ -9,19 +9,8 @@
  *   node memory-cli.ts delete <id>
  */
 import { MemoryManager } from './memory-manager-surreal.js';
-const SURREALDB_CONFIG = {
-    backend: 'surrealdb',
-    surrealdb: {
-        url: process.env.SURREALDB_URL || 'http://localhost:8000',
-        namespace: 'openclaw',
-        database: 'memory',
-        username: 'root',
-        password: 'root',
-    },
-    embedding: {
-        endpoint: process.env.EMBEDDING_ENDPOINT || 'http://localhost:8080',
-    },
-};
+import { getConfig } from './config.js';
+import { ServiceFactory } from './service-factory.js';
 async function printUsage() {
     console.log(`
 Memory CLI - Store and retrieve memories with SurrealDB
@@ -42,6 +31,13 @@ Options:
   --limit=<num>         Max items to list (default: 10)
   --threshold=<num>     Similarity threshold (default: 0.6)
 
+Environment Variables:
+  SURREALDB_URL         SurrealDB URL (default: http://localhost:8001)
+  EMBEDDING_ENDPOINT    Embedding service URL (default: http://localhost:8000/v1/embeddings)
+  EMBEDDING_MODEL       Embedding model (default: bge-m3-mlx-fp16)
+  LLM_ENDPOINT          LLM service URL (default: http://localhost:8000)
+  LLM_MODEL             LLM model (default: gemma-4-e4b-it-8bit)
+
 Examples:
   memory-cli store "用户喜欢 TypeScript" --type=semantic --importance=0.8
   memory-cli search "编程语言偏好" --top-k=3
@@ -49,7 +45,8 @@ Examples:
 `);
 }
 async function storeMemory(content, options) {
-    const mm = new MemoryManager(SURREALDB_CONFIG);
+    const config = getConfig();
+    const mm = new MemoryManager(config);
     await mm.initialize();
     try {
         if (options.type === 'semantic') {
@@ -74,11 +71,13 @@ async function storeMemory(content, options) {
         process.exit(1);
     }
     finally {
-        await mm.close();
+        await mm.dispose();
+        await ServiceFactory.dispose();
     }
 }
 async function searchMemories(query, options) {
-    const mm = new MemoryManager(SURREALDB_CONFIG);
+    const config = getConfig();
+    const mm = new MemoryManager(config);
     await mm.initialize();
     try {
         // CLI search is global - no session isolation
@@ -101,11 +100,13 @@ async function searchMemories(query, options) {
         process.exit(1);
     }
     finally {
-        await mm.close();
+        await mm.dispose();
+        await ServiceFactory.dispose();
     }
 }
 async function listMemories(limit) {
-    const mm = new MemoryManager(SURREALDB_CONFIG);
+    const config = getConfig();
+    const mm = new MemoryManager(config);
     await mm.initialize();
     try {
         const stats = await mm.getStats();
@@ -121,11 +122,13 @@ async function listMemories(limit) {
         process.exit(1);
     }
     finally {
-        await mm.close();
+        await mm.dispose();
+        await ServiceFactory.dispose();
     }
 }
 async function showStats() {
-    const mm = new MemoryManager(SURREALDB_CONFIG);
+    const config = getConfig();
+    const mm = new MemoryManager(config);
     await mm.initialize();
     try {
         const stats = await mm.getStats();
@@ -142,7 +145,8 @@ async function showStats() {
         process.exit(1);
     }
     finally {
-        await mm.close();
+        await mm.dispose();
+        await ServiceFactory.dispose();
     }
 }
 async function main() {

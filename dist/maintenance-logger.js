@@ -58,4 +58,41 @@ export function logWarn(message) {
 export function logError(message) {
     logMaintenance('ERROR', message);
 }
+/**
+ * Error severity levels for unified error handling.
+ */
+export var ErrorSeverity;
+(function (ErrorSeverity) {
+    ErrorSeverity["CRITICAL"] = "critical";
+    ErrorSeverity["WARNING"] = "warning";
+    ErrorSeverity["INFO"] = "info";
+})(ErrorSeverity || (ErrorSeverity = {}));
+/**
+ * Unified error handling - logs with stack trace and handles by severity.
+ * @param error - The error object
+ * @param context - Context string (e.g., 'vectorSearch', 'processQueue')
+ * @param severity - Error severity level
+ * @returns void (throws for CRITICAL, logs for others)
+ */
+export function handleError(error, context, severity = ErrorSeverity.WARNING) {
+    const errorMsg = error?.message || String(error);
+    const stackTrace = error?.stack || '';
+    if (severity === ErrorSeverity.CRITICAL) {
+        logError(`[${context}] CRITICAL: ${errorMsg}`);
+        if (stackTrace) {
+            logError(`[${context}] Stack: ${stackTrace}`);
+        }
+        throw error; // Re-throw for critical errors
+    }
+    else if (severity === ErrorSeverity.WARNING) {
+        logWarn(`[${context}] ${errorMsg}`);
+        if (stackTrace) {
+            logWarn(`[${context}] Stack: ${stackTrace}`);
+        }
+    }
+    else {
+        // INFO level - minimal logging
+        logInfo(`[${context}] ${errorMsg}`);
+    }
+}
 //# sourceMappingURL=maintenance-logger.js.map

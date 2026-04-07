@@ -1,5 +1,5 @@
 /**
- * SurrealDB Client wrapper - SurrealDB 2.x compatible
+ * SurrealDB Client wrapper - SurrealDB 3.x compatible via HTTP API
  */
 export interface SurrealConfig {
     url: string;
@@ -52,6 +52,8 @@ export declare class SurrealDatabase {
     private client;
     private initialized;
     private config;
+    private heartbeatInterval?;
+    private heartbeatEnabled;
     private readonly maxRetries;
     private readonly baseDelayMs;
     private readonly maxDelayMs;
@@ -65,11 +67,23 @@ export declare class SurrealDatabase {
     private createSchema;
     query(sql: string, params?: Record<string, any>): Promise<any>;
     /**
-     * Raw query execution with automatic re-authentication on permission errors.
+     * Raw query execution with automatic reconnection on errors.
      * This is the low-level method that all query operations should use.
      */
     private executeQuery;
     private executeWithRetry;
+    /**
+     * Start heartbeat to monitor connection health
+     */
+    private startHeartbeat;
+    /**
+     * Stop heartbeat monitoring
+     */
+    private stopHeartbeat;
+    /**
+     * Dispose - clean up resources
+     */
+    dispose(): void;
     upsert(id: number, embedding: number[], payload: Record<string, any>, options?: {
         checkVersion?: boolean;
     }): Promise<{
@@ -123,6 +137,15 @@ export declare class SurrealDatabase {
     getStats(): Promise<{
         total_points: number;
         collection_name: string;
+    }>;
+    /**
+     * Query counts by memory type (episodic, semantic, reflection).
+     */
+    queryTypeCounts(): Promise<{
+        episodic: number;
+        semantic: number;
+        reflection: number;
+        total: number;
     }>;
     getSchemaVersion(): Promise<number>;
     storeSchemaVersion(): Promise<void>;

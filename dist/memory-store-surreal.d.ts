@@ -94,7 +94,7 @@ export declare class MemoryStore {
         is_active?: boolean;
     }): Promise<void>;
     /**
-     * Get memory statistics.
+     * Get memory statistics from database (not memory cache).
      */
     getStats(): Promise<{
         episodic_count: number;

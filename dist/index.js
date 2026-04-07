@@ -19,7 +19,8 @@ import { createDocumentImporter } from './document-importer.js';
 import { DocumentParser } from './document-parser.js';
 import { DocumentSplitter } from './document-splitter.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
-import { LLMClient } from './llm-client.js';
+import { buildPromptSection, buildMemoryFlushPlan, createMemoryRuntime, } from './memory-runtime-provider.js';
+import { ServiceFactory, initServices } from './service-factory.js';
 import * as fs from 'fs';
 import * as path from 'path';
 // Helper to create plugin entry (replaces definePluginEntry)
@@ -35,13 +36,30 @@ let globalLimiter = null;
 let llmClient = null;
 let savedConfig = null;
 let initialized = false;
+let initPromise = null; // Promise-based lock (avoids busy-wait)
 /**
  * Lazy initialization - only initialize when actually needed
  * This prevents resource leaks when plugin is loaded but not used (e.g., status commands)
+ * Uses Promise-based lock instead of busy-wait polling
  */
 async function ensureInitialized() {
     if (initialized || !savedConfig)
         return;
+    // If initialization is already in progress, wait for the same Promise
+    // This avoids busy-wait and ensures all callers share the same result
+    if (!initPromise) {
+        initPromise = doInitialize();
+    }
+    await initPromise;
+}
+/**
+ * Actual initialization logic (separated for Promise-based locking)
+ */
+async function doInitialize() {
+    if (!savedConfig) {
+        logWarn('No config available, skipping initialization');
+        return;
+    }
     logInfo('Lazy initializing plugin...');
     const mm = getMemoryManager(savedConfig);
     // Initialize SurrealDB backend
@@ -58,18 +76,10 @@ async function ensureInitialized() {
             throw error;
         }
     }
-    // Initialize LLM clients (hybrid: local 7B + cloud)
-    const llmConfig = savedConfig.llm || {};
-    const llmOptions = {
-        localEndpoint: llmConfig.endpoint ?? 'http://localhost:8082',
-        cloudEnabled: llmConfig.cloudEnabled ?? false,
-        cloudProvider: llmConfig.cloudProvider,
-        cloudBaseUrl: llmConfig.cloudBaseUrl,
-        cloudApiKey: llmConfig.cloudApiKey,
-        cloudModel: llmConfig.cloudModel,
-        cloudTasks: llmConfig.cloudTasks,
-    };
-    llmClient = new LLMClient(llmOptions);
+    // Initialize ServiceFactory with config (single source of truth)
+    initServices(savedConfig);
+    // Get LLM client from factory
+    llmClient = ServiceFactory.getLLM();
     globalLimiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100, queueLimit: 50 });
     // Initialize helpers with LLM client
     memoryFilter = getMemoryFilter(llmClient, globalLimiter);
@@ -91,7 +101,9 @@ let cleanedUp = false;
 let autoCleanupTimeout = null;
 let autoCleanupScheduled = false; // Track if we've already scheduled cleanup
 const AUTO_CLEANUP_DELAY = 3000; // Wait 3 seconds after last activity before cleanup
-const IS_GATEWAY_MODE = process.env.OPENCLAW_GATEWAY === '1' || process.env.OPENCLAW_MODE === 'gateway';
+const IS_GATEWAY_MODE = process.env.OPENCLAW_GATEWAY === '1'
+    || process.env.OPENCLAW_MODE === 'gateway'
+    || process.env.OPENCLAW_SERVICE_KIND === 'gateway';
 // Document watcher reference for cleanup
 let documentWatcher = null;
 /**
@@ -165,7 +177,12 @@ process.on('exit', () => {
 });
 // beforeExit is called when event loop is empty and process would exit
 // This is async and can close connections
+// Only cleanup in CLI mode, not in Gateway mode (long-running server)
 process.on('beforeExit', async () => {
+    // Skip cleanup in Gateway mode - the server is long-running
+    if (IS_GATEWAY_MODE) {
+        return;
+    }
     if (!cleanedUp) {
         logInfo('[Plugin] beforeExit handler triggered - cleaning up');
         await cleanup();
@@ -408,7 +425,9 @@ export default createPluginEntry({
     id: 'openclaw-memory',
     name: 'OpenClaw Memory',
     description: 'Long-term memory with semantic search (SurrealDB backend)',
+    kind: 'memory',
     async init(config) {
+        logInfo('[openclaw-memory] init() called');
         // Store config for later use
         savedConfig = config;
         logInfo('Plugin init called, storing config...');
@@ -422,28 +441,11 @@ export default createPluginEntry({
             throw error;
         }
     },
-    async register(api) {
-        // Get plugin config from OpenClaw - sync extraction before any async operations
+    register(api) {
+        // Get plugin config from OpenClaw
         const pluginConfig = api.pluginConfig;
         const config = pluginConfig?.config || pluginConfig;
-        // Store config synchronously - gateway ignores async register()
-        if (config?.surrealdb) {
-            savedConfig = config;
-            logInfo(`[register] Config stored synchronously`);
-            // Schedule initialization for after register() returns
-            // This is needed because gateway doesn't await async register()
-            setImmediate(async () => {
-                logInfo('[register] Scheduled initialization starting...');
-                try {
-                    await ensureInitialized();
-                    logInfo('[register] Initialization complete');
-                }
-                catch (error) {
-                    logError(`[register] Initialization failed: ${error.message}`);
-                }
-            });
-        }
-        // Rest of register function continues...
+        logInfo('[openclaw-memory] register() called');
         if (!config) {
             logInfo('No config found, plugin disabled');
             return;
@@ -452,6 +454,22 @@ export default createPluginEntry({
             logInfo('No SurrealDB config found, plugin disabled');
             return;
         }
+        // Update savedConfig if not already set by init()
+        if (!savedConfig) {
+            savedConfig = config;
+            logInfo('[openclaw-memory] Config saved from register()');
+        }
+        // ============================================================
+        // Register Memory Runtime API - Required for OpenClaw recognition
+        // ============================================================
+        const memoryRuntime = createMemoryRuntime(() => savedConfig);
+        // Register prompt section for memory guidance
+        api.registerMemoryPromptSection(buildPromptSection);
+        // Register memory flush plan for compaction
+        api.registerMemoryFlushPlan(buildMemoryFlushPlan);
+        // Register memory runtime provider
+        api.registerMemoryRuntime(memoryRuntime);
+        logInfo('[openclaw-memory] Memory runtime API registered');
         // Document Import Configuration - start watcher only if configured
         const docConfig = config.documentImport || {};
         let watchDir = docConfig.watchDir;
@@ -500,56 +518,64 @@ export default createPluginEntry({
             if (queueProcessing)
                 return;
             queueProcessing = true;
-            while (!queueShutDown && messageQueue.length > 0) {
-                const item = messageQueue.shift();
-                if (!item)
-                    continue;
-                try {
-                    await ensureInitialized();
-                    // Type check: ensure message is string
-                    if (typeof item.message !== 'string') {
-                        logWarn(`[openclaw-memory] Queue: received non-string message (type: ${typeof item.message})`);
-                        item.message = String(item.message);
-                    }
-                    // Skip empty messages
-                    if (!item.message || item.message.trim().length === 0) {
+            try {
+                while (!queueShutDown && messageQueue.length > 0) {
+                    const item = messageQueue.shift();
+                    if (!item)
                         continue;
+                    try {
+                        await ensureInitialized();
+                        // Type check: ensure message is string
+                        if (typeof item.message !== 'string') {
+                            logWarn(`[openclaw-memory] Queue: received non-string message (type: ${typeof item.message})`);
+                            item.message = String(item.message);
+                        }
+                        // Skip empty messages
+                        if (!item.message || item.message.trim().length === 0) {
+                            continue;
+                        }
+                        // 1. Classification (for labels only)
+                        const filterResult = await memoryFilter.classify(item.message);
+                        // 2. Store memories (all as episodic, write to both DB and file)
+                        await memoryManager.storeMemory(item.sessionId, item.message, filterResult.importance);
+                        // Write to local Markdown file (for self-improving-agent)
+                        const categoryLabel = filterResult.category ? `[${filterResult.category}] ` : '';
+                        appendToLocalMemory(`${categoryLabel}${item.message}`, item.sessionId);
+                        // 3. Preference extraction (every 10 messages)
+                        const buffer = conversationBuffers.get(item.sessionId) || [];
+                        buffer.push(item.message);
+                        conversationBuffers.set(item.sessionId, buffer);
+                        if (buffer.length >= 10) {
+                            const userProfile = await preferenceExtractor.extract(buffer);
+                            for (const like of userProfile.likes) {
+                                await memoryManager.storeSemantic(like, 0.8, item.sessionId);
+                                appendToLocalMemory(`[PREFERENCE-LIKE] ${like}`);
+                            }
+                            for (const dislike of userProfile.dislikes) {
+                                await memoryManager.storeSemantic(dislike, 0.8, item.sessionId);
+                                appendToLocalMemory(`[PREFERENCE-DISLIKE] ${dislike}`);
+                            }
+                            const summaryResult = await summarizer.summarize(buffer);
+                            if (summaryResult.summary) {
+                                await memoryManager.storeReflection(summaryResult.summary, 0.9, item.sessionId);
+                                appendToLocalMemory(`[REFLECTION] ${summaryResult.summary}`);
+                            }
+                            conversationBuffers.set(item.sessionId, []);
+                        }
+                        logInfo(`Queue: processed message for session ${item.sessionId}`);
                     }
-                    // 1. Classification (for labels only)
-                    const filterResult = await memoryFilter.classify(item.message);
-                    // 2. Store memories (all as episodic, write to both DB and file)
-                    await memoryManager.storeMemory(item.sessionId, item.message, filterResult.importance);
-                    // Write to local Markdown file (for self-improving-agent)
-                    const categoryLabel = filterResult.category ? `[${filterResult.category}] ` : '';
-                    appendToLocalMemory(`${categoryLabel}${item.message}`, item.sessionId);
-                    // 3. Preference extraction (every 10 messages)
-                    const buffer = conversationBuffers.get(item.sessionId) || [];
-                    buffer.push(item.message);
-                    conversationBuffers.set(item.sessionId, buffer);
-                    if (buffer.length >= 10) {
-                        const userProfile = await preferenceExtractor.extract(buffer);
-                        for (const like of userProfile.likes) {
-                            await memoryManager.storeSemantic(like, 0.8, item.sessionId);
-                            appendToLocalMemory(`[PREFERENCE-LIKE] ${like}`);
+                    catch (error) {
+                        logError(`Queue: failed to process message for session ${item.sessionId}: ${error.message}`);
+                        if (error.stack) {
+                            logError(`Queue: stack trace: ${error.stack}`);
                         }
-                        for (const dislike of userProfile.dislikes) {
-                            await memoryManager.storeSemantic(dislike, 0.8, item.sessionId);
-                            appendToLocalMemory(`[PREFERENCE-DISLIKE] ${dislike}`);
-                        }
-                        const summaryResult = await summarizer.summarize(buffer);
-                        if (summaryResult.summary) {
-                            await memoryManager.storeReflection(summaryResult.summary, 0.9, item.sessionId);
-                            appendToLocalMemory(`[REFLECTION] ${summaryResult.summary}`);
-                        }
-                        conversationBuffers.set(item.sessionId, []);
+                        // Continue processing next message (don't break the queue)
                     }
-                    logInfo(`Queue: processed message for session ${item.sessionId}`);
-                }
-                catch (error) {
-                    logError(`Queue: failed to process message for session ${item.sessionId}: ${error.message}`);
                 }
             }
-            queueProcessing = false;
+            finally {
+                queueProcessing = false; // Ensure lock is released even on exception
+            }
         }
         function enqueueMessage(sessionId, message, source) {
             if (queueShutDown)
