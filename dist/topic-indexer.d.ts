@@ -7,9 +7,6 @@
  * - Idle task scheduler for resource efficiency
  * - Priority queue for urgent topic creation
  */
-import { SurrealDatabase } from './surrealdb-client.js';
-import { EmbeddingService } from './embedding.js';
-import { LLMClient } from './llm-client.js';
 export declare class TopicIndexer {
     private queue;
     private processing;
@@ -20,11 +17,7 @@ export declare class TopicIndexer {
     totalTopicsCreated: number;
     totalMemoriesClustered: number;
     totalNoiseArchived: number;
-    constructor(db?: SurrealDatabase, embedding?: EmbeddingService, llmClient?: LLMClient);
-    /**
-     * Initialize with dependencies
-     */
-    init(db: SurrealDatabase, embedding: EmbeddingService, llmClient?: LLMClient): void;
+    constructor();
     private scanInterval?;
     private processInterval?;
     private idleCheckInterval?;

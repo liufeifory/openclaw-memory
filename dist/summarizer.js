@@ -9,6 +9,7 @@
  */
 import { logWarn, logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
+import { ServiceFactory } from './service-factory.js';
 const SUMMARIZE_PROMPT = `Summarize these conversation turns into ONE concise fact or observation.
 Focus on:
 - User preferences mentioned
@@ -33,8 +34,9 @@ export class Summarizer {
         overCompressionCount: 0,
         underCompressionCount: 0,
     };
-    constructor(client, limiter) {
-        this.client = client;
+    constructor(limiter) {
+        // 统一从 ServiceFactory 获取 LLMClient（单一入口）
+        this.client = ServiceFactory.getLLM();
         this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     }
     /**
@@ -112,7 +114,8 @@ export class Summarizer {
             };
         }
         catch (error) {
-            logError(`[Summarizer] LLM failed: ${error.message}`);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            logError(`[Summarizer] LLM failed: ${errorMessage}`);
             return { summary: '', isEmpty: true };
         }
     }

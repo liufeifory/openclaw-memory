@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable no-console -- CLI tool needs console output */
 /**
  * Memory CLI - Command line interface for storing and retrieving memories
  *
@@ -35,8 +36,12 @@ Environment Variables:
   SURREALDB_URL         SurrealDB URL (default: http://localhost:8001)
   EMBEDDING_ENDPOINT    Embedding service URL (default: http://localhost:8000/v1/embeddings)
   EMBEDDING_MODEL       Embedding model (default: bge-m3-mlx-fp16)
-  LLM_ENDPOINT          LLM service URL (default: http://localhost:8000)
-  LLM_MODEL             LLM model (default: gemma-4-e4b-it-8bit)
+
+  Cloud LLM (required):
+  LLM_PROVIDER          Cloud provider: bailian | openai | deepseek | custom
+  LLM_BASE_URL          Cloud API base URL
+  LLM_API_KEY           Cloud API key
+  LLM_MODEL             Cloud model name (default: qwen-plus)
 
 Examples:
   memory-cli store "用户喜欢 TypeScript" --type=semantic --importance=0.8
@@ -91,7 +96,7 @@ async function searchMemories(query, options) {
         memories.forEach((m, i) => {
             console.log(`${i + 1}. [${m.type}] (sim: ${m.similarity?.toFixed(3)}, imp: ${m.importance?.toFixed(2)})`);
             console.log(`   ${m.content}`);
-            console.log(`   Session: ${m.session_id || 'N/A'} | Created: ${m.created_at}`);
+            console.log(`   Session: ${m.session_id ?? 'N/A'} | Created: ${m.created_at}`);
             console.log();
         });
     }
@@ -104,7 +109,7 @@ async function searchMemories(query, options) {
         await ServiceFactory.dispose();
     }
 }
-async function listMemories(limit) {
+async function listMemories(_limit) {
     const config = getConfig();
     const mm = new MemoryManager(config);
     await mm.initialize();

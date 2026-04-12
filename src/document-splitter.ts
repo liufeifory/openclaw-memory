@@ -257,7 +257,7 @@ export class DocumentSplitter {
   /**
    * Merge adjacent small chunks to avoid fragmentation.
    */
-  private mergeSmallChunks(chunks: DocumentChunk[], source: string): DocumentChunk[] {
+  private mergeSmallChunks(chunks: DocumentChunk[], _source: string): DocumentChunk[] {
     if (chunks.length <= 1) return chunks;
 
     const merged: DocumentChunk[] = [];

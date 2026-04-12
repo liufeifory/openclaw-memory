@@ -59,7 +59,7 @@ export declare class SemanticClusterer {
      * Merge a cluster of similar memories into one permanent fact.
      * Extracts entities first to ensure preservation.
      */
-    mergeCluster(cluster: ClusteredMemory, existingMergedMemories?: Array<{
+    mergeCluster(cluster: ClusteredMemory, _existingMergedMemories?: Array<{
         id: number;
         content: string;
     }>): Promise<MergeResult>;

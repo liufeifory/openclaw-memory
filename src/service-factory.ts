@@ -13,7 +13,7 @@ import type { PluginConfig, SurrealConfig, EmbeddingConfig, LLMConfig } from './
 import { SurrealDatabase } from './surrealdb-client.js';
 import { EmbeddingService } from './embedding.js';
 import { LLMClient } from './llm-client.js';
-import { logInfo, logError } from './maintenance-logger.js';
+import { logInfo } from './maintenance-logger.js';
 
 /**
  * 服务工厂 - 单例模式
@@ -93,7 +93,10 @@ export class ServiceFactory {
    */
   static getLLMConfig(): LLMConfig {
     const config = ServiceFactory.getConfig();
-    return config?.llm || {};
+    if (!config?.llm?.cloudBaseUrl || !config?.llm?.cloudApiKey) {
+      throw new Error('[ServiceFactory] LLM cloudBaseUrl and cloudApiKey required in config');
+    }
+    return config.llm;
   }
 
   /**
@@ -139,17 +142,12 @@ export class ServiceFactory {
     if (!this._llm) {
       const llmConfig = ServiceFactory.getLLMConfig();
       this._llm = new LLMClient({
-        localEndpoint: llmConfig.localEndpoint,
-        localApiKey: llmConfig.localApiKey,
-        localModel: llmConfig.localModel,
-        cloudEnabled: llmConfig.cloudEnabled,
         cloudProvider: llmConfig.cloudProvider,
-        cloudBaseUrl: llmConfig.cloudBaseUrl,
-        cloudApiKey: llmConfig.cloudApiKey,
+        cloudBaseUrl: llmConfig.cloudBaseUrl!,
+        cloudApiKey: llmConfig.cloudApiKey!,
         cloudModel: llmConfig.cloudModel,
-        cloudTasks: llmConfig.cloudTasks,
       });
-      logInfo('[ServiceFactory] Created LLMClient instance');
+      logInfo('[ServiceFactory] Created LLMClient instance (cloud-only)');
     }
     return this._llm;
   }

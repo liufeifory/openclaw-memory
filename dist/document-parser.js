@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- External library error types vary */
 /**
  * Document Parser - extracts text content from PDF, Word, Markdown, and HTML.
  */

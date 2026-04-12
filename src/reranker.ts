@@ -7,9 +7,10 @@
  * - Diversity Re-ranking: Penalizes highly similar top results
  */
 
-import { logError, logWarn } from './maintenance-logger.js';
+import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 import { LLMClient } from './llm-client.js';
+import { ServiceFactory } from './service-factory.js';
 
 const RERANK_PROMPT = `Rank these memory snippets by relevance to the query.
 Output ONLY the indices in order (0-based), most relevant first.
@@ -64,8 +65,9 @@ export class Reranker {
   private limiter: LLMLimiter;
   private defaultOptions: Required<RerankConfig>;
 
-  constructor(client: LLMClient, limiter?: LLMLimiter) {
-    this.client = client;
+  constructor(limiter?: LLMLimiter) {
+    // 统一从 ServiceFactory 获取 LLMClient（单一入口）
+    this.client = ServiceFactory.getLLM();
     this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
     this.defaultOptions = {
       topK: 5,
@@ -149,8 +151,9 @@ export class Reranker {
         .filter(r => r.score >= opts.threshold)
         .slice(0, opts.topK);
 
-    } catch (error: any) {
-      logError(`[Reranker] LLM failed, using original scores: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logError(`[Reranker] LLM failed, using original scores: ${errorMessage}`);
       // Return original results filtered by threshold
       return topResults
         .map(r => ({

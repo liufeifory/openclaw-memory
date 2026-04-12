@@ -8,6 +8,7 @@
 import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 import { LLMClient } from './llm-client.js';
+import { ServiceFactory } from './service-factory.js';
 
 const EXTRACT_PROMPT = `Extract user preferences, facts, and profile information from the conversation.
 
@@ -46,8 +47,9 @@ export class PreferenceExtractor {
   private client: LLMClient;
   private limiter: LLMLimiter;
 
-  constructor(client: LLMClient, limiter?: LLMLimiter) {
-    this.client = client;
+  constructor(limiter?: LLMLimiter) {
+    // 统一从 ServiceFactory 获取 LLMClient（单一入口）
+    this.client = ServiceFactory.getLLM();
     this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
   }
 
@@ -75,8 +77,9 @@ export class PreferenceExtractor {
         facts: result.facts || {},
         habits: Array.isArray(result.habits) ? result.habits : [],
       };
-    } catch (error: any) {
-      logError(`[PreferenceExtractor] LLM failed: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logError(`[PreferenceExtractor] LLM failed: ${errorMessage}`);
       return {
         likes: [],
         dislikes: [],

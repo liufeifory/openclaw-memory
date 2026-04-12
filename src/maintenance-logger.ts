@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Error types vary */
 /**
  * Maintenance Logger - writes maintenance logs to file only (not console).
  * This prevents TUI flooding while keeping logs for debugging.
@@ -36,11 +37,13 @@ export function logMaintenance(level: 'INFO' | 'WARN' | 'ERROR', message: string
     const timestamp = formatTimestamp();
     const logLine = `${timestamp} [${level}] ${message}\n`;
     fs.appendFileSync(LOG_FILE, logLine);
-  } catch (error: any) {
+  } catch (error: unknown) {
     // Silently ignore file write errors to avoid cascading failures
     // Only log to console as last resort (should never happen)
     if (process.env.DEBUG === 'memory') {
-      console.error('[MaintenanceLogger] Failed to write log:', error.message);
+      const errMsg = error instanceof Error ? error.message : String(error);
+      // eslint-disable-next-line no-console -- Last resort fallback for debugging
+      console.error('[MaintenanceLogger] Failed to write log:', errMsg);
     }
   }
 }

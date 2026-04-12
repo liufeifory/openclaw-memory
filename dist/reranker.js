@@ -8,6 +8,7 @@
  */
 import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
+import { ServiceFactory } from './service-factory.js';
 const RERANK_PROMPT = `Rank these memory snippets by relevance to the query.
 Output ONLY the indices in order (0-based), most relevant first.
 
@@ -26,8 +27,9 @@ export class Reranker {
     client;
     limiter;
     defaultOptions;
-    constructor(client, limiter) {
-        this.client = client;
+    constructor(limiter) {
+        // 统一从 ServiceFactory 获取 LLMClient（单一入口）
+        this.client = ServiceFactory.getLLM();
         this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
         this.defaultOptions = {
             topK: 5,
@@ -93,7 +95,8 @@ export class Reranker {
                 .slice(0, opts.topK);
         }
         catch (error) {
-            logError(`[Reranker] LLM failed, using original scores: ${error.message}`);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            logError(`[Reranker] LLM failed, using original scores: ${errorMessage}`);
             // Return original results filtered by threshold
             return topResults
                 .map(r => ({

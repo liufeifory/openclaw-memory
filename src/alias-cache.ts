@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Database query returns have flexible SurrealDB formats */
 /**
  * LRU Cache for entity aliases
  * User feedback: M4 cold start optimization - cache frequently used aliases

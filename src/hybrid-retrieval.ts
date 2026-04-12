@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Database query returns have flexible SurrealDB formats */
 /**
  * HybridRetriever - Vector + Graph + Topic Hybrid Retrieval (Stage 3)
  *
@@ -18,7 +19,7 @@
 import { SurrealDatabase, LinkedMemory } from './surrealdb-client.js';
 import { EmbeddingService } from './embedding.js';
 import { EntityIndexer } from './entity-indexer.js';
-import { Reranker, RerankResult } from './reranker.js';
+import { Reranker } from './reranker.js';
 import { EntityExtractor, ExtractedEntity } from './entity-extractor.js';
 import { LLMClient } from './llm-client.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
@@ -59,9 +60,9 @@ export interface HybridRetrievalResult {
 }
 
 /**
- * Entity search result for graph traversal
+ * Entity search result for graph traversal (internal type)
  */
-interface EntitySearchResult {
+interface _EntitySearchResult {
   entityId: number;
   entityName: string;
   memories: LinkedMemory[];
@@ -338,8 +339,8 @@ export class HybridRetriever {
             });
           } else {
             // Update weight if higher
-            const existing = allMemories.get(mem.id)!;
-            if ((mem.weight ?? 0) > (existing.weight ?? 0)) {
+            const existing = allMemories.get(mem.id);
+            if (existing && (mem.weight ?? 0) > (existing.weight ?? 0)) {
               existing.weight = mem.weight;
               existing.score = mem.weight;
             }
@@ -412,7 +413,7 @@ export class HybridRetriever {
    */
   async topicSearch(
     entityIds: (string | number)[],
-    topK: number = 20
+    _topK: number = 20  // Unused - kept for API compatibility
   ): Promise<MemoryResult[]> {
     const allMemories: Map<number, MemoryResult> = new Map();
 
@@ -549,7 +550,7 @@ export class HybridRetriever {
       });
 
       // Convert back to MemoryResult format
-      return reranked.map((r, index) => ({
+      return reranked.map((r) => ({
         id: r.id,
         content: r.content,
         type: (r.type as 'episodic' | 'semantic' | 'reflection') || 'episodic',
@@ -721,7 +722,7 @@ export class HybridRetriever {
       }
 
       // Step 4: Multi-degree expansion (Stage 2)
-      let multiDegreeResults: MemoryResult[] = [];
+      const multiDegreeResults: MemoryResult[] = [];
       if (validEntityIds.length > 0 && degree > 1) {
         try {
           // Use first valid entity as seed for multi-degree search

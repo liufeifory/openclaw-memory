@@ -5,7 +5,6 @@
  * Uses cloud model when configured (high-quality task).
  */
 import { LLMLimiter } from './llm-limiter.js';
-import { LLMClient } from './llm-client.js';
 export interface UserProfile {
     likes: string[];
     dislikes: string[];
@@ -20,7 +19,7 @@ export interface UserProfile {
 export declare class PreferenceExtractor {
     private client;
     private limiter;
-    constructor(client: LLMClient, limiter?: LLMLimiter);
+    constructor(limiter?: LLMLimiter);
     /**
      * Extract user profile from conversation.
      */

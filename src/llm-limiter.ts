@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Task queue uses dynamic types */
 /**
  * LLM Request Rate Limiter
  *

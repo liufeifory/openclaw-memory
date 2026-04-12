@@ -6,6 +6,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { logWarn } from './maintenance-logger.js';
 
 /**
  * SurrealDB 配置
@@ -28,21 +29,14 @@ export interface EmbeddingConfig {
 }
 
 /**
- * LLM 配置
+ * LLM 配置 - 云端模型
  */
 export interface LLMConfig {
-  // 本地 LLM
-  localEndpoint?: string;
-  localApiKey?: string;
-  localModel?: string;
-
-  // 云端 LLM（可选）
-  cloudEnabled?: boolean;
-  cloudProvider?: 'bailian' | 'openai' | 'custom';
-  cloudBaseUrl?: string;
-  cloudApiKey?: string;
-  cloudModel?: string;
-  cloudTasks?: ('preference' | 'summarizer' | 'clusterer' | 'reranker')[];
+  // 云端 LLM（必须）
+  cloudProvider?: 'bailian' | 'openai' | 'deepseek' | 'custom';
+  cloudBaseUrl: string;     // 例如: https://dashscope.aliyuncs.com/compatible-mode/v1
+  cloudApiKey: string;      // API Key
+  cloudModel?: string;      // 默认模型，例如: qwen-plus
 }
 
 /**
@@ -96,9 +90,10 @@ export function buildConfigFromEnv(): PluginConfig {
       apiKey: process.env.EMBEDDING_API_KEY || 'liutengfei411',
     },
     llm: {
-      localEndpoint: process.env.LLM_ENDPOINT || 'http://localhost:8000',
-      localApiKey: process.env.LLM_API_KEY || 'liutengfei411',
-      localModel: process.env.LLM_MODEL || 'gemma-4-e4b-it-8bit',
+      cloudProvider: (process.env.LLM_PROVIDER as 'bailian' | 'openai' | 'deepseek' | 'custom') || 'bailian',
+      cloudBaseUrl: process.env.LLM_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      cloudApiKey: process.env.LLM_API_KEY || '',
+      cloudModel: process.env.LLM_MODEL || 'qwen-plus',
     },
   };
 }
@@ -115,7 +110,7 @@ export function buildConfigFromOpenClaw(openclawConfigPath?: string): PluginConf
 
   try {
     if (!fs.existsSync(configPath)) {
-      console.warn(`[Config] OpenClaw config not found at ${configPath}, using env defaults`);
+      logWarn(`[Config] OpenClaw config not found at ${configPath}, using env defaults`);
       return buildConfigFromEnv();
     }
 
@@ -127,10 +122,10 @@ export function buildConfigFromOpenClaw(openclawConfigPath?: string): PluginConf
       return pluginConfig;
     }
 
-    console.warn('[Config] openclaw-memory config not found in OpenClaw config, using env defaults');
+    logWarn('[Config] openclaw-memory config not found in OpenClaw config, using env defaults');
     return buildConfigFromEnv();
   } catch (error) {
-    console.warn(`[Config] Failed to read OpenClaw config: ${error}, using env defaults`);
+    logWarn(`[Config] Failed to read OpenClaw config: ${error}, using env defaults`);
     return buildConfigFromEnv();
   }
 }

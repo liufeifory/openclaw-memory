@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Database query returns have flexible SurrealDB formats */
 /**
  * SurrealDB Memory Search Manager
  *
@@ -105,7 +106,7 @@ export class SurrealMemorySearchManager implements MemorySearchManager {
     }
 
     const topK = opts?.topK || 10;
-    const threshold = opts?.threshold || 0.5;
+    const _threshold = opts?.threshold || 0.5;  // Unused - kept for API compatibility
 
     try {
       // Generate embedding for query
@@ -123,7 +124,7 @@ export class SurrealMemorySearchManager implements MemorySearchManager {
   /**
    * Read a specific memory file (not applicable for SurrealDB)
    */
-  async readFile(params: { path: string }): Promise<any> {
+  async readFile(_params: { path: string }): Promise<any> {
     // SurrealDB doesn't use file-based storage
     return { error: 'SurrealDB backend does not support file-based access' };
   }
@@ -151,7 +152,7 @@ export class SurrealMemorySearchManager implements MemorySearchManager {
   /**
    * Sync memory index (not needed for SurrealDB)
    */
-  async sync(params?: any): Promise<void> {
+  async sync(_params?: any): Promise<void> {
     // No-op for SurrealDB - it handles its own indexing
     logInfo('[SurrealMemorySearchManager] Sync called (no-op for SurrealDB)');
   }

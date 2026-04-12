@@ -7,7 +7,6 @@
  * - Diversity Re-ranking: Penalizes highly similar top results
  */
 import { LLMLimiter } from './llm-limiter.js';
-import { LLMClient } from './llm-client.js';
 declare const DIVERSITY_PENALTY = 0.15;
 declare const CLUSTER_DIVERSITY_PENALTY = 0.2;
 declare const SCORE_THRESHOLD = 0.7;
@@ -44,7 +43,7 @@ export declare class Reranker {
     private client;
     private limiter;
     private defaultOptions;
-    constructor(client: LLMClient, limiter?: LLMLimiter);
+    constructor(limiter?: LLMLimiter);
     /**
      * Rerank search results by relevance.
      * Features:

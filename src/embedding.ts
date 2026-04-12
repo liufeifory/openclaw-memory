@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- External API response types vary by provider */
 /**
  * Embedding service supporting multiple backends:
  * - llama.cpp HTTP endpoint (legacy)
@@ -75,9 +76,10 @@ export class EmbeddingService {
 
     // Check cache first
     const cacheKey = inputText;
-    if (this.cache.has(cacheKey)) {
+    const cachedEmbedding = this.cache.get(cacheKey);
+    if (cachedEmbedding) {
       logInfo(`[embedding] Cache hit for: "${text.substring(0, 30)}..."`);
-      return this.cache.get(cacheKey)!;
+      return cachedEmbedding;
     }
 
     if (this.apiType === 'openai') {

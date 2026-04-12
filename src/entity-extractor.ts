@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- LLM response types vary */
 /**
  * Entity Extractor - Two-Layer Architecture
  *

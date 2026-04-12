@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- LLM API response types vary */
 /**
  * Memory Filter using LLM
  *
@@ -30,7 +31,7 @@ Message: "{{message}}"
 
 JSON:`;
 
-import { logError, logInfo } from './maintenance-logger.js';
+import { logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 import { LLMClient } from './llm-client.js';
 

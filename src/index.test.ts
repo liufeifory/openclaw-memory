@@ -9,8 +9,8 @@
  * 5. Execute function signature is async execute(_id, params)
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { Type, type Static } from '@sinclair/typebox';
+import { describe, it, expect } from 'vitest';
+import { Type } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 
 // Test the TypeBox schemas match expected parameter structure

@@ -8,9 +8,10 @@
  * - Alerts for over-compression (ratio < 0.1) and under-compression (ratio > 0.9)
  */
 
-import { logWarn, logError, logInfo } from './maintenance-logger.js';
+import { logWarn, logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 import { LLMClient } from './llm-client.js';
+import { ServiceFactory } from './service-factory.js';
 
 const SUMMARIZE_PROMPT = `Summarize these conversation turns into ONE concise fact or observation.
 Focus on:
@@ -46,8 +47,9 @@ export class Summarizer {
     underCompressionCount: 0,
   };
 
-  constructor(client: LLMClient, limiter?: LLMLimiter) {
-    this.client = client;
+  constructor(limiter?: LLMLimiter) {
+    // 统一从 ServiceFactory 获取 LLMClient（单一入口）
+    this.client = ServiceFactory.getLLM();
     this.limiter = limiter ?? new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
   }
 
@@ -141,8 +143,9 @@ export class Summarizer {
         compressionRatio: ratio,
         compressionQuality: quality,
       };
-    } catch (error: any) {
-      logError(`[Summarizer] LLM failed: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logError(`[Summarizer] LLM failed: ${errorMessage}`);
       return { summary: '', isEmpty: true };
     }
   }

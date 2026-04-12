@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- OpenClaw SDK API types are dynamic */
 /**
  * OpenClaw Memory Plugin - New SDK Format
  *
@@ -20,13 +21,13 @@ import { createDocumentImporter } from './document-importer.js';
 import { DocumentParser } from './document-parser.js';
 import { DocumentSplitter } from './document-splitter.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
-import { LLMClient, createLLMClients } from './llm-client.js';
+import { LLMClient } from './llm-client.js';
 import {
   buildPromptSection,
   buildMemoryFlushPlan,
   createMemoryRuntime,
 } from './memory-runtime-provider.js';
-import { ServiceFactory, initServices, disposeServices } from './service-factory.js';
+import { ServiceFactory, initServices } from './service-factory.js';
 import type { PluginConfig } from './config.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -132,7 +133,7 @@ interface QueuedMessage {
 const messageQueue: QueuedMessage[] = [];
 let queueProcessing = false;
 let queueShutDown = false;
-let storedMessages = new Set<string>();  // For TUI duplicate prevention
+const storedMessages = new Set<string>();  // For TUI duplicate prevention
 const conversationBuffers = new Map<string, string[]>();  // Conversation buffer for summarization
 
 // Track if cleanup has been done to avoid double cleanup
@@ -388,11 +389,11 @@ function isHistoricalQuery(query: string): boolean {
 }
 
 /**
- * Get time window for intent type
+ * Get time window for intent type (unused - kept for future use)
  * @param intent - Detected intent type
  * @param isHistorical - Whether this is a historical query
  */
-function getTimeWindow(intent: string, isHistorical: boolean): number {
+function _getTimeWindow(intent: string, isHistorical: boolean): number {
   if (isHistorical) {
     return HISTORICAL_TIME_WINDOWS[intent] || HISTORICAL_TIME_WINDOWS.default;
   }
@@ -463,16 +464,16 @@ function getMemoryFilter(client: LLMClient, limiter: LLMLimiter): MemoryFilter {
   return memoryFilter;
 }
 
-function getPreferenceExtractor(client: LLMClient, limiter: LLMLimiter): PreferenceExtractor {
+function getPreferenceExtractor(_client: LLMClient, limiter: LLMLimiter): PreferenceExtractor {
   if (!preferenceExtractor) {
-    preferenceExtractor = new PreferenceExtractor(client, limiter);
+    preferenceExtractor = new PreferenceExtractor(limiter);
   }
   return preferenceExtractor;
 }
 
-function getSummarizer(client: LLMClient, limiter: LLMLimiter): Summarizer {
+function getSummarizer(_client: LLMClient, limiter: LLMLimiter): Summarizer {
   if (!summarizer) {
-    summarizer = new Summarizer(client, limiter);
+    summarizer = new Summarizer(limiter);
   }
   return summarizer;
 }
@@ -480,7 +481,7 @@ function getSummarizer(client: LLMClient, limiter: LLMLimiter): Summarizer {
 /**
  * Append memory to local Markdown file for self-improving-agent compatibility.
  */
-function appendToLocalMemory(content: string, sessionId?: string): void {
+function appendToLocalMemory(content: string, _sessionId?: string): void {
   try {
     const workspaceDir = process.env.HOME ? path.join(process.env.HOME, '.openclaw', 'workspace') : '~/.openclaw/workspace';
     const memoryDir = path.join(workspaceDir, 'memory');
@@ -643,10 +644,14 @@ export default createPluginEntry({
             }
 
             // 1. Classification (for labels only)
-            const filterResult = await memoryFilter!.classify(item.message);
+            if (!memoryFilter || !memoryManager) {
+              logWarn('[Queue] Memory filter or manager not initialized, skipping');
+              continue;
+            }
+            const filterResult = await memoryFilter.classify(item.message);
 
             // 2. Store memories (all as episodic, write to both DB and file)
-            await memoryManager!.storeMemory(item.sessionId, item.message, filterResult.importance);
+            await memoryManager.storeMemory(item.sessionId, item.message, filterResult.importance);
 
             // Write to local Markdown file (for self-improving-agent)
             const categoryLabel = filterResult.category ? `[${filterResult.category}] ` : '';
@@ -657,20 +662,20 @@ export default createPluginEntry({
             buffer.push(item.message);
             conversationBuffers.set(item.sessionId, buffer);
 
-            if (buffer.length >= 10) {
-              const userProfile = await preferenceExtractor!.extract(buffer);
+            if (buffer.length >= 10 && preferenceExtractor && summarizer) {
+              const userProfile = await preferenceExtractor.extract(buffer);
               for (const like of userProfile.likes) {
-                await memoryManager!.storeSemantic(like, 0.8, item.sessionId);
+                await memoryManager.storeSemantic(like, 0.8, item.sessionId);
                 appendToLocalMemory(`[PREFERENCE-LIKE] ${like}`);
               }
               for (const dislike of userProfile.dislikes) {
-                await memoryManager!.storeSemantic(dislike, 0.8, item.sessionId);
+                await memoryManager.storeSemantic(dislike, 0.8, item.sessionId);
                 appendToLocalMemory(`[PREFERENCE-DISLIKE] ${dislike}`);
               }
 
-              const summaryResult = await summarizer!.summarize(buffer);
+              const summaryResult = await summarizer.summarize(buffer);
               if (summaryResult.summary) {
-                await memoryManager!.storeReflection(summaryResult.summary, 0.9, item.sessionId);
+                await memoryManager.storeReflection(summaryResult.summary, 0.9, item.sessionId);
                 appendToLocalMemory(`[REFLECTION] ${summaryResult.summary}`);
               }
 
@@ -789,8 +794,12 @@ export default createPluginEntry({
         // 2. Retrieve relevant memories (with timeout)
         // For historical queries, increase top_k to get more results from longer time range
         const topK = isHistorical ? 30 : 10;
+        if (!memoryManager) {
+          logWarn('[Memory Inject] Memory manager not initialized');
+          return;
+        }
         const memories = await Promise.race([
-          memoryManager!.retrieveRelevant(lastMessageContent, sessionId, topK, 0.5),  // Lower threshold for historical
+          memoryManager.retrieveRelevant(lastMessageContent, sessionId, topK, 0.5),  // Lower threshold for historical
           new Promise<any[]>((_, reject) =>
             setTimeout(() => reject(new Error('Memory retrieval timeout')), timeoutMs)
           )
@@ -855,7 +864,10 @@ export default createPluginEntry({
           }
 
           await ensureInitialized();
-          const memories = await memoryManager!.retrieveRelevant(query, session_id, top_k, threshold);
+          if (!memoryManager) {
+            return { error: 'Memory manager not initialized' };
+          }
+          const memories = await memoryManager.retrieveRelevant(query, session_id, top_k, threshold);
           return {
             memories,
             count: memories.length,
@@ -883,7 +895,10 @@ export default createPluginEntry({
 
           if (url) {
             await ensureInitialized();
-            const { urlImporter } = createDocumentImporter(memoryManager!, {
+            if (!memoryManager) {
+              return { error: 'Memory manager not initialized' };
+            }
+            const { urlImporter } = createDocumentImporter(memoryManager, {
               chunkSize: savedConfig?.documentImport?.chunkSize,
               chunkOverlap: savedConfig?.documentImport?.chunkOverlap,
             });
@@ -893,6 +908,9 @@ export default createPluginEntry({
 
           if (filePath) {
             await ensureInitialized();
+            if (!memoryManager) {
+              return { error: 'Memory manager not initialized' };
+            }
             const parser = new DocumentParser();
             const splitter = new DocumentSplitter(
               savedConfig?.documentImport?.chunkSize || 500,
@@ -903,7 +921,7 @@ export default createPluginEntry({
             const chunks = splitter.split(parsed.content, filePath);
 
             for (const chunk of chunks) {
-              await memoryManager!.storeSemantic(chunk.content, 0.7, `doc:${filePath}`);
+              await memoryManager.storeSemantic(chunk.content, 0.7, `doc:${filePath}`);
             }
 
             return { success: true, chunks: chunks.length, source: filePath };

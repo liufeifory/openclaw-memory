@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- OpenClaw SDK API types are dynamic */
 /**
  * OpenClaw Memory Plugin - New SDK Format
  *
@@ -92,7 +93,7 @@ async function doInitialize() {
 const messageQueue = [];
 let queueProcessing = false;
 let queueShutDown = false;
-let storedMessages = new Set(); // For TUI duplicate prevention
+const storedMessages = new Set(); // For TUI duplicate prevention
 const conversationBuffers = new Map(); // Conversation buffer for summarization
 // Track if cleanup has been done to avoid double cleanup
 let cleanedUp = false;
@@ -317,11 +318,11 @@ function isHistoricalQuery(query) {
     return HISTORICAL_PATTERNS.some(p => p.test(query));
 }
 /**
- * Get time window for intent type
+ * Get time window for intent type (unused - kept for future use)
  * @param intent - Detected intent type
  * @param isHistorical - Whether this is a historical query
  */
-function getTimeWindow(intent, isHistorical) {
+function _getTimeWindow(intent, isHistorical) {
     if (isHistorical) {
         return HISTORICAL_TIME_WINDOWS[intent] || HISTORICAL_TIME_WINDOWS.default;
     }
@@ -377,22 +378,22 @@ function getMemoryFilter(client, limiter) {
     }
     return memoryFilter;
 }
-function getPreferenceExtractor(client, limiter) {
+function getPreferenceExtractor(_client, limiter) {
     if (!preferenceExtractor) {
-        preferenceExtractor = new PreferenceExtractor(client, limiter);
+        preferenceExtractor = new PreferenceExtractor(limiter);
     }
     return preferenceExtractor;
 }
-function getSummarizer(client, limiter) {
+function getSummarizer(_client, limiter) {
     if (!summarizer) {
-        summarizer = new Summarizer(client, limiter);
+        summarizer = new Summarizer(limiter);
     }
     return summarizer;
 }
 /**
  * Append memory to local Markdown file for self-improving-agent compatibility.
  */
-function appendToLocalMemory(content, sessionId) {
+function appendToLocalMemory(content, _sessionId) {
     try {
         const workspaceDir = process.env.HOME ? path.join(process.env.HOME, '.openclaw', 'workspace') : '~/.openclaw/workspace';
         const memoryDir = path.join(workspaceDir, 'memory');
@@ -535,6 +536,10 @@ export default createPluginEntry({
                             continue;
                         }
                         // 1. Classification (for labels only)
+                        if (!memoryFilter || !memoryManager) {
+                            logWarn('[Queue] Memory filter or manager not initialized, skipping');
+                            continue;
+                        }
                         const filterResult = await memoryFilter.classify(item.message);
                         // 2. Store memories (all as episodic, write to both DB and file)
                         await memoryManager.storeMemory(item.sessionId, item.message, filterResult.importance);
@@ -545,7 +550,7 @@ export default createPluginEntry({
                         const buffer = conversationBuffers.get(item.sessionId) || [];
                         buffer.push(item.message);
                         conversationBuffers.set(item.sessionId, buffer);
-                        if (buffer.length >= 10) {
+                        if (buffer.length >= 10 && preferenceExtractor && summarizer) {
                             const userProfile = await preferenceExtractor.extract(buffer);
                             for (const like of userProfile.likes) {
                                 await memoryManager.storeSemantic(like, 0.8, item.sessionId);
@@ -661,6 +666,10 @@ export default createPluginEntry({
                 // 2. Retrieve relevant memories (with timeout)
                 // For historical queries, increase top_k to get more results from longer time range
                 const topK = isHistorical ? 30 : 10;
+                if (!memoryManager) {
+                    logWarn('[Memory Inject] Memory manager not initialized');
+                    return;
+                }
                 const memories = await Promise.race([
                     memoryManager.retrieveRelevant(lastMessageContent, sessionId, topK, 0.5), // Lower threshold for historical
                     new Promise((_, reject) => setTimeout(() => reject(new Error('Memory retrieval timeout')), timeoutMs))
@@ -716,6 +725,9 @@ export default createPluginEntry({
                         return { error: 'Missing required parameter: query' };
                     }
                     await ensureInitialized();
+                    if (!memoryManager) {
+                        return { error: 'Memory manager not initialized' };
+                    }
                     const memories = await memoryManager.retrieveRelevant(query, session_id, top_k, threshold);
                     return {
                         memories,
@@ -743,6 +755,9 @@ export default createPluginEntry({
                     const { url, path: filePath } = params;
                     if (url) {
                         await ensureInitialized();
+                        if (!memoryManager) {
+                            return { error: 'Memory manager not initialized' };
+                        }
                         const { urlImporter } = createDocumentImporter(memoryManager, {
                             chunkSize: savedConfig?.documentImport?.chunkSize,
                             chunkOverlap: savedConfig?.documentImport?.chunkOverlap,
@@ -752,6 +767,9 @@ export default createPluginEntry({
                     }
                     if (filePath) {
                         await ensureInitialized();
+                        if (!memoryManager) {
+                            return { error: 'Memory manager not initialized' };
+                        }
                         const parser = new DocumentParser();
                         const splitter = new DocumentSplitter(savedConfig?.documentImport?.chunkSize || 500, savedConfig?.documentImport?.chunkOverlap || 50);
                         const parsed = await parser.parse(filePath);

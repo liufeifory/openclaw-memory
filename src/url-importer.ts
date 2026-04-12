@@ -38,8 +38,9 @@ export class UrlImporter {
 
       logInfo(`[UrlImporter] Imported ${url}: ${chunks.length} chunks`);
       return chunks.length;
-    } catch (error: any) {
-      logError(`[UrlImporter] Failed to import ${url}: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logError(`[UrlImporter] Failed to import ${url}: ${errorMessage}`);
       throw error;
     }
   }

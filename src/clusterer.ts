@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- LLM API response types vary */
 /**
  * Semantic Clusterer for Memory Merging
  *
@@ -11,7 +12,7 @@
  * - Conflict detection via conflict-detector.ts
  */
 
-import { logInfo, logWarn, logError } from './maintenance-logger.js';
+import { logInfo, logError } from './maintenance-logger.js';
 import { LLMLimiter } from './llm-limiter.js';
 import { ConflictDetector } from './conflict-detector.js';
 import { LLMClient } from './llm-client.js';
@@ -174,7 +175,7 @@ export class SemanticClusterer {
    */
   async mergeCluster(
     cluster: ClusteredMemory,
-    existingMergedMemories: Array<{ id: number; content: string }> = []
+    _existingMergedMemories: Array<{ id: number; content: string }> = []
   ): Promise<MergeResult> {
     if (cluster.memories.length < 2) {
       return {
@@ -307,7 +308,7 @@ export class SemanticClusterer {
     onClusterMerged: (result: { theme: string; mergedContent: string; sourceIds: number[] }) => Promise<void>,
     options?: { timeoutMs?: number; maxMemories?: number }
   ): Promise<{ completed: boolean; reason?: string }> {
-    const timeoutMs = options?.timeoutMs ?? 120000;  // 2 minutes default
+    const _timeoutMs = options?.timeoutMs ?? 120000;  // Unused - timeout handled by caller
     const maxMemories = options?.maxMemories ?? 100;  // Limit to top 100
 
     try {

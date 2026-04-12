@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Database query returns have flexible SurrealDB formats */
 /**
  * Memory maintenance for decay, promotion, and reflection generation.
  *
@@ -46,7 +47,7 @@ export class MemoryMaintenance {
   async runDecay(): Promise<{ episodicDecayed: number; semanticDecayed: number }> {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - this.config.olderThanDays);
-    const cutoffStr = cutoff.toISOString();
+    const _cutoffStr = cutoff.toISOString();  // Unused - kept for debugging
 
     let episodicDecayed = 0;
     let semanticDecayed = 0;

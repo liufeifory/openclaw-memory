@@ -7,6 +7,7 @@
 
 import { logInfo, logError } from './maintenance-logger.js';
 import { getSurrealMemorySearchManager, closeAllSurrealMemorySearchManagers } from './memory-search-manager.js';
+import type { PluginConfig } from './config.js';
 
 /**
  * Memory Backend Configuration
@@ -54,7 +55,7 @@ export function buildPromptSection(params: { availableTools: Set<string>; citati
  * Memory Flush Plan Builder
  * Returns plan for storing memories during compaction
  */
-export function buildMemoryFlushPlan(params: { cfg?: any; nowMs?: number } = {}): {
+export function buildMemoryFlushPlan(params: { cfg?: PluginConfig | null; nowMs?: number } = {}): {
   softThresholdTokens: number;
   forceFlushTranscriptBytes: number;
   prompt: string;
@@ -95,13 +96,13 @@ export function buildMemoryFlushPlan(params: { cfg?: any; nowMs?: number } = {})
  * Memory Runtime Provider
  * Implements the OpenClaw memory runtime interface
  */
-export function createMemoryRuntime(getConfig: () => any) {
+export function createMemoryRuntime(getConfig: () => PluginConfig | null) {
   return {
     /**
      * Get memory search manager
      * Returns a manager that implements the OpenClaw MemorySearchManager interface
      */
-    async getMemorySearchManager(params: any) {
+    async getMemorySearchManager(params: { agentId?: string } | undefined) {
       logInfo('[MemoryRuntime] getMemorySearchManager called');
 
       const config = getConfig();
@@ -117,17 +118,18 @@ export function createMemoryRuntime(getConfig: () => any) {
 
       try {
         logInfo('[MemoryRuntime] Calling getSurrealMemorySearchManager');
-        const manager = await getSurrealMemorySearchManager(config, params.agentId);
+        const manager = await getSurrealMemorySearchManager(config, params?.agentId);
         logInfo(`[MemoryRuntime] Manager created: ${manager ? 'success' : 'null'}`);
         return {
           manager,
           error: null,
         };
-      } catch (error: any) {
-        logError(`[MemoryRuntime] Failed to create manager: ${error.message}`);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        logError(`[MemoryRuntime] Failed to create manager: ${message}`);
         return {
           manager: null,
-          error: error.message,
+          error: message,
         };
       }
     },
@@ -136,9 +138,9 @@ export function createMemoryRuntime(getConfig: () => any) {
      * Resolve memory backend configuration
      * Returns configuration for our SurrealDB backend
      */
-    resolveMemoryBackendConfig(params: any): MemoryBackendConfig {
+    resolveMemoryBackendConfig(_params: unknown): MemoryBackendConfig {
       const cfg = getConfig();
-      const surrealConfig = cfg?.surrealdb || {};
+      const surrealConfig = (cfg?.surrealdb ?? {}) as { url?: string; namespace?: string; database?: string };
 
       logInfo('[MemoryRuntime] resolveMemoryBackendConfig called');
 
@@ -146,9 +148,9 @@ export function createMemoryRuntime(getConfig: () => any) {
         backend: 'surrealdb',
         citations: 'auto',
         surrealdb: {
-          url: surrealConfig.url || 'ws://127.0.0.1:8001/rpc',
-          namespace: surrealConfig.namespace || 'openclaw',
-          database: surrealConfig.database || 'memory',
+          url: surrealConfig.url ?? 'ws://127.0.0.1:8001/rpc',
+          namespace: surrealConfig.namespace ?? 'openclaw',
+          database: surrealConfig.database ?? 'memory',
         },
       };
     },

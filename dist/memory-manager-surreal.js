@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Database query returns have flexible SurrealDB formats */
 /**
  * Memory Manager - orchestrates all memory operations using SurrealDB.
  */
@@ -50,12 +51,12 @@ export class MemoryManager {
         const llmClient = getLLM();
         this.limiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100, queueLimit: 50 });
         // Local-only tasks (reranker, conflict detector, entity extractor)
-        this.reranker = new Reranker(llmClient, this.limiter);
+        this.reranker = new Reranker(this.limiter);
         this.conflictDetector = new ConflictDetector(llmClient, this.limiter);
         // Hybrid tasks (can use cloud when configured)
         this.importanceLearning = new ImportanceLearning();
         this.clusterer = new SemanticClusterer(llmClient, this.limiter);
-        this.summarizer = new Summarizer(llmClient, this.limiter);
+        this.summarizer = new Summarizer(this.limiter);
         logInfo(`[MemoryManager] LLM config: ${llmClient.getConfigInfo()}`);
         // Initialize EntityIndexer and HybridRetriever
         this.entityIndexer = new EntityIndexer(this.db);
@@ -181,9 +182,11 @@ export class MemoryManager {
             this.sessionBuffers.set(sessionId, []);
         }
         const buffer = this.sessionBuffers.get(sessionId);
-        buffer.push(message);
-        if (buffer.length > 50) {
-            buffer.shift();
+        if (buffer) {
+            buffer.push(message);
+            if (buffer.length > 50) {
+                buffer.shift();
+            }
         }
     }
     /**

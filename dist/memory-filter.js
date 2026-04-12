@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- LLM API response types vary */
 /**
  * Memory Filter using LLM
  *

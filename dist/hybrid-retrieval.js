@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Database query returns have flexible SurrealDB formats */
 /**
  * HybridRetriever - Vector + Graph + Topic Hybrid Retrieval (Stage 3)
  *
@@ -252,7 +253,7 @@ export class HybridRetriever {
                     else {
                         // Update weight if higher
                         const existing = allMemories.get(mem.id);
-                        if ((mem.weight ?? 0) > (existing.weight ?? 0)) {
+                        if (existing && (mem.weight ?? 0) > (existing.weight ?? 0)) {
                             existing.weight = mem.weight;
                             existing.score = mem.weight;
                         }
@@ -313,7 +314,8 @@ export class HybridRetriever {
      * @param topK - Maximum number of results to return
      * @returns Topic recall results
      */
-    async topicSearch(entityIds, topK = 20) {
+    async topicSearch(entityIds, _topK = 20 // Unused - kept for API compatibility
+    ) {
         const allMemories = new Map();
         try {
             for (const entityId of entityIds) {
@@ -428,7 +430,7 @@ export class HybridRetriever {
                 enableDiversity: true,
             });
             // Convert back to MemoryResult format
-            return reranked.map((r, index) => ({
+            return reranked.map((r) => ({
                 id: r.id,
                 content: r.content,
                 type: r.type || 'episodic',
@@ -584,7 +586,7 @@ export class HybridRetriever {
                 }
             }
             // Step 4: Multi-degree expansion (Stage 2)
-            let multiDegreeResults = [];
+            const multiDegreeResults = [];
             if (validEntityIds.length > 0 && degree > 1) {
                 try {
                     // Use first valid entity as seed for multi-degree search

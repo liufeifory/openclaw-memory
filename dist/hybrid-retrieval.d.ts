@@ -110,7 +110,7 @@ export declare class HybridRetriever {
      * @param topK - Maximum number of results to return
      * @returns Topic recall results
      */
-    topicSearch(entityIds: (string | number)[], topK?: number): Promise<MemoryResult[]>;
+    topicSearch(entityIds: (string | number)[], _topK?: number): Promise<MemoryResult[]>;
     /**
      * Merge vector, graph, and topic results with efficient deduplication
      * User feedback: reduce 4-path merge overhead, prefer precision paths

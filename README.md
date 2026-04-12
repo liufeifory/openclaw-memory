@@ -2,10 +2,11 @@
 
 > 基于 SurrealDB 的企业级智能记忆系统，为 OpenClaw AI 助手提供长期记忆能力
 
-[![Version](https://img.shields.io/badge/version-2.2.0-blue)](https://github.com/liufeifory/openclaw-memory)
+[![Version](https://img.shields.io/badge/version-2.3.0-blue)](https://github.com/liufeifory/openclaw-memory)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Node](https://img.shields.io/badge/Node.js-≥18-green)](https://nodejs.org)
 [![SurrealDB](https://img.shields.io/badge/SurrealDB-≥2.0-orange)](https://surrealdb.com)
+[![LLM](https://img.shields.io/badge/LLM-Cloud--only-purple)](https://dashscope.aliyuncs.com)
 
 ---
 
@@ -150,19 +151,26 @@ importance = base_importance * exp(-λ * days)
 └─────────────────────────────────────────────────────────────────┘
           │                     │
           ▼                     ▼
-┌─────────────────┐  ┌─────────────────────────────────────────────┐
-│   oMLX / LLM    │  │              SurrealDB                       │
-│  ┌───────────┐  │  │  ┌─────────────────────────────────────────┐│
-│  │ Embedding │  │  │  │ memory 表 (向量索引 + 图遍历)           ││
-│  │ BGE-M3    │  │  │  ├─────────────────────────────────────────┤│
-│  │ 1024维    │  │  │  │ entity 表 (实体节点)                    ││
-│  └───────────┘  │  │  ├─────────────────────────────────────────┤│
-│  ┌───────────┐  │  │  │ memory_entity 表 (记忆-实体关系)        ││
-│  │ LLM       │  │  │  ├─────────────────────────────────────────┤│
-│  │ Gemma-4   │  │  │  │ entity_relation 表 (实体-实体关系)      ││
-│  │ 实体提取  │  │  │  └─────────────────────────────────────────┘│
-│  └───────────┘  │  └─────────────────────────────────────────────┘
-└─────────────────┘
+┌─────────────────────┐  ┌─────────────────────────────────────────────┐
+│  Embedding Service  │  │              SurrealDB                       │
+│  ┌───────────────┐  │  │  ┌─────────────────────────────────────────┐│
+│  │ BGE-M3        │  │  │  │ memory 表 (向量索引 + 图遍历)           ││
+│  │ 1024维向量     │  │  │  ├─────────────────────────────────────────┤│
+│  │ (本地/云端)    │  │  │  │ entity 表 (实体节点)                    ││
+│  └───────────────┘  │  │  ├─────────────────────────────────────────┤│
+└─────────────────────┘  │  │ memory_entity 表 (记忆-实体关系)        ││
+                         │  ├─────────────────────────────────────────┤│
+┌─────────────────────┐  │  │ entity_relation 表 (实体-实体关系)      ││
+│  Cloud LLM          │  │  └─────────────────────────────────────────┘│
+│  ┌───────────────┐  │  └─────────────────────────────────────────────┘
+│  │ Qwen-Plus     │  │
+│  │ (阿里百炼)     │  │  ┌─────────────────────────────────────────────┐
+│  │ 分类/提取     │  │  │           ServiceFactory                     │
+│  └───────────────┘  │  │  ┌───────────────┐ ┌───────────────┐        │
+└─────────────────────┘  │  │ getDB()       │ │ getLLM()      │        │
+                         │  │ getEmbedding() │ │ (cloud-only) │        │
+                         │  └───────────────┘ └───────────────┘        │
+                         │  └─────────────────────────────────────────────┘
 ```
 
 ### 数据流程
@@ -213,7 +221,8 @@ importance = base_importance * exp(-λ * days)
 |------|------|----------|
 | Node.js | ≥18 | `brew install node` |
 | SurrealDB | ≥2.0 | `brew install surrealdb` |
-| oMLX | 最新 | `brew install omlx` 或从源码编译 |
+| Embedding | 本地/云端 | 本地运行 BGE-M3 或使用云端 Embedding |
+| Cloud LLM | - | 阿里百炼 / OpenAI / DeepSeek |
 
 ### 安装步骤
 
@@ -232,8 +241,8 @@ npm run build
 # 4. 启动 SurrealDB
 surreal start --bind 0.0.0.0:8001 memory.db
 
-# 5. 启动 oMLX (Embedding + LLM)
-omlx serve --port 8000
+# 5. 启动 Embedding 服务 (可选，本地)
+# 或使用云端 Embedding API
 
 # 6. 配置 OpenClaw (见下方)
 ```
@@ -291,9 +300,10 @@ Total memories: 0
             "apiKey": "your-api-key"
           },
           "llm": {
-            "localEndpoint": "http://localhost:8000",
-            "localApiKey": "your-api-key",
-            "localModel": "gemma-4-e4b-it-8bit"
+            "cloudProvider": "bailian",
+            "cloudBaseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "cloudApiKey": "sk-xxx",
+            "cloudModel": "qwen-plus"
           },
           "documentImport": {
             "watchDir": "~/.openclaw/documents",
@@ -327,18 +337,20 @@ Total memories: 0
 | `model` | string | `bge-m3-mlx-fp16` | 模型名称 |
 | `apiKey` | string | - | API Key（可选） |
 
-#### llm 配置
+#### llm 配置 (Cloud-only)
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `localEndpoint` | string | `http://localhost:8000` | 本地 LLM 地址 |
-| `localApiKey` | string | - | API Key |
-| `localModel` | string | `gemma-4-e4b-it-8bit` | 模型名称 |
-| `cloudEnabled` | boolean | false | 是否启用云端 LLM |
-| `cloudProvider` | string | - | 云服务商: `bailian`/`openai` |
-| `cloudBaseUrl` | string | - | 云端 API 地址 |
-| `cloudApiKey` | string | - | 云端 API Key |
-| `cloudModel` | string | - | 云端模型名称 |
+| `cloudProvider` | string | `bailian` | 云服务商: `bailian`/`openai`/`deepseek`/`custom` |
+| `cloudBaseUrl` | string | - | 云端 API 地址（必填） |
+| `cloudApiKey` | string | - | 云端 API Key（必填） |
+| `cloudModel` | string | `qwen-plus` | 云端模型名称 |
+
+支持的 Cloud Provider:
+- **bailian** - 阿里百炼 (DashScope)
+- **openai** - OpenAI API
+- **deepseek** - DeepSeek API
+- **custom** - 任意 OpenAI-compatible API
 
 #### documentImport 配置
 
@@ -357,9 +369,12 @@ export SURREALDB_URL=http://localhost:8001
 export EMBEDDING_ENDPOINT=http://localhost:8000/v1/embeddings
 export EMBEDDING_MODEL=bge-m3-mlx-fp16
 export EMBEDDING_API_KEY=your-api-key
-export LLM_ENDPOINT=http://localhost:8000
-export LLM_API_KEY=your-api-key
-export LLM_MODEL=gemma-4-e4b-it-8bit
+
+# Cloud LLM (必填)
+export LLM_PROVIDER=bailian
+export LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+export LLM_API_KEY=sk-xxx
+export LLM_MODEL=qwen-plus
 ```
 
 ---
@@ -824,15 +839,16 @@ node dist/memory-cli.js search "查询" --threshold=0.3
 node dist/memory-cli.js stats
 ```
 
-#### 4. 实体提取不工作
+#### 4. Cloud LLM 连接问题
 
-检查 LLM 服务：
+检查 Cloud LLM 配置：
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+# 测试阿里百炼 API
+curl -X POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer your-api-key" \
+  -H "Authorization: Bearer $LLM_API_KEY" \
   -d '{
-    "model": "gemma-4-e4b-it-8bit",
+    "model": "qwen-plus",
     "messages": [{"role": "user", "content": "Hello"}]
   }'
 ```
@@ -856,9 +872,11 @@ tail -f /usr/local/var/log/surrealdb.log
 | 组件 | 内存 | CPU | 说明 |
 |------|------|-----|------|
 | 插件进程 | ~50MB | 低 | Node.js 进程 |
-| BGE-M3 | ~500MB | 中 | Embedding 推理 |
-| Gemma-4 | ~4GB | 中 | LLM 推理 |
+| BGE-M3 (本地) | ~500MB | 中 | Embedding 推理（可选） |
 | SurrealDB | ~150MB | 低 | 数据库 |
+| Cloud LLM | 0 (云端) | - | 无本地消耗 |
+
+**推荐配置**: 使用云端 LLM，本地只运行 Embedding 服务（可选），显著降低内存占用。
 
 ### 优化建议
 
@@ -986,4 +1004,5 @@ MIT License
 - [OpenClaw](https://github.com/openclaw/openclaw) - AI 助手框架
 - [SurrealDB](https://surrealdb.com/) - 原生图数据库
 - [BGE-M3](https://huggingface.co/BAAI/bge-m3) - 多语言 Embedding 模型
-- [oMLX](https://github.com/ml-explore/mlx) - Apple Silicon 机器学习框架
+- [阿里百炼](https://dashscope.aliyuncs.com) - 云端 LLM 服务
+- [ServiceFactory Pattern](./ARCHITECTURE.md) - 统一服务管理架构

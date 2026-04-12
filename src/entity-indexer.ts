@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Database query returns have flexible SurrealDB formats */
 /**
  * Entity Indexer - Graph Explosion Protection
  *
@@ -12,11 +13,11 @@
  */
 
 import { SurrealDatabase, GRAPH_PROTECTION, ENTITY_RELATION_TABLE, MEMORY_TABLE, ENTITY_TABLE } from './surrealdb-client.js';
-import { EntityExtractor, ExtractedEntity } from './entity-extractor.js';
+import { EntityExtractor } from './entity-extractor.js';
 import { extractContextWindow, diverseSample } from './context-window.js';
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
 import { LLMClient } from './llm-client.js';
-import { getDB, getLLM, ServiceFactory } from './service-factory.js';
+import { getLLM, ServiceFactory } from './service-factory.js';
 import * as os from 'os';
 
 /**
@@ -169,17 +170,19 @@ export class EntityIndexer {
         this.entityMentions.set(entityId, []);
       }
 
-      const mentions = this.entityMentions.get(entityId)!;
-      mentions.push({
-        entityId,
-        memoryId,
-        timestamp: Date.now(),
-      });
+      const mentions = this.entityMentions.get(entityId);
+      if (mentions) {
+        mentions.push({
+          entityId,
+          memoryId,
+          timestamp: Date.now(),
+        });
 
-      // Keep only recent mentions (last 24 hours) to prevent memory bloat
-      const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
-      const recentMentions = mentions.filter(m => m.timestamp > oneDayAgo);
-      this.entityMentions.set(entityId, recentMentions);
+        // Keep only recent mentions (last 24 hours) to prevent memory bloat
+        const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+        const recentMentions = mentions.filter(m => m.timestamp > oneDayAgo);
+        this.entityMentions.set(entityId, recentMentions);
+      }
     }
   }
 
@@ -209,7 +212,7 @@ export class EntityIndexer {
         const dbCount = data.length > 0 ? (data[0]?.mention_count || 0) : 0;
         // Return max of cache and DB (DB has persistent count, cache has recent activity)
         return Math.max(cacheCount, dbCount);
-      } catch (e) {
+      } catch (_e) {
         // Entity may not exist yet, use cache count
         return cacheCount;
       }
@@ -269,7 +272,7 @@ export class EntityIndexer {
       }
 
       return false;
-    } catch (error: any) {
+    } catch (_error: unknown) {
       return false;
     }
   }
@@ -400,7 +403,7 @@ export class EntityIndexer {
       }
 
       return mergedCount;
-    } catch (error: any) {
+    } catch (_error: unknown) {
       return 0;
     }
   }
@@ -415,7 +418,7 @@ export class EntityIndexer {
       // Update memory_entity edges to point to new entity
       const sql = `UPDATE memory_entity SET entity = '${toEntityId}' WHERE entity = '${fromEntityId}'`;
       await this.db.query(sql);
-    } catch (error: any) {
+    } catch (_error: unknown) {
       // Silently ignore
     }
   }
@@ -536,16 +539,18 @@ export class EntityIndexer {
 
     try {
       while (this.queue.length > 0) {
-        const item = this.queue.shift()!;
+        const item = this.queue.shift();
 
-        try {
-          await this.processItem(item);
-          this.totalIndexed++;
-        } catch (error: any) {
-          // Retry logic
-          if (item.retryCount < 3) {
-            item.retryCount++;
-            this.queue.push(item);
+        if (item) {
+          try {
+            await this.processItem(item);
+            this.totalIndexed++;
+          } catch (_error: unknown) {
+            // Retry logic
+            if (item.retryCount < 3) {
+              item.retryCount++;
+              this.queue.push(item);
+            }
           }
         }
 
@@ -628,7 +633,7 @@ export class EntityIndexer {
   private startBackgroundProcessor(): void {
     this.backgroundInterval = setInterval(async () => {
       if (!this.processing && this.queue.length > 0) {
-        this.processQueue().catch(console.error);
+        this.processQueue().catch(err => logError(`[EntityIndexer] Background processor error: ${err}`));
       }
     }, this.currentIndexIntervalMs);
     this.backgroundInterval.unref();
@@ -643,7 +648,7 @@ export class EntityIndexer {
     const pruneIntervalMs = this.pruneIntervalDays * 24 * 60 * 60 * 1000;
 
     this.ttlPruningInterval = setInterval(async () => {
-      await this.runTTLPruning().catch(console.error);
+      await this.runTTLPruning().catch(err => logError(`[EntityIndexer] TTL pruning error: ${err}`));
     }, pruneIntervalMs);
     this.ttlPruningInterval.unref();
 
@@ -660,7 +665,7 @@ export class EntityIndexer {
     const cooccurrenceIntervalMs = 1 * 24 * 60 * 60 * 1000;  // 1 day
 
     this.cooccurrenceInterval = setInterval(async () => {
-      await this.buildEntityCooccurrence().catch(console.error);
+      await this.buildEntityCooccurrence().catch(err => logError(`[EntityIndexer] Co-occurrence build error: ${err}`));
     }, cooccurrenceIntervalMs);
     this.cooccurrenceInterval.unref();
 
@@ -724,7 +729,7 @@ export class EntityIndexer {
 
     try {
       return await this.db.searchByMultiDegree(seedMemoryId, degree, minWeight, limit);
-    } catch (error: any) {
+    } catch (_error: unknown) {
       return [];
     }
   }
@@ -739,7 +744,7 @@ export class EntityIndexer {
 
     try {
       return await this.db.getRelationStats();
-    } catch (error: any) {
+    } catch (_error: unknown) {
       return { total_relations: 0, avg_weight: 0, max_weight: 0, min_weight: 0, by_type: {} };
     }
   }
@@ -841,7 +846,7 @@ export class EntityIndexer {
         return;
       }
 
-      await this.classifyEntityRelations().catch(console.error);
+      await this.classifyEntityRelations().catch(err => logError(`[EntityIndexer] Relation classification error: ${err}`));
     };
 
     this.relationClassifierInterval = setInterval(checkLoadAndRun, this.relationClassifierIntervalMs);
@@ -996,7 +1001,7 @@ export class EntityIndexer {
 
       return snippets.slice(0, 3);
 
-    } catch (error: any) {
+    } catch (_error: unknown) {
       return [];
     }
   }
@@ -1087,9 +1092,9 @@ JSON:`;
 
       let relationType = parsed.relation_type || 'related_to';
       let confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
-      let reasoning = parsed.reasoning || '';
-      let reverseDirection = parsed.reverse_direction === true;
-      let source = parsed.source;  // New: source entity name
+      const reasoning = parsed.reasoning || '';
+      const reverseDirection = parsed.reverse_direction === true;
+      const source = parsed.source;  // New: source entity name
 
       // Validate relation type
       if (!VALID_TYPES.includes(relationType)) {

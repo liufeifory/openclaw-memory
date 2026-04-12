@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Database query returns have flexible SurrealDB formats */
 /**
  * Document Watcher - monitors a directory for new documents and auto-imports them.
  * Uses document import state tracking to avoid re-processing.
@@ -242,7 +243,7 @@ export class DocumentWatcher {
             // Update state to 'extracting_entities'
             await this.db.upsertDocumentImportState(filePath, { status: 'extracting_entities' });
             // Get document memories
-            const sessionId = `doc:${filePath}`;
+            const _sessionId = `doc:${filePath}`;
             // Note: Entity extraction is handled by EntityIndexer automatically
             // when new memories are stored. We just mark it as complete here.
             // For now, mark entities as extracted (EntityIndexer handles actual extraction)

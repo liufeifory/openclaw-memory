@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- Database query returns have flexible SurrealDB formats */
 /**
  * Memory store using SurrealDB.
  */
@@ -52,7 +53,7 @@ export class MemoryStore {
      */
     async storeEpisodic(sessionId, content, importance = 0.5) {
         const dedupeResult = await this.checkDuplicateInSession(sessionId, content);
-        if (dedupeResult.isDuplicate) {
+        if (dedupeResult.isDuplicate && dedupeResult.similarMemoryId) {
             logInfo(`[MemoryStore] Skipping duplicate episodic memory in session ${sessionId} (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
             return dedupeResult.similarMemoryId;
         }
@@ -105,7 +106,7 @@ export class MemoryStore {
      */
     async storeSemantic(content, importance = 0.7, sessionId) {
         const dedupeResult = await this.checkDuplicate(content);
-        if (dedupeResult.isDuplicate) {
+        if (dedupeResult.isDuplicate && dedupeResult.similarMemoryId) {
             logInfo(`[MemoryStore] Skipping duplicate semantic memory (similarity: ${dedupeResult.similarity.toFixed(3)}, existing ID: ${dedupeResult.similarMemoryId})`);
             return dedupeResult.similarMemoryId;
         }

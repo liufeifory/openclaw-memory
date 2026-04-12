@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- LLM API response types vary */
 /**
  * Semantic Clusterer for Memory Merging
  *
@@ -121,7 +122,7 @@ export class SemanticClusterer {
      * Merge a cluster of similar memories into one permanent fact.
      * Extracts entities first to ensure preservation.
      */
-    async mergeCluster(cluster, existingMergedMemories = []) {
+    async mergeCluster(cluster, _existingMergedMemories = []) {
         if (cluster.memories.length < 2) {
             return {
                 mergedContent: cluster.memories[0] || null,
@@ -234,7 +235,7 @@ export class SemanticClusterer {
      * Limits to top 100 memories to avoid O(N²) performance issues.
      */
     async runIdleClustering(getMemories, onClusterMerged, options) {
-        const timeoutMs = options?.timeoutMs ?? 120000; // 2 minutes default
+        const _timeoutMs = options?.timeoutMs ?? 120000; // Unused - timeout handled by caller
         const maxMemories = options?.maxMemories ?? 100; // Limit to top 100
         try {
             const allMemories = await getMemories();

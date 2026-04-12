@@ -1,6 +1,10 @@
 /**
  * SurrealDB Client wrapper - SurrealDB 3.x compatible via HTTP API
+ *
+ * Note: SurrealDB query returns have flexible types, so `any` is used for
+ * database result handling. This is intentional and safe within this module.
  */
+/* eslint-disable @typescript-eslint/no-explicit-any -- SurrealDB query returns have flexible types */
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
 // HTTP API client for SurrealDB 3.x
 class SurrealHTTPClient {
@@ -157,7 +161,8 @@ export class SurrealDatabase {
         }
         catch (error) {
             // Connection dead, reconnect
-            logInfo(`[SurrealDB] Connection lost, reconnecting... (${error.message})`);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            logInfo(`[SurrealDB] Connection lost, reconnecting... (${errorMessage})`);
             this.client = null;
             this.initialized = false;
             await this.initialize();
@@ -196,7 +201,8 @@ export class SurrealDatabase {
         }
         catch (error) {
             result.success = false;
-            logError(`SurrealDB initialization failed: ${error.message}`);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            logError(`SurrealDB initialization failed: ${errorMessage}`);
             throw error;
         }
         return result;
@@ -227,7 +233,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`Vector index creation failed: ${error.message}`);
+            logWarn(`Vector index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS type_idx ON TABLE ${MEMORY_TABLE} FIELDS type;`);
@@ -235,7 +241,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`Type index creation failed: ${error.message}`);
+            logWarn(`Type index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS session_idx ON TABLE ${MEMORY_TABLE} FIELDS session_id;`);
@@ -243,7 +249,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`Session index creation failed: ${error.message}`);
+            logWarn(`Session index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS is_indexed_idx ON TABLE ${MEMORY_TABLE} FIELDS is_indexed;`);
@@ -251,7 +257,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`is_indexed index creation failed: ${error.message}`);
+            logWarn(`is_indexed index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         await this.query(`
       DEFINE TABLE IF NOT EXISTS ${ENTITY_TABLE} SCHEMAFULL;
@@ -277,7 +283,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] Entity name index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] Entity name index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS entity_normalized_idx ON TABLE ${ENTITY_TABLE} FIELDS normalized_name;`);
@@ -285,7 +291,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] Entity normalized_name index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] Entity normalized_name index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS entity_last_mentioned_idx ON TABLE ${ENTITY_TABLE} FIELDS last_mentioned_at;`);
@@ -293,7 +299,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] Entity last_mentioned_at index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] Entity last_mentioned_at index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS entity_first_seen_idx ON TABLE ${ENTITY_TABLE} FIELDS first_seen_at;`);
@@ -301,7 +307,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] Entity first_seen_at index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] Entity first_seen_at index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         await this.query(`
       DEFINE TABLE IF NOT EXISTS ${MEMORY_ENTITY_TABLE} SCHEMAFULL;
@@ -318,7 +324,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] memory_entity memory index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] memory_entity memory index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS memory_entity_entity_idx ON TABLE ${MEMORY_ENTITY_TABLE} FIELDS entity;`);
@@ -326,7 +332,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] memory_entity entity index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] memory_entity entity index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         await this.query(`
       DEFINE TABLE IF NOT EXISTS ${RELATES_TABLE} SCHEMAFULL;
@@ -356,7 +362,7 @@ export class SurrealDatabase {
             logInfo('Entity relation in index created');
             migrated = true;
         }
-        catch (error) {
+        catch {
             // Silently ignore
         }
         try {
@@ -364,7 +370,7 @@ export class SurrealDatabase {
             logInfo('Entity relation out index created');
             migrated = true;
         }
-        catch (error) {
+        catch {
             // Silently ignore
         }
         try {
@@ -373,7 +379,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] Entity relation weight index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] Entity relation weight index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         // ==================== Stage 3: Topic Layer Schema ====================
         // Topic table
@@ -394,7 +400,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] Topic name index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] Topic name index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS topic_entity_idx ON TABLE ${TOPIC_TABLE} FIELDS parent_entity_id;`);
@@ -402,7 +408,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] Topic parent_entity_id index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] Topic parent_entity_id index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS topic_last_accessed_idx ON TABLE ${TOPIC_TABLE} FIELDS last_accessed_at;`);
@@ -410,7 +416,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] Topic last_accessed_at index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] Topic last_accessed_at index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         // topic_memory edge table
         await this.query(`
@@ -427,7 +433,7 @@ export class SurrealDatabase {
             logInfo('topic_memory in index created');
             migrated = true;
         }
-        catch (error) {
+        catch {
             // Silently ignore
         }
         try {
@@ -435,7 +441,7 @@ export class SurrealDatabase {
             logInfo('topic_memory out index created');
             migrated = true;
         }
-        catch (error) {
+        catch {
             // Silently ignore
         }
         // entity_alias table
@@ -455,7 +461,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] entity_alias name index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] entity_alias name index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS alias_entity_idx ON TABLE ${ENTITY_ALIAS_TABLE} FIELDS entity_id;`);
@@ -463,7 +469,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] entity_alias entity_id index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] entity_alias entity_id index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS alias_unique_idx ON TABLE ${ENTITY_ALIAS_TABLE} FIELDS alias UNIQUE;`);
@@ -471,7 +477,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] entity_alias unique index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] entity_alias unique index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         // Add canonical_id field to entity table (if not exists)
         await this.query(`
@@ -500,7 +506,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] Document state file_path index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] Document state file_path index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         try {
             await this.query(`DEFINE INDEX IF NOT EXISTS doc_state_status_idx ON TABLE ${DOCUMENT_IMPORT_STATE_TABLE} FIELDS status;`);
@@ -508,7 +514,7 @@ export class SurrealDatabase {
             migrated = true;
         }
         catch (error) {
-            logWarn(`[SurrealDB] Document state status index creation failed: ${error.message}`);
+            logWarn(`[SurrealDB] Document state status index creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         await this.storeSchemaVersion();
         return migrated;
@@ -524,22 +530,25 @@ export class SurrealDatabase {
         // Ensure we have a valid connection
         await this.ensureConnected();
         try {
-            const result = await this.client.query(sql, params);
+            const result = await this.client?.query(sql, params);
             return result;
         }
         catch (error) {
             // On connection lost, try to reconnect
-            const errorMsg = error.message?.toLowerCase() || '';
+            const errorMessage = error instanceof Error ? error.message : '';
+            const errorMsg = errorMessage.toLowerCase();
             if (errorMsg.includes('connection') || errorMsg.includes('closed') ||
                 errorMsg.includes('timeout') || errorMsg.includes('econnreset') ||
                 errorMsg.includes('fetch') || errorMsg.includes('econnrefused') ||
                 errorMsg.includes('socket') || errorMsg.includes('network') ||
                 errorMsg.includes('aborted') || errorMsg.includes('disconnect')) {
                 logInfo('[SurrealDB] Connection error detected, reconnecting...');
-                this.client = null;
                 this.initialized = false;
                 await this.ensureConnected();
-                // Retry the query once
+                // Retry the query once - client is reinitialized after ensureConnected
+                if (!this.client) {
+                    throw new Error('[SurrealDB] Failed to reconnect');
+                }
                 return this.client.query(sql, params);
             }
             throw error;
@@ -552,8 +561,9 @@ export class SurrealDatabase {
                 return await operation();
             }
             catch (error) {
-                lastError = error;
-                logError(`[SurrealDB] ${operationName} failed (attempt ${attempt}/${this.maxRetries}): ${error.message}`);
+                lastError = error instanceof Error ? error : null;
+                const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                logError(`[SurrealDB] ${operationName} failed (attempt ${attempt}/${this.maxRetries}): ${errorMessage}`);
                 if (attempt < this.maxRetries) {
                     const delay = Math.min(Math.pow(2, attempt - 1) * this.baseDelayMs, this.maxDelayMs);
                     await new Promise(resolve => setTimeout(resolve, delay));
@@ -582,7 +592,7 @@ export class SurrealDatabase {
                 }
             }
             catch (error) {
-                logWarn(`[SurrealDB] Heartbeat error: ${error.message}`);
+                logWarn(`[SurrealDB] Heartbeat error: ${error instanceof Error ? error.message : 'Unknown error'}`);
                 this.initialized = false;
             }
         }, 30000); // Check every 30 seconds
@@ -608,7 +618,7 @@ export class SurrealDatabase {
         this.initialized = false;
         logInfo('[SurrealDB] Disposed');
     }
-    async upsert(id, embedding, payload, options) {
+    async upsert(id, embedding, payload, _options) {
         // Ensure we have a valid connection
         await this.ensureConnected();
         const recordId = `${MEMORY_TABLE}:${id}`;
@@ -648,7 +658,7 @@ export class SurrealDatabase {
             return { success: true };
         }
         catch (error) {
-            return { success: false, reason: error.message };
+            return { success: false, reason: error instanceof Error ? error.message : 'Unknown error' };
         }
     }
     async search(embedding, limit = 10, filter) {
@@ -682,20 +692,28 @@ export class SurrealDatabase {
                 // SurrealDB 3.x format: [[{id, content, ...}]]
                 data = result[0] || [];
             }
-            else if (result[0]?.result) {
-                // Legacy format: [{result: [{id, content, ...}]}]
-                data = result[0].result || [];
+            else {
+                const firstResult = result[0];
+                if (firstResult?.result) {
+                    // Legacy format: [{result: [{id, content, ...}]}]
+                    data = firstResult.result || [];
+                }
             }
         }
-        else if (result?.result) {
-            // Fallback for object format
-            data = result.result || [];
+        else {
+            const resultObj = result;
+            if (resultObj?.result) {
+                // Fallback for object format
+                data = resultObj.result || [];
+            }
         }
-        return data.map((r) => ({
-            id: this.extractIdFromRecord(r),
-            score: r.similarity || 0,
-            payload: this.toPayload(r),
-        }));
+        return data.map((r) => {
+            return {
+                id: this.extractIdFromRecord(r),
+                score: r.similarity || 0,
+                payload: this.toPayload(r),
+            };
+        });
     }
     async searchHybrid(query, embedding, limit = 10, filter, bm25Weight = 0.5) {
         if (!this.client) {
@@ -736,15 +754,20 @@ export class SurrealDatabase {
             if (Array.isArray(result[0])) {
                 data = result[0] || [];
             }
-            else if (result[0]?.result) {
-                data = result[0].result || [];
+            else {
+                const firstElem = result[0];
+                if (firstElem?.result) {
+                    data = firstElem.result || [];
+                }
             }
         }
-        return data.map((r) => ({
-            id: this.extractIdFromRecord(r),
-            score: r.combined_score || r.vector_score || 0,
-            payload: this.toPayload(r),
-        }));
+        return data.map((r) => {
+            return {
+                id: this.extractIdFromRecord(r),
+                score: r.combined_score || r.vector_score || 0,
+                payload: this.toPayload(r),
+            };
+        });
     }
     async get(id) {
         // Ensure we have a valid connection
@@ -758,8 +781,11 @@ export class SurrealDatabase {
                 if (Array.isArray(result[0])) {
                     records = result[0] || [];
                 }
-                else if (result[0]?.result) {
-                    records = result[0].result || [];
+                else {
+                    const firstResult = result[0];
+                    if (firstResult?.result) {
+                        records = firstResult.result || [];
+                    }
                 }
             }
             if (records && records.length > 0) {
@@ -770,11 +796,11 @@ export class SurrealDatabase {
             }
         }
         catch (error) {
-            logError(`[SurrealDB] Get failed: ${error.message}`);
+            logError(`[SurrealDB] Get failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         return null;
     }
-    async updatePayload(id, payload, options) {
+    async updatePayload(id, payload, _options) {
         // Ensure we have a valid connection
         await this.ensureConnected();
         try {
@@ -797,11 +823,11 @@ export class SurrealDatabase {
             return { success: true };
         }
         catch (error) {
-            logError(`[SurrealDB] Update payload failed: ${error.message}`);
-            return { success: false, reason: error.message };
+            logError(`[SurrealDB] Update payload failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            return { success: false, reason: error instanceof Error ? error.message : 'Unknown error' };
         }
     }
-    async scroll(filter, limit = 100, offset) {
+    async scroll(filter, limit = 100, _offset) {
         if (!this.client) {
             throw new Error('[SurrealDB] Client not connected');
         }
@@ -824,14 +850,19 @@ export class SurrealDatabase {
             if (Array.isArray(result[0])) {
                 data = result[0] || [];
             }
-            else if (result[0]?.result) {
-                data = result[0].result || [];
+            else {
+                const firstElem = result[0];
+                if (firstElem?.result) {
+                    data = firstElem.result || [];
+                }
             }
         }
-        return data.map((r) => ({
-            id: this.extractIdFromRecord(r),
-            payload: this.toPayload(r),
-        }));
+        return data.map((r) => {
+            return {
+                id: this.extractIdFromRecord(r),
+                payload: this.toPayload(r),
+            };
+        });
     }
     async searchHierarchical(embedding, filter, reflectionLimit = 3, semanticLimit = 5, episodicLimit = 10) {
         const params = { query_embedding: embedding };
@@ -870,15 +901,20 @@ export class SurrealDatabase {
             if (Array.isArray(result[0])) {
                 data = result[0] || [];
             }
-            else if (result[0]?.result) {
-                data = result[0].result || [];
+            else {
+                const firstElem = result[0];
+                if (firstElem?.result) {
+                    data = firstElem.result || [];
+                }
             }
         }
-        return data.map((r) => ({
-            id: this.extractIdFromRecord(r),
-            score: r.similarity || 0,
-            payload: this.toPayload(r),
-        }));
+        return data.map((r) => {
+            return {
+                id: this.extractIdFromRecord(r),
+                score: r.similarity || 0,
+                payload: this.toPayload(r),
+            };
+        });
     }
     async deleteMemories(ids) {
         if (!this.client) {
@@ -899,8 +935,11 @@ export class SurrealDatabase {
                 if (Array.isArray(result[0]) && result[0].length > 0) {
                     return result[0][0]?.count || 0;
                 }
-                else if (result[0]?.result?.[0]) {
-                    return result[0].result[0].count || 0;
+                else {
+                    const firstResult = result[0];
+                    if (firstResult?.result?.[0]) {
+                        return firstResult.result[0]?.count || 0;
+                    }
                 }
             }
             return 0;
@@ -932,8 +971,11 @@ export class SurrealDatabase {
                 if (Array.isArray(result[0])) {
                     data = result[0] || [];
                 }
-                else if (result[0]?.result) {
-                    data = result[0].result || [];
+                else {
+                    const firstResult = result[0];
+                    if (firstResult?.result) {
+                        data = firstResult.result || [];
+                    }
                 }
             }
             const counts = {
@@ -942,8 +984,9 @@ export class SurrealDatabase {
                 reflection: 0,
             };
             for (const row of data) {
-                const type = row.type || 'episodic';
-                const count = row.count || 0;
+                const r = row;
+                const type = r.type || 'episodic';
+                const count = r.count || 0;
                 counts[type] = count;
             }
             return {
@@ -968,8 +1011,11 @@ export class SurrealDatabase {
                 if (Array.isArray(result[0]) && result[0].length > 0) {
                     return result[0][0]?.schema_version || 0;
                 }
-                else if (result[0]?.result?.[0]) {
-                    return result[0].result[0].schema_version || 0;
+                else {
+                    const firstResult = result[0];
+                    if (firstResult?.result?.[0]) {
+                        return firstResult.result[0]?.schema_version || 0;
+                    }
                 }
             }
             return 0;
@@ -989,7 +1035,7 @@ export class SurrealDatabase {
       `);
         }
         catch (error) {
-            logError(`[SurrealDB] Failed to store schema version: ${error.message}`);
+            logError(`[SurrealDB] Failed to store schema version: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
     }
     extractIdFromRecord(record) {
@@ -1067,8 +1113,11 @@ export class SurrealDatabase {
             if (Array.isArray(findResult[0])) {
                 data = findResult[0] || [];
             }
-            else if (findResult[0]?.result) {
-                data = findResult[0].result || [];
+            else {
+                const firstResult = findResult[0];
+                if (firstResult?.result) {
+                    data = firstResult.result || [];
+                }
             }
         }
         if (data && data.length > 0) {
@@ -1113,7 +1162,7 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Failed to get entity ID after create');
         }
         catch (error) {
-            logError(`[SurrealDB] upsertEntity failed: ${error.message}`);
+            logError(`[SurrealDB] upsertEntity failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
     }
@@ -1195,7 +1244,7 @@ export class SurrealDatabase {
             }
         }
         catch (error) {
-            logError(`[SurrealDB] linkMemoryEntity failed: ${error.message}`);
+            logError(`[SurrealDB] linkMemoryEntity failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
     }
@@ -1244,7 +1293,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            logError(`[SurrealDB] searchByEntity failed: ${error.message}`);
+            logError(`[SurrealDB] searchByEntity failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
     }
@@ -1295,7 +1344,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            logError(`[SurrealDB] searchByAssociation failed: ${error.message}`);
+            logError(`[SurrealDB] searchByAssociation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
     }
@@ -1382,7 +1431,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            logError(`[SurrealDB] getMemoriesByEntity failed: ${error.message}`);
+            logError(`[SurrealDB] getMemoriesByEntity failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return [];
         }
     }
@@ -1441,7 +1490,7 @@ export class SurrealDatabase {
             };
         }
         catch (error) {
-            logError(`[SurrealDB] getGlobalEntityStats failed: ${error.message}`);
+            logError(`[SurrealDB] getGlobalEntityStats failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return { total_entities: 0, by_type: {}, total_links: 0 };
         }
     }
@@ -1479,7 +1528,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            logError(`[SurrealDB] loadKnownEntities failed: ${error.message}`);
+            logError(`[SurrealDB] loadKnownEntities failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return [];
         }
     }
@@ -1531,7 +1580,7 @@ export class SurrealDatabase {
             throw new Error('[SurrealDB] Failed to get created topic ID');
         }
         catch (error) {
-            logError(`[SurrealDB] upsertTopic failed: ${error.message}`);
+            logError(`[SurrealDB] upsertTopic failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
     }
@@ -1553,7 +1602,7 @@ export class SurrealDatabase {
             return null;
         }
         catch (error) {
-            logError(`[SurrealDB] getTopicById failed: ${error.message}`);
+            logError(`[SurrealDB] getTopicById failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return null;
         }
     }
@@ -1580,7 +1629,7 @@ export class SurrealDatabase {
             return data || [];
         }
         catch (error) {
-            logError(`[SurrealDB] getTopicsByEntity failed: ${error.message}`);
+            logError(`[SurrealDB] getTopicsByEntity failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return [];
         }
     }
@@ -1601,7 +1650,7 @@ export class SurrealDatabase {
             logInfo(`[SurrealDB] Deleted topic ${topicId}`);
         }
         catch (error) {
-            logError(`[SurrealDB] deleteTopic failed: ${error.message}`);
+            logError(`[SurrealDB] deleteTopic failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
     }
@@ -1646,7 +1695,7 @@ export class SurrealDatabase {
             logInfo(`[SurrealDB] Linked topic ${topicId} to memory ${memoryId}`);
         }
         catch (error) {
-            logError(`[SurrealDB] linkTopicMemory failed: ${error.message}`);
+            logError(`[SurrealDB] linkTopicMemory failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
     }
@@ -1688,7 +1737,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            logError(`[SurrealDB] getMemoriesByTopic failed: ${error.message}`);
+            logError(`[SurrealDB] getMemoriesByTopic failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return [];
         }
     }
@@ -1722,7 +1771,7 @@ export class SurrealDatabase {
             return null;
         }
         catch (error) {
-            logError(`[SurrealDB] getMemoryPayload failed: ${error.message}`);
+            logError(`[SurrealDB] getMemoryPayload failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return null;
         }
     }
@@ -1776,7 +1825,7 @@ export class SurrealDatabase {
             logInfo(`[SurrealDB] Added alias "${alias}" -> ${recordId}`);
         }
         catch (error) {
-            logError(`[SurrealDB] addAlias failed: ${error.message}`);
+            logError(`[SurrealDB] addAlias failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
     }
@@ -1833,7 +1882,7 @@ export class SurrealDatabase {
             return null;
         }
         catch (error) {
-            logError(`[SurrealDB] resolveAlias failed: ${error.message}`);
+            logError(`[SurrealDB] resolveAlias failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return null;
         }
     }
@@ -1860,7 +1909,7 @@ export class SurrealDatabase {
             return (data || []).map((row) => row.alias);
         }
         catch (error) {
-            logError(`[SurrealDB] getAliasesByEntity failed: ${error.message}`);
+            logError(`[SurrealDB] getAliasesByEntity failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return [];
         }
     }
@@ -1892,7 +1941,7 @@ export class SurrealDatabase {
                 try {
                     await this.linkMemoryEntity(memoryId, Number(canonicalId), 0.9);
                 }
-                catch (e) {
+                catch (_e) {
                     // Ignore duplicate edge errors
                 }
             }
@@ -1917,7 +1966,7 @@ export class SurrealDatabase {
             }
         }
         catch (error) {
-            logError(`[SurrealDB] mergeEntities failed: ${error.message}`);
+            logError(`[SurrealDB] mergeEntities failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
     }
@@ -1946,7 +1995,7 @@ export class SurrealDatabase {
             logInfo(`[SurrealDB] Froze entity:${numericId} - ${reason || 'Super Node threshold exceeded'}`);
         }
         catch (error) {
-            logError(`[SurrealDB] freezeEntity failed: ${error.message}`);
+            logError(`[SurrealDB] freezeEntity failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
     }
@@ -1973,7 +2022,7 @@ export class SurrealDatabase {
             return data && data.length > 0 ? data[0] : false;
         }
         catch (error) {
-            logError(`[SurrealDB] isEntityFrozen failed: ${error.message}`);
+            logError(`[SurrealDB] isEntityFrozen failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return false;
         }
     }
@@ -2016,7 +2065,7 @@ export class SurrealDatabase {
             };
         }
         catch (error) {
-            logError(`[SurrealDB] getEntityStats failed: ${error.message}`);
+            logError(`[SurrealDB] getEntityStats failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return { memory_count: 0, topic_count: 0 };
         }
     }
@@ -2083,9 +2132,11 @@ export class SurrealDatabase {
                         cooccurrenceMap.set(pairKey, { count: 0, memoryIds: [] });
                     }
                     const pairData = cooccurrenceMap.get(pairKey);
-                    pairData.count++;
-                    if (!pairData.memoryIds.includes(memoryId)) {
-                        pairData.memoryIds.push(memoryId);
+                    if (pairData) {
+                        pairData.count++;
+                        if (!pairData.memoryIds.includes(memoryId)) {
+                            pairData.memoryIds.push(memoryId);
+                        }
                     }
                 }
             }
@@ -2258,7 +2309,7 @@ export class SurrealDatabase {
             }));
         }
         catch (error) {
-            logError(`[SurrealDB] ${degree}-degree search failed: ${error.message}`);
+            logError(`[SurrealDB] ${degree}-degree search failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return [];
         }
     }
@@ -2362,7 +2413,7 @@ export class SurrealDatabase {
             };
         }
         catch (error) {
-            logError(`[SurrealDB] getRelationStats failed: ${error.message}`);
+            logError(`[SurrealDB] getRelationStats failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return { total_relations: 0, avg_weight: 0, max_weight: 0, min_weight: 0, by_type: {} };
         }
     }
@@ -2387,7 +2438,7 @@ export class SurrealDatabase {
             return null;
         }
         catch (error) {
-            logError(`[SurrealDB] getDocumentImportState failed: ${error.message}`);
+            logError(`[SurrealDB] getDocumentImportState failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return null;
         }
     }
@@ -2436,7 +2487,7 @@ export class SurrealDatabase {
             }
         }
         catch (error) {
-            logError(`[SurrealDB] upsertDocumentImportState failed: ${error.message}`);
+            logError(`[SurrealDB] upsertDocumentImportState failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             throw error;
         }
     }
@@ -2463,7 +2514,7 @@ export class SurrealDatabase {
             return data || [];
         }
         catch (error) {
-            logError(`[SurrealDB] getPendingDocuments failed: ${error.message}`);
+            logError(`[SurrealDB] getPendingDocuments failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
             return [];
         }
     }

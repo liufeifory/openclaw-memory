@@ -8,7 +8,6 @@
  * - Alerts for over-compression (ratio < 0.1) and under-compression (ratio > 0.9)
  */
 import { LLMLimiter } from './llm-limiter.js';
-import { LLMClient } from './llm-client.js';
 export interface SummaryResult {
     summary: string;
     isEmpty: boolean;
@@ -19,7 +18,7 @@ export declare class Summarizer {
     private client;
     private limiter;
     private stats;
-    constructor(client: LLMClient, limiter?: LLMLimiter);
+    constructor(limiter?: LLMLimiter);
     /**
      * Get summarizer statistics.
      */

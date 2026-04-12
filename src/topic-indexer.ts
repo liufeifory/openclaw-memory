@@ -9,10 +9,11 @@
  */
 
 import { logInfo, logWarn, logError } from './maintenance-logger.js';
-import { SurrealDatabase } from './surrealdb-client.js';
-import { EmbeddingService } from './embedding.js';
-import { LLMClient } from './llm-client.js';
+import type { SurrealDatabase } from './surrealdb-client.js';
+import type { EmbeddingService } from './embedding.js';
+import type { LLMClient } from './llm-client.js';
 import { LLMLimiter } from './llm-limiter.js';
+import { ServiceFactory } from './service-factory.js';
 
 interface TopicTask {
   entityId: string;
@@ -33,7 +34,7 @@ interface TopicDefinition {
   memoryIds: number[];
 }
 
-const TOPIC_SOFT_LIMIT = 400;
+const _TOPIC_SOFT_LIMIT = 400;
 const IDLE_THRESHOLD_MS = 5000;  // 5 seconds of no activity
 const NOISE_THRESHOLD = 0.5;  // Cosine similarity threshold for noise
 
@@ -58,32 +59,22 @@ JSON:`;
 export class TopicIndexer {
   private queue: TopicTask[] = [];
   private processing = false;
-  private db: SurrealDatabase | null = null;
-  private embedding: EmbeddingService | null = null;
-  private llmClient: LLMClient | null = null;
-  private limiter: LLMLimiter | null = null;
+  private db: SurrealDatabase;
+  private embedding: EmbeddingService;
+  private llmClient: LLMClient;
+  private limiter: LLMLimiter;
 
   // Statistics
   public totalTopicsCreated = 0;
   public totalMemoriesClustered = 0;
   public totalNoiseArchived = 0;
 
-  constructor(db?: SurrealDatabase, embedding?: EmbeddingService, llmClient?: LLMClient) {
-    this.db = db || null;
-    this.embedding = embedding || null;
-    this.llmClient = llmClient || null;
+  constructor() {
+    // 统一从 ServiceFactory 获取服务（单一入口）
+    this.db = ServiceFactory.getDB();
+    this.embedding = ServiceFactory.getEmbedding();
+    this.llmClient = ServiceFactory.getLLM();
     this.limiter = new LLMLimiter({ maxConcurrent: 2, minInterval: 100 });
-  }
-
-  /**
-   * Initialize with dependencies
-   */
-  init(db: SurrealDatabase, embedding: EmbeddingService, llmClient?: LLMClient): void {
-    this.db = db;
-    this.embedding = embedding;
-    if (llmClient) {
-      this.llmClient = llmClient;
-    }
   }
 
   private scanInterval?: NodeJS.Timeout;
@@ -142,8 +133,9 @@ export class TopicIndexer {
       // This would need a raw SQL query to find entities with high memory_count
       // For now, we rely on the checkSuperNode trigger during linkMemoryEntity
       logInfo('[TopicIndexer] Super Node scan completed (passive mode)');
-    } catch (error: any) {
-      logError(`[TopicIndexer] scanPotentialSuperNodes failed: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logError(`[TopicIndexer] scanPotentialSuperNodes failed: ${errorMessage}`);
     }
   }
 
@@ -157,12 +149,14 @@ export class TopicIndexer {
     logInfo(`[TopicIndexer] Processing queue: ${this.queue.length} tasks pending`);
 
     while (this.queue.length > 0) {
-      const task = this.queue.shift()!;
+      const task = this.queue.shift();
+      if (!task) break;
       try {
         await this.autoCreateTopicsForSuperNode(task.entityId);
         this.totalTopicsCreated++;
-      } catch (error: any) {
-        logError(`[TopicIndexer] Failed for entity ${task.entityId}: ${error.message}`);
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logError(`[TopicIndexer] Failed for entity ${task.entityId}: ${errorMessage}`);
         task.retryCount++;
         if (task.retryCount < 3) {
           this.queue.push(task);
@@ -190,8 +184,9 @@ export class TopicIndexer {
       try {
         await this.autoCreateTopicsForSuperNode(task.entityId);
         this.totalTopicsCreated++;
-      } catch (error: any) {
-        logError(`[TopicIndexer] Idle task failed for ${task.entityId}: ${error.message}`);
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logError(`[TopicIndexer] Idle task failed for ${task.entityId}: ${errorMessage}`);
         task.retryCount++;
         if (task.retryCount < 3) {
           this.queue.unshift(task);  // Put back at front
@@ -246,7 +241,7 @@ export class TopicIndexer {
     }
 
     // 2. Stage 1: Embedding clustering with noise filter
-    const clusteringResult = await this.clusterMemoriesByEmbedding(memories.map((m: any) => m.id));
+    const clusteringResult = await this.clusterMemoriesByEmbedding(memories.map((m: { id: number }) => m.id));
     const clusters = clusteringResult.clusters;
     const noiseIds = clusteringResult.outliers || [];
 
@@ -259,7 +254,7 @@ export class TopicIndexer {
     // 4. Shadow update: atomically switch via transaction
     try {
       // Delete old topic_memory edges for these memories
-      const memoryIds = memories.map((m: any) => m.id);
+      const memoryIds = memories.map((m: { id: number }) => m.id);
       const deleteQueries = memoryIds.map(id => `DELETE FROM topic_memory WHERE out = memory:${id};`).join(' ');
       await this.db.query(`
         BEGIN TRANSACTION;
@@ -287,8 +282,9 @@ export class TopicIndexer {
       }
 
       logInfo(`[TopicIndexer] Shadow update completed for entity ${entityId}`);
-    } catch (error: any) {
-      logError(`[TopicIndexer] Shadow update failed: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logError(`[TopicIndexer] Shadow update failed: ${errorMessage}`);
       throw error;
     }
   }
@@ -320,8 +316,9 @@ export class TopicIndexer {
         } else {
           logWarn(`[TopicIndexer] No embedding found for memory ${memoryId}`);
         }
-      } catch (error: any) {
-        logWarn(`[TopicIndexer] Failed to get embedding for memory ${memoryId}: ${error.message}`);
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logWarn(`[TopicIndexer] Failed to get embedding for memory ${memoryId}: ${errorMessage}`);
       }
     }
 
@@ -404,7 +401,7 @@ export class TopicIndexer {
   /**
    * Stage 2: Name topics using LLM
    */
-  private async nameTopics(clusters: Cluster[], memories: any[]): Promise<TopicDefinition[]> {
+  private async nameTopics(clusters: Cluster[], _memories: { id: number }[]): Promise<TopicDefinition[]> {
     const topics: TopicDefinition[] = [];
 
     if (!this.db) {
@@ -428,8 +425,9 @@ export class TopicIndexer {
           if (payload && payload.content) {
             sampleTexts.push(payload.content.substring(0, 200));  // Limit each memory to 200 chars
           }
-        } catch (error: any) {
-          logWarn(`[TopicIndexer] Failed to get memory ${memoryId}: ${error.message}`);
+        } catch (error: unknown) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          logWarn(`[TopicIndexer] Failed to get memory ${memoryId}: ${errorMessage}`);
         }
       }
 
@@ -448,9 +446,11 @@ export class TopicIndexer {
       const prompt = TOPIC_NAMING_PROMPT.replace('{{memories}}', memoriesText);
 
       try {
-        if (this.llmClient) {
-          const response = await this.limiter!.execute(async () => {
-            return await this.llmClient!.completeJson<{ name: string; description: string }>(
+        if (this.llmClient && this.limiter) {
+          const limiter = this.limiter;
+          const llmClient = this.llmClient;
+          const response = await limiter.execute(async () => {
+            return await llmClient.completeJson<{ name: string; description: string }>(
               prompt,
               'topic-indexer',
               { temperature: 0.3, maxTokens: 200 }
@@ -467,8 +467,9 @@ export class TopicIndexer {
             continue;
           }
         }
-      } catch (error: any) {
-        logError(`[TopicIndexer] LLM naming failed: ${error.message}, using fallback`);
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logError(`[TopicIndexer] LLM naming failed: ${errorMessage}, using fallback`);
       }
 
       // Fallback to placeholder if LLM fails
@@ -542,8 +543,9 @@ export class TopicIndexer {
         logInfo(`[TopicIndexer] No suitable topic found (best: ${bestSimilarity}), mounting to entity`);
         return null;
       }
-    } catch (error: any) {
-      logError(`[TopicIndexer] incrementalMountMemory failed: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logError(`[TopicIndexer] incrementalMountMemory failed: ${errorMessage}`);
       return null;
     }
   }
@@ -567,8 +569,9 @@ export class TopicIndexer {
           if (payload && payload.embedding && payload.embedding.length > 0) {
             embeddings.push(payload.embedding);
           }
-        } catch (error: any) {
-          logWarn(`[TopicIndexer] Failed to get embedding for memory ${mem.id}: ${error.message}`);
+        } catch (error: unknown) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          logWarn(`[TopicIndexer] Failed to get embedding for memory ${mem.id}: ${errorMessage}`);
         }
       }
 
@@ -594,8 +597,9 @@ export class TopicIndexer {
 
       logInfo(`[TopicIndexer] Computed centroid for topic ${topicId} from ${embeddings.length} embeddings`);
       return centroid;
-    } catch (error: any) {
-      logError(`[TopicIndexer] computeTopicCentroid failed: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logError(`[TopicIndexer] computeTopicCentroid failed: ${errorMessage}`);
       return null;
     }
   }

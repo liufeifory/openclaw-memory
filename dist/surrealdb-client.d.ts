@@ -1,5 +1,8 @@
 /**
  * SurrealDB Client wrapper - SurrealDB 3.x compatible via HTTP API
+ *
+ * Note: SurrealDB query returns have flexible types, so `any` is used for
+ * database result handling. This is intentional and safe within this module.
  */
 export interface SurrealConfig {
     url: string;
@@ -7,6 +10,21 @@ export interface SurrealConfig {
     database: string;
     username: string;
     password: string;
+}
+/**
+ * Memory payload structure returned from SurrealDB queries
+ */
+export interface MemoryPayload {
+    type: string;
+    memory_type: string;
+    content: string;
+    summary?: string;
+    importance: number;
+    access_count: number;
+    created_at: string;
+    session_id?: string;
+    is_active: boolean;
+    updated_at: string;
 }
 declare const MEMORY_TABLE = "memory";
 declare const ENTITY_TABLE = "entity";
@@ -84,7 +102,7 @@ export declare class SurrealDatabase {
      * Dispose - clean up resources
      */
     dispose(): void;
-    upsert(id: number, embedding: number[], payload: Record<string, any>, options?: {
+    upsert(id: number, embedding: number[], payload: Record<string, any>, _options?: {
         checkVersion?: boolean;
     }): Promise<{
         success: boolean;
@@ -104,13 +122,13 @@ export declare class SurrealDatabase {
         id: number;
         payload: Record<string, any>;
     } | null>;
-    updatePayload(id: number, payload: Record<string, any>, options?: {
+    updatePayload(id: number, payload: Record<string, any>, _options?: {
         checkVersion?: boolean;
     }): Promise<{
         success: boolean;
         reason?: string;
     }>;
-    scroll(filter?: Record<string, any>, limit?: number, offset?: number): Promise<Array<{
+    scroll(filter?: Record<string, any>, limit?: number, _offset?: number): Promise<Array<{
         id: number;
         payload: Record<string, any>;
     }>>;
